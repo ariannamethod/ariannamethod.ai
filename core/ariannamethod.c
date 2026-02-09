@@ -27,6 +27,7 @@
 #include <stdio.h>   // for sscanf in LAW command parsing
 #include <strings.h> // for strcasecmp
 #include <stddef.h>  // for offsetof
+#include <time.h>    // for real calendar computation
 
 // See ariannamethod.h for struct definitions and pack flags
 
@@ -82,6 +83,73 @@ static int clampi(int x, int a, int b) {
   if (x < a) return a;
   if (x > b) return b;
   return x;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HEBREW-GREGORIAN CALENDAR CONFLICT — real astronomical computation
+//
+// Hebrew lunar year: 354 days. Gregorian solar year: 365.25 days.
+// Annual drift: 11.25 days. Metonic cycle: 19 years = 235 lunar months.
+// 7 leap years per cycle add Adar II (~30 days) to correct drift.
+// Leap years in Metonic cycle (1-indexed): 3, 6, 8, 11, 14, 17, 19.
+//
+// Epoch: 1 Tishrei 5785 = October 3, 2024 (Gregorian).
+// February 29 handled correctly — elapsed seconds via time_t, not calendar math.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#define AM_ANNUAL_DRIFT     11.25f    // days/year (365.25 - 354)
+#define AM_GREGORIAN_YEAR   365.25f   // days
+#define AM_METONIC_YEARS    19        // years per cycle
+#define AM_METONIC_LEAPS    7         // leap years per cycle
+#define AM_MAX_UNCORRECTED  33.0f     // max drift before correction (~3yr × 11.25)
+
+static const int g_metonic_leap_years[7] = {3, 6, 8, 11, 14, 17, 19};
+static time_t g_epoch_t = 0;
+static int g_calendar_manual = 0;  // 0 = real time, 1 = manual override
+
+static void calendar_init(void) {
+    struct tm epoch_tm;
+    memset(&epoch_tm, 0, sizeof(epoch_tm));
+    epoch_tm.tm_year = 2024 - 1900;
+    epoch_tm.tm_mon  = 10 - 1;       // October
+    epoch_tm.tm_mday = 3;
+    epoch_tm.tm_hour = 12;           // noon — avoids DST edge cases
+    g_epoch_t = mktime(&epoch_tm);
+    g_calendar_manual = 0;
+}
+
+static int calendar_days_since_epoch(void) {
+    if (g_epoch_t <= 0) return 0;
+    time_t now = time(NULL);
+    return (int)(difftime(now, g_epoch_t) / 86400.0);
+}
+
+// Cumulative drift accounting for Metonic leap corrections
+// Direct port from pitomadom/calendar_conflict.py
+static float calendar_cumulative_drift(int days) {
+    float years = (float)days / AM_GREGORIAN_YEAR;
+    float base_drift = years * AM_ANNUAL_DRIFT;
+
+    // Full Metonic cycles: 7 leap months × 30 days each
+    int full_cycles = (int)(years / AM_METONIC_YEARS);
+    float corrections = (float)(full_cycles * AM_METONIC_LEAPS) * 30.0f;
+
+    // Partial cycle: count leap years already passed
+    float partial = fmodf(years, (float)AM_METONIC_YEARS);
+    int year_in_cycle = (int)partial + 1;
+    for (int i = 0; i < AM_METONIC_LEAPS; i++) {
+        if (g_metonic_leap_years[i] <= year_in_cycle)
+            corrections += 30.0f;
+    }
+
+    return base_drift - corrections;
+}
+
+// Calendar dissonance [0, 1] — real, from today's date
+static float calendar_dissonance(int days) {
+    float drift = calendar_cumulative_drift(days);
+    float raw = fabsf(fmodf(drift, AM_MAX_UNCORRECTED)) / AM_MAX_UNCORRECTED;
+    return clamp01(raw);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -198,6 +266,9 @@ void am_init(void) {
 
   // resonance memory
   G.presence_decay = 0.9f;
+
+  // real calendar
+  calendar_init();
 }
 
 // enable/disable packs
@@ -690,6 +761,7 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx) 
         }
         else if (!strcmp(lawname, "CALENDAR_PHASE")) {
           G.calendar_phase = clampf(lawval, 0.0f, 11.0f);
+          g_calendar_manual = 1;  // manual override — real dates disabled
         }
         else if (!strcmp(lawname, "WORMHOLE_GATE")) {
           G.wormhole_gate = clamp01(lawval);
@@ -1338,29 +1410,28 @@ void am_step(float dt) {
   // ─────────────────────────────────────────────────────────────────────────────
   // CALENDAR CONFLICT — Hebrew (354d) vs Gregorian (365d) = 11-day annual drift
   //
-  // The calendar phase advances continuously. When it reaches calendar_drift
-  // (default 11.0), a "correction" wraps it back — modeling the Metonic cycle
-  // where leap months periodically re-synchronize the calendars.
+  // Real astronomical computation. Uses system clock and epoch (1 Tishrei 5785
+  // = Oct 3, 2024). Metonic cycle: 19 years, 7 leap years with Adar II (~30d).
+  // February 29 handled correctly — elapsed seconds via time_t, not calendar math.
   //
-  // High phase = high dissonance = thin barrier between timelines = wormholes.
-  // This is the heartbeat of the temporal field.
-  //
+  // High dissonance = thin barrier between timelines = wormholes open.
   // From pitomadom: TE(Calendar → N) = 0.31 bits — strongest causal effect.
   // ─────────────────────────────────────────────────────────────────────────────
 
-  // Phase auto-advances. Rate: one full cycle per ~600 seconds of runtime.
-  // Host can override by setting LAW CALENDAR_PHASE directly.
-  float cal_rate = G.calendar_drift / 600.0f;
-  G.calendar_phase += cal_rate * dt;
-  if (G.calendar_phase >= G.calendar_drift) {
-    G.calendar_phase -= G.calendar_drift;
+  float cal_dissonance;
+  if (!g_calendar_manual) {
+    // Real date: seconds since epoch → days → drift → dissonance
+    int days = calendar_days_since_epoch();
+    float drift = calendar_cumulative_drift(days);
+    cal_dissonance = calendar_dissonance(days);
+    // Store phase for state access: uncorrected position within cycle
+    G.calendar_phase = fabsf(fmodf(drift, AM_MAX_UNCORRECTED));
+  } else {
+    // Manual override via LAW CALENDAR_PHASE — for testing or AML scripts
+    cal_dissonance = (G.calendar_drift > 0.0f)
+        ? clamp01(G.calendar_phase / G.calendar_drift)
+        : 0.0f;
   }
-
-  // Calendar dissonance: sawtooth 0→1 as phase approaches the correction point.
-  // Peaks just before the leap month "resolves" the conflict.
-  float cal_dissonance = (G.calendar_drift > 0.0f)
-      ? G.calendar_phase / G.calendar_drift
-      : 0.0f;
 
   // Wormhole activation: dissonance exceeds gate threshold
   if (cal_dissonance > G.wormhole_gate) {
