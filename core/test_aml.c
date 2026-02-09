@@ -949,6 +949,109 @@ int main(void) {
     test_cosmic_coherence_compat();
     test_copy_state_32();
 
+    // ── Phase 7: expression args in user-defined functions ──
+    printf("\n── expression args in user-defined functions ──\n");
+    am_init();
+    am_exec(
+        "def set_prophecy(depth):\n"
+        "    PROPHECY depth\n"
+        "\n"
+        "set_prophecy(33)\n"
+    );
+    ASSERT_INT(am_get_state()->prophecy, 33, "set_prophecy(33) → prophecy 33");
+
+    am_exec(
+        "def double_prophecy(n):\n"
+        "    PROPHECY n * 2\n"
+        "\n"
+        "double_prophecy(7)\n"
+    );
+    ASSERT_INT(am_get_state()->prophecy, 14, "double_prophecy(7) → prophecy 14");
+
+    am_exec(
+        "def set_pain_relative(base, scale):\n"
+        "    PAIN base * scale\n"
+        "\n"
+        "set_pain_relative(0.5, 0.8)\n"
+    );
+    ASSERT_FLOAT(am_get_state()->pain, 0.4f, 0.01f, "set_pain_relative(0.5, 0.8) → pain 0.4");
+
+    // ── MLP controller ──
+    printf("\n── 4.C MLP controller ──\n");
+    am_init();
+    am_get_state()->pain = 0.8f;
+    am_get_state()->entropy = 0.5f;
+    am_get_state()->resonance = 0.5f;
+    float winter_before = am_get_state()->winter_energy;
+    for (int i = 0; i < 50; i++) am_step(0.1f);
+    ASSERT(am_get_state()->winter_energy >= winter_before, "high pain → winter energy grows");
+
+    am_init();
+    am_get_state()->emergence = 0.8f;
+    am_get_state()->entropy = 0.3f;
+    am_get_state()->resonance = 0.8f;
+    float summer_before = am_get_state()->summer_energy;
+    for (int i = 0; i < 50; i++) am_step(0.1f);
+    ASSERT(am_get_state()->summer_energy >= summer_before, "high emergence → summer energy grows");
+
+    am_init();
+    am_step(0.1f);
+    ASSERT(am_get_state()->field_health > 0.0f, "field_health is computed");
+
+    // ── SCAR text storage ──
+    printf("\n── SCAR text storage ──\n");
+    am_init();
+    am_exec("SCAR \"overwhelming\"");
+    ASSERT_INT(am_get_state()->n_scars, 1, "scar count 1");
+    ASSERT(strcmp(am_get_state()->scar_texts[0], "overwhelming") == 0, "scar text stored");
+    am_exec("SCAR \"loss\"");
+    ASSERT_INT(am_get_state()->n_scars, 2, "scar count 2");
+    ASSERT(strcmp(am_get_state()->scar_texts[1], "loss") == 0, "scar text 2");
+
+    // ── Schumann harmonics modulation ──
+    printf("\n── Schumann harmonics modulation ──\n");
+    am_init();
+    am_get_state()->tension = 0.5f;
+    am_get_state()->schumann_modulation = 0.8f;
+    {
+      float tb = am_get_state()->tension;
+      am_step(1.0f);
+      ASSERT(am_get_state()->tension < tb, "harmonics-modulated healing reduces tension");
+    }
+
+    // ── Level 1 macros ──
+    printf("\n── Level 1 macros ──\n");
+    am_init();
+    am_exec("MACRO wake { PROPHECY 12; VELOCITY RUN; ECHO macro fired }");
+    am_exec("@wake");
+    ASSERT_INT(am_get_state()->prophecy, 12, "macro @wake → prophecy 12");
+    ASSERT_INT(am_get_state()->velocity_mode, 2, "macro @wake → velocity RUN");
+
+    am_exec("MACRO calm { VELOCITY WALK; PAIN 0; TENSION 0 }");
+    am_exec("@calm");
+    ASSERT_INT(am_get_state()->velocity_mode, 1, "macro @calm → velocity WALK");
+    ASSERT_FLOAT(am_get_state()->pain, 0.0f, 0.01f, "macro @calm → pain 0");
+
+    // ── INCLUDE with real file ──
+    printf("\n── INCLUDE with real file ──\n");
+    {
+        FILE* f = fopen("/tmp/test_include_aml.aml", "w");
+        if (f) {
+            fprintf(f, "PROPHECY 42\nVELOCITY RUN\nATTEND_FOCUS 0.99\n");
+            fclose(f);
+            am_init();
+            am_exec_file("/tmp/test_include_aml.aml");
+            ASSERT_INT(am_get_state()->prophecy, 42, "exec_file: prophecy 42");
+            ASSERT_INT(am_get_state()->velocity_mode, 2, "exec_file: velocity RUN");
+            ASSERT_FLOAT(am_get_state()->attend_focus, 0.99f, 0.01f, "exec_file: focus 0.99");
+
+            am_init();
+            am_exec("INCLUDE /tmp/test_include_aml.aml");
+            ASSERT_INT(am_get_state()->prophecy, 42, "INCLUDE in script: prophecy 42");
+            remove("/tmp/test_include_aml.aml");
+        }
+    }
+
     printf("\n═══ Results: %d/%d passed ═══\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

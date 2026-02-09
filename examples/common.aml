@@ -1,0 +1,25 @@
+# common.aml — shared macros and functions
+# INCLUDE this file from other .aml scripts
+
+# Level 1 macros (flat command sequences)
+MACRO reset_clean { RESET_FIELD; RESET_DEBT; PAIN 0; TENSION 0; DISSONANCE 0 }
+MACRO go_deep { PROPHECY 32; VELOCITY NOMOVE; ATTEND_FOCUS 0.95 }
+MACRO go_wild { VELOCITY RUN; TUNNEL_CHANCE 0.3; EXPERT_CREATIVE 0.8 }
+
+# Level 2 functions (with parameters and logic)
+def set_mood(p, t, d):
+    PAIN p
+    TENSION t
+    DISSONANCE d
+    if p + t > 0.8:
+        VELOCITY NOMOVE
+    else:
+        VELOCITY WALK
+
+def adaptive_prophecy(urgency):
+    PROPHECY urgency * 8
+    DESTINY 1.0 - urgency * 0.5
+
+def enter_season(name, intensity):
+    SEASON name
+    SEASON_INTENSITY intensity

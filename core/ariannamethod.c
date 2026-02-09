@@ -194,6 +194,130 @@ static float schumann_harmonic_signal(void) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// 4.C MLP CONTROLLER — real neural network, trained by NOTORCH Hebbian
+// Inputs:  entropy, resonance, pain, tension, emergence, effective_temp
+// Outputs: spring_delta, summer_delta, autumn_delta, winter_delta
+// ═══════════════════════════════════════════════════════════════════════════════
+
+typedef struct {
+    float w1[AM_4C_INPUTS * AM_4C_HIDDEN];   // input→hidden (48)
+    float b1[AM_4C_HIDDEN];                   // hidden biases (8)
+    float w2[AM_4C_HIDDEN * AM_4C_OUTPUTS];   // hidden→output (32)
+    float b2[AM_4C_OUTPUTS];                   // output biases (4)
+    float hidden[AM_4C_HIDDEN];                // cached for Hebbian update
+} AM_4C_MLP;
+
+static AM_4C_MLP g_mlp;
+
+static void am_4c_forward(const float* inputs, float* outputs) {
+    // hidden = tanh(W1^T @ inputs + b1)
+    for (int h = 0; h < AM_4C_HIDDEN; h++) {
+        float sum = g_mlp.b1[h];
+        for (int i = 0; i < AM_4C_INPUTS; i++) {
+            sum += g_mlp.w1[i * AM_4C_HIDDEN + h] * inputs[i];
+        }
+        g_mlp.hidden[h] = tanhf(sum);
+    }
+    // outputs = tanh(W2^T @ hidden + b2)
+    for (int o = 0; o < AM_4C_OUTPUTS; o++) {
+        float sum = g_mlp.b2[o];
+        for (int h = 0; h < AM_4C_HIDDEN; h++) {
+            sum += g_mlp.w2[h * AM_4C_OUTPUTS + o] * g_mlp.hidden[h];
+        }
+        outputs[o] = tanhf(sum);
+    }
+}
+
+static void am_4c_init_weights(void) {
+    memset(&g_mlp, 0, sizeof(g_mlp));
+
+    // 4 specialist neurons that approximate the old hardcoded rules:
+    // Neuron 0: low entropy → boost spring (growth)
+    //   input[0]=entropy with negative weight → fires when entropy low
+    g_mlp.w1[0 * AM_4C_HIDDEN + 0] = -2.0f;  // entropy→h0: negative
+    g_mlp.b1[0] = 0.5f;                        // bias: fires at entropy<0.25
+    g_mlp.w2[0 * AM_4C_OUTPUTS + 0] = 1.5f;   // h0→spring
+
+    // Neuron 1: high resonance → boost autumn (consolidation)
+    g_mlp.w1[1 * AM_4C_HIDDEN + 1] = 2.0f;   // resonance→h1
+    g_mlp.b1[1] = -1.5f;                       // fires at resonance>0.75
+    g_mlp.w2[1 * AM_4C_OUTPUTS + 2] = 1.5f;   // h1→autumn
+
+    // Neuron 2: high pain → boost winter (rest)
+    g_mlp.w1[2 * AM_4C_HIDDEN + 2] = 2.5f;   // pain→h2
+    g_mlp.b1[2] = -1.5f;                       // fires at pain>0.6
+    g_mlp.w2[2 * AM_4C_OUTPUTS + 3] = 1.5f;   // h2→winter
+
+    // Neuron 3: high emergence → boost summer (peak expression)
+    g_mlp.w1[4 * AM_4C_HIDDEN + 3] = 2.5f;   // emergence→h3
+    g_mlp.b1[3] = -0.5f;                       // fires at emergence>0.2
+    g_mlp.w2[3 * AM_4C_OUTPUTS + 1] = 1.5f;   // h3→summer
+
+    // Neurons 4-7: cross-connections for nuance (small initial weights)
+    // tension feeds back to spring/summer balance
+    g_mlp.w1[3 * AM_4C_HIDDEN + 4] = 0.5f;   // tension→h4
+    g_mlp.w1[5 * AM_4C_HIDDEN + 4] = -0.3f;  // temp→h4
+    g_mlp.w2[4 * AM_4C_OUTPUTS + 0] = 0.3f;  // h4→spring (tension drives growth)
+    g_mlp.w2[4 * AM_4C_OUTPUTS + 1] = -0.3f; // h4→summer (tension suppresses peak)
+
+    // resonance-entropy interaction
+    g_mlp.w1[0 * AM_4C_HIDDEN + 5] = -1.0f;  // entropy→h5
+    g_mlp.w1[1 * AM_4C_HIDDEN + 5] = 1.0f;   // resonance→h5
+    g_mlp.w2[5 * AM_4C_OUTPUTS + 2] = 0.5f;  // h5→autumn (high coherence → consolidate)
+
+    // temperature regulation
+    g_mlp.w1[5 * AM_4C_HIDDEN + 6] = 1.5f;   // temp→h6
+    g_mlp.b1[6] = -1.0f;                       // fires at temp>0.67
+    g_mlp.w2[6 * AM_4C_OUTPUTS + 3] = 0.4f;  // h6→winter (too hot → cool down)
+
+    // emergence-pain balance
+    g_mlp.w1[4 * AM_4C_HIDDEN + 7] = 1.0f;   // emergence→h7
+    g_mlp.w1[2 * AM_4C_HIDDEN + 7] = -1.0f;  // pain→h7
+    g_mlp.w2[7 * AM_4C_OUTPUTS + 1] = 0.5f;  // h7→summer (emergence w/o pain)
+}
+
+// Hebbian update: signal > 0 = field improved, reinforce; < 0 = suppress
+static void am_4c_hebbian_update(const float* inputs, const float* outputs,
+                                  float signal) {
+    float lr = G.notorch_lr * 0.1f;  // slower than main NOTORCH
+    // Update W2 (hidden→output)
+    for (int h = 0; h < AM_4C_HIDDEN; h++) {
+        for (int o = 0; o < AM_4C_OUTPUTS; o++) {
+            g_mlp.w2[h * AM_4C_OUTPUTS + o] +=
+                lr * g_mlp.hidden[h] * outputs[o] * signal;
+            // clamp to prevent explosion
+            if (g_mlp.w2[h * AM_4C_OUTPUTS + o] > 3.0f)
+                g_mlp.w2[h * AM_4C_OUTPUTS + o] = 3.0f;
+            if (g_mlp.w2[h * AM_4C_OUTPUTS + o] < -3.0f)
+                g_mlp.w2[h * AM_4C_OUTPUTS + o] = -3.0f;
+        }
+    }
+    // Update W1 (input→hidden)
+    for (int i = 0; i < AM_4C_INPUTS; i++) {
+        for (int h = 0; h < AM_4C_HIDDEN; h++) {
+            g_mlp.w1[i * AM_4C_HIDDEN + h] +=
+                lr * inputs[i] * g_mlp.hidden[h] * signal;
+            if (g_mlp.w1[i * AM_4C_HIDDEN + h] > 3.0f)
+                g_mlp.w1[i * AM_4C_HIDDEN + h] = 3.0f;
+            if (g_mlp.w1[i * AM_4C_HIDDEN + h] < -3.0f)
+                g_mlp.w1[i * AM_4C_HIDDEN + h] = -3.0f;
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LEVEL 1 — MACROS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+typedef struct {
+    char name[AML_MAX_NAME];
+    char body[AML_MACRO_MAX_LEN];
+} AML_Macro;
+
+static AML_Macro g_macros[AML_MAX_MACROS];
+static int g_macro_count = 0;
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // VELOCITY + EXPERT BLENDING — movement IS language
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -342,8 +466,17 @@ void am_init(void) {
   // resonance memory
   G.presence_decay = 0.9f;
 
+  // field health (for MLP signal)
+  G.field_health = 0.5f;
+
   // real calendar
   calendar_init();
+
+  // 4.C MLP controller
+  am_4c_init_weights();
+
+  // macros
+  g_macro_count = 0;
 }
 
 // enable/disable packs
@@ -742,6 +875,16 @@ static float aml_eval_arg(AML_ExecCtx* ctx, const char* arg) {
     return aml_eval(ctx, arg);
 }
 
+// Context-aware float/int parsing: evaluates expressions when in Level 2 context
+static float ctx_float(AML_ExecCtx* ctx, const char* arg) {
+    if (!arg || !*arg) return 0.0f;
+    if (!ctx) return safe_atof(arg);
+    return aml_eval_arg(ctx, arg);
+}
+static int ctx_int(AML_ExecCtx* ctx, const char* arg) {
+    return (int)ctx_float(ctx, arg);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // BUILT-IN FUNCTIONS — native AML functions (not external bindings)
 // From spec section 5. Each is C code that modifies field state directly.
@@ -872,59 +1015,58 @@ static void aml_register_builtins(AML_ExecCtx* ctx) {
 // Execute a single Level 0 command (CMD + ARG already split, CMD already upcased)
 // ctx may be NULL for backward compatibility
 static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx) {
-    (void)ctx;
-    const char* t = cmd; // alias: original extracted code used t
+    const char* t = cmd;
 
-    // PROPHECY PHYSICS
+    // PROPHECY PHYSICS — numeric args use ctx_float/ctx_int for expression support
     if (!strcmp(t, "PROPHECY")) {
-      G.prophecy = clampi(safe_atoi(arg), 1, 64);
+      G.prophecy = clampi(ctx_int(ctx, arg), 1, 64);
     }
     else if (!strcmp(t, "DESTINY")) {
-      G.destiny = clamp01(safe_atof(arg));
+      G.destiny = clamp01(ctx_float(ctx, arg));
     }
     else if (!strcmp(t, "WORMHOLE")) {
-      G.wormhole = clamp01(safe_atof(arg));
+      G.wormhole = clamp01(ctx_float(ctx, arg));
     }
     else if (!strcmp(t, "CALENDAR_DRIFT")) {
-      G.calendar_drift = clampf(safe_atof(arg), 0.0f, 30.0f);
+      G.calendar_drift = clampf(ctx_float(ctx, arg), 0.0f, 30.0f);
     }
 
     // ATTENTION PHYSICS
     else if (!strcmp(t, "ATTEND_FOCUS")) {
-      G.attend_focus = clamp01(safe_atof(arg));
+      G.attend_focus = clamp01(ctx_float(ctx, arg));
     }
     else if (!strcmp(t, "ATTEND_SPREAD")) {
-      G.attend_spread = clamp01(safe_atof(arg));
+      G.attend_spread = clamp01(ctx_float(ctx, arg));
     }
 
     // TUNNELING
     else if (!strcmp(t, "TUNNEL_THRESHOLD")) {
-      G.tunnel_threshold = clamp01(safe_atof(arg));
+      G.tunnel_threshold = clamp01(ctx_float(ctx, arg));
     }
     else if (!strcmp(t, "TUNNEL_CHANCE")) {
-      G.tunnel_chance = clamp01(safe_atof(arg));
+      G.tunnel_chance = clamp01(ctx_float(ctx, arg));
     }
     else if (!strcmp(t, "TUNNEL_SKIP_MAX")) {
-      G.tunnel_skip_max = clampi(safe_atoi(arg), 1, 24);
+      G.tunnel_skip_max = clampi(ctx_int(ctx, arg), 1, 24);
     }
 
     // SUFFERING
     else if (!strcmp(t, "PAIN")) {
-      G.pain = clamp01(safe_atof(arg));
+      G.pain = clamp01(ctx_float(ctx, arg));
     }
     else if (!strcmp(t, "TENSION")) {
-      G.tension = clamp01(safe_atof(arg));
+      G.tension = clamp01(ctx_float(ctx, arg));
     }
     else if (!strcmp(t, "DISSONANCE")) {
-      G.dissonance = clamp01(safe_atof(arg));
+      G.dissonance = clamp01(ctx_float(ctx, arg));
     }
 
     // PROPHECY DEBT — direct set/configure
     else if (!strcmp(t, "PROPHECY_DEBT")) {
-      G.debt = clampf(safe_atof(arg), 0.0f, 100.0f);
+      G.debt = clampf(ctx_float(ctx, arg), 0.0f, 100.0f);
     }
     else if (!strcmp(t, "PROPHECY_DEBT_DECAY")) {
-      G.debt_decay = clampf(safe_atof(arg), 0.9f, 0.9999f);
+      G.debt_decay = clampf(ctx_float(ctx, arg), 0.9f, 0.9999f);
     }
 
     // MOVEMENT
@@ -946,7 +1088,7 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx) 
       update_effective_temp();
     }
     else if (!strcmp(t, "BASE_TEMP")) {
-      G.base_temperature = clampf(safe_atof(arg), 0.1f, 3.0f);
+      G.base_temperature = clampf(ctx_float(ctx, arg), 0.1f, 3.0f);
       update_effective_temp();
     }
 
@@ -960,10 +1102,12 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx) 
 
     // LAWS OF NATURE
     else if (!strcmp(t, "LAW")) {
+      // LAW has two tokens: lawname value_expr
       char lawname[64] = {0};
-      float lawval = 0.0f;
-      if (sscanf(arg, "%63s %f", lawname, &lawval) >= 2) {
+      char valexpr[128] = {0};
+      if (sscanf(arg, "%63s %127[^\n]", lawname, valexpr) >= 2) {
         upcase(lawname);
+        float lawval = ctx_float(ctx, valexpr);
         if (!strcmp(lawname, "ENTROPY_FLOOR")) {
           G.entropy_floor = clampf(lawval, 0.0f, 2.0f);
         }
@@ -984,12 +1128,11 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx) 
         }
         else if (!strcmp(lawname, "CALENDAR_PHASE")) {
           G.calendar_phase = clampf(lawval, 0.0f, 11.0f);
-          g_calendar_manual = 1;  // manual override — real dates disabled
+          g_calendar_manual = 1;
         }
         else if (!strcmp(lawname, "WORMHOLE_GATE")) {
           G.wormhole_gate = clamp01(lawval);
         }
-        // unknown laws ignored (future-proof)
       }
     }
 
@@ -1043,10 +1186,10 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx) 
         G.chirality_on = (!strcmp(mode, "ON") || !strcmp(mode, "1"));
       }
       else if (!strcmp(subcmd, "TEMPO")) {
-        G.tempo = clampi(safe_atoi(arg), 2, 47);
+        G.tempo = clampi(ctx_int(ctx, arg), 2, 47);
       }
       else if (!strcmp(subcmd, "PAS_THRESHOLD")) {
-        G.pas_threshold = clamp01(safe_atof(arg));
+        G.pas_threshold = clamp01(ctx_float(ctx, arg));
       }
     }
 
@@ -1072,12 +1215,12 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx) 
     }
     else if (!strcmp(t, "TEMPO")) {
       if (G.packs_enabled & AM_PACK_CODES_RIC) {
-        G.tempo = clampi(safe_atoi(arg), 2, 47);
+        G.tempo = clampi(ctx_int(ctx, arg), 2, 47);
       }
     }
     else if (!strcmp(t, "PAS_THRESHOLD")) {
       if (G.packs_enabled & AM_PACK_CODES_RIC) {
-        G.pas_threshold = clamp01(safe_atof(arg));
+        G.pas_threshold = clamp01(ctx_float(ctx, arg));
       }
     }
     else if (!strcmp(t, "ANCHOR")) {
@@ -1107,7 +1250,19 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx) 
       else if (!strcmp(mode, "HARD")) G.antidote_mode = 1;
     }
     else if (!strcmp(t, "SCAR")) {
-      G.n_scars++;
+      // Store scar text (gravitational memory)
+      if (G.n_scars < AM_MAX_SCARS) {
+        const char* text_start = arg;
+        // strip quotes if present
+        if (*text_start == '"') text_start++;
+        strncpy(G.scar_texts[G.n_scars], text_start, AM_SCAR_MAX_LEN - 1);
+        G.scar_texts[G.n_scars][AM_SCAR_MAX_LEN - 1] = 0;
+        // strip trailing quote
+        int slen = (int)strlen(G.scar_texts[G.n_scars]);
+        if (slen > 0 && G.scar_texts[G.n_scars][slen - 1] == '"')
+          G.scar_texts[G.n_scars][slen - 1] = 0;
+        G.n_scars++;
+      }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1115,14 +1270,14 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx) 
     // ─────────────────────────────────────────────────────────────────────────
 
     else if (!strcmp(t, "SCHUMANN")) {
-      G.schumann_hz = clampf(safe_atof(arg), 7.0f, 8.5f);
+      G.schumann_hz = clampf(ctx_float(ctx, arg), 7.0f, 8.5f);
       G.schumann_coherence = compute_schumann_coherence(G.schumann_hz);
     }
     else if (!strcmp(t, "SCHUMANN_MODULATION")) {
-      G.schumann_modulation = clamp01(safe_atof(arg));
+      G.schumann_modulation = clamp01(ctx_float(ctx, arg));
     }
     else if (!strcmp(t, "COSMIC_COHERENCE")) {
-      G.schumann_coherence = clamp01(safe_atof(arg));
+      G.schumann_coherence = clamp01(ctx_float(ctx, arg));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1130,13 +1285,13 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx) 
     // ─────────────────────────────────────────────────────────────────────────
 
     else if (!strcmp(t, "LORA_ALPHA")) {
-      G.lora_alpha = clamp01(safe_atof(arg));
+      G.lora_alpha = clamp01(ctx_float(ctx, arg));
     }
     else if (!strcmp(t, "NOTORCH_LR")) {
-      G.notorch_lr = clampf(safe_atof(arg), 0.001f, 0.5f);
+      G.notorch_lr = clampf(ctx_float(ctx, arg), 0.001f, 0.5f);
     }
     else if (!strcmp(t, "NOTORCH_DECAY")) {
-      G.notorch_decay = clampf(safe_atof(arg), 0.9f, 0.9999f);
+      G.notorch_decay = clampf(ctx_float(ctx, arg), 0.9f, 0.9999f);
     }
     else if (!strcmp(t, "RESONANCE_BOOST")) {
       // RESONANCE_BOOST <word> <float> — boosts resonance metric
@@ -1161,7 +1316,7 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx) 
       G.season_phase = 0.0f;
     }
     else if (!strcmp(t, "SEASON_INTENSITY")) {
-      G.season_intensity = clamp01(safe_atof(arg));
+      G.season_intensity = clamp01(ctx_float(ctx, arg));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1183,7 +1338,7 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx) 
       else if (!strcmp(mode, "SYMMETRIC") || !strcmp(mode, "2")) G.temporal_mode = AM_TEMPORAL_SYMMETRIC;
     }
     else if (!strcmp(t, "TEMPORAL_ALPHA")) {
-      G.temporal_alpha = clamp01(safe_atof(arg));
+      G.temporal_alpha = clamp01(ctx_float(ctx, arg));
     }
     else if (!strcmp(t, "RTL_MODE")) {
       char mode[16] = {0}; strncpy(mode, arg, 15); upcase(mode);
@@ -1203,16 +1358,16 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx) 
     // ─────────────────────────────────────────────────────────────────────────
 
     else if (!strcmp(t, "EXPERT_STRUCTURAL")) {
-      G.expert_structural = clamp01(safe_atof(arg));
+      G.expert_structural = clamp01(ctx_float(ctx, arg));
     }
     else if (!strcmp(t, "EXPERT_SEMANTIC")) {
-      G.expert_semantic = clamp01(safe_atof(arg));
+      G.expert_semantic = clamp01(ctx_float(ctx, arg));
     }
     else if (!strcmp(t, "EXPERT_CREATIVE")) {
-      G.expert_creative = clamp01(safe_atof(arg));
+      G.expert_creative = clamp01(ctx_float(ctx, arg));
     }
     else if (!strcmp(t, "EXPERT_PRECISE")) {
-      G.expert_precise = clamp01(safe_atof(arg));
+      G.expert_precise = clamp01(ctx_float(ctx, arg));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1220,7 +1375,40 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx) 
     // ─────────────────────────────────────────────────────────────────────────
 
     else if (!strcmp(t, "PRESENCE_DECAY")) {
-      G.presence_decay = clamp01(safe_atof(arg));
+      G.presence_decay = clamp01(ctx_float(ctx, arg));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LEVEL 1 MACROS — MACRO name { CMD1; CMD2 }
+    // ─────────────────────────────────────────────────────────────────────────
+
+    else if (!strcmp(t, "MACRO")) {
+      const char* brace = strchr(arg, '{');
+      if (brace && g_macro_count < AML_MAX_MACROS) {
+        char mname[AML_MAX_NAME] = {0};
+        int ni = 0;
+        const char* p = arg;
+        while (p < brace && ni < AML_MAX_NAME - 1) {
+          if (!isspace((unsigned char)*p)) mname[ni++] = *p;
+          p++;
+        }
+        mname[ni] = 0;
+        brace++;
+        const char* end = strchr(brace, '}');
+        if (end && ni > 0) {
+          strncpy(g_macros[g_macro_count].name, mname, AML_MAX_NAME - 1);
+          int bi = 0;
+          while (brace < end && bi < AML_MACRO_MAX_LEN - 1) {
+            if (*brace == ';')
+              g_macros[g_macro_count].body[bi++] = '\n';
+            else
+              g_macros[g_macro_count].body[bi++] = *brace;
+            brace++;
+          }
+          g_macros[g_macro_count].body[bi] = 0;
+          g_macro_count++;
+        }
+      }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1514,6 +1702,19 @@ static int aml_exec_line(AML_ExecCtx* ctx, int idx) {
                 }
             }
         }
+    }
+
+    // --- macro call @name ---
+    if (text[0] == '@') {
+        const char* mname = text + 1;
+        while (*mname == ' ') mname++;
+        for (int mi = 0; mi < g_macro_count; mi++) {
+            if (strcmp(g_macros[mi].name, mname) == 0) {
+                am_exec(g_macros[mi].body);
+                return idx + 1;
+            }
+        }
+        return idx + 1;  // macro not found — ignore
     }
 
     // --- Level 0 fallback: split CMD ARG, dispatch ---
@@ -1992,7 +2193,10 @@ void am_step(float dt) {
   schumann_advance(dt);
   if (G.schumann_coherence > 0.0f && G.schumann_modulation > 0.0f) {
     float coherence_factor = 0.5f + 0.5f * G.schumann_coherence;
-    float heal_rate = 0.998f - (0.003f * coherence_factor * G.schumann_modulation);
+    // Harmonic signal modulates healing: aligned harmonics = stronger healing
+    float harmonic = schumann_harmonic_signal();
+    float harmonic_mod = 1.0f + harmonic * 0.1f;  // range [0.9, 1.1]
+    float heal_rate = 0.998f - (0.003f * coherence_factor * G.schumann_modulation * harmonic_mod);
     G.tension *= heal_rate;
     G.dissonance *= heal_rate;
   }
@@ -2072,22 +2276,29 @@ void am_step(float dt) {
       case AM_SEASON_WINTER: G.winter_energy = clamp01(G.winter_energy + gain); break;
     }
 
-    // MLP controller: prevent harmful extremes
-    // If entropy too low (winter too cold) → boost spring (growth)
-    if (G.entropy < G.entropy_floor * 2.0f && G.winter_energy > 0.5f) {
-      G.spring_energy = clamp01(G.spring_energy + 0.01f * dt);
-    }
-    // If resonance maxed (stagnation) → boost autumn (consolidation)
-    if (G.resonance > G.resonance_ceiling * 0.95f) {
-      G.autumn_energy = clamp01(G.autumn_energy + 0.01f * dt);
-    }
-    // If pain prolonged → boost winter (rest)
-    if (G.pain > 0.7f) {
-      G.winter_energy = clamp01(G.winter_energy + 0.01f * dt);
-    }
-    // If emergence high → boost summer (peak expression)
-    if (G.emergence > G.emergence_threshold) {
-      G.summer_energy = clamp01(G.summer_energy + 0.01f * dt);
+    // ── 4.C MLP CONTROLLER ──
+    // Real neural network: 6 inputs → 8 hidden (tanh) → 4 outputs (tanh)
+    // Replaces hardcoded rules. Trained by Hebbian plasticity (NOTORCH).
+    float mlp_inputs[AM_4C_INPUTS] = {
+      G.entropy, G.resonance, G.pain, G.tension, G.emergence, G.effective_temp
+    };
+    float mlp_outputs[AM_4C_OUTPUTS];
+    am_4c_forward(mlp_inputs, mlp_outputs);
+
+    // Apply MLP output as energy deltas (scaled by season_intensity)
+    float scale = 0.02f * dt * G.season_intensity;
+    G.spring_energy = clamp01(G.spring_energy + mlp_outputs[0] * scale);
+    G.summer_energy = clamp01(G.summer_energy + mlp_outputs[1] * scale);
+    G.autumn_energy = clamp01(G.autumn_energy + mlp_outputs[2] * scale);
+    G.winter_energy = clamp01(G.winter_energy + mlp_outputs[3] * scale);
+
+    // Hebbian update: did the MLP improve field health?
+    float health = clamp01((1.0f - fabsf(G.entropy - 0.5f)) *
+                           G.resonance * (1.0f - G.pain));
+    float signal = health - G.field_health;
+    G.field_health = health;
+    if (fabsf(signal) > 0.001f) {
+      am_4c_hebbian_update(mlp_inputs, mlp_outputs, signal);
     }
 
     // Season modulation on field parameters

@@ -67,6 +67,19 @@ extern "C" {
 #define AM_SEASON_AUTUMN   2   // harvest, consolidation, memory
 #define AM_SEASON_WINTER   3   // rest, reflection, compression
 
+// 4.C MLP CONTROLLER — real neural network, not hardcoded rules
+#define AM_4C_INPUTS    6   // entropy, resonance, pain, tension, emergence, temp
+#define AM_4C_HIDDEN    8   // hidden neurons
+#define AM_4C_OUTPUTS   4   // spring_delta, summer_delta, autumn_delta, winter_delta
+
+// DARK MATTER — scar storage
+#define AM_MAX_SCARS    32
+#define AM_SCAR_MAX_LEN 64
+
+// LEVEL 1 — macros
+#define AML_MAX_MACROS     32
+#define AML_MACRO_MAX_LEN  512
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // AM_State — the breath of the field
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -123,6 +136,7 @@ typedef struct {
   float dark_gravity;       // gravitational memory strength (0..1)
   int   antidote_mode;      // 0=auto, 1=hard
   int   n_scars;            // number of deposited scars
+  char  scar_texts[AM_MAX_SCARS][AM_SCAR_MAX_LEN]; // gravitational memory text
 
   // WORMHOLE STATE
   int wormhole_active;      // 1 if wormhole fired this step
@@ -175,6 +189,7 @@ typedef struct {
   float summer_energy;      // peak expression
   float autumn_energy;      // consolidation
   float winter_energy;      // reflection, compression
+  float field_health;       // previous step health (for MLP signal)
 } AM_State;
 
 // Temporal modes
