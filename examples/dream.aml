@@ -1,0 +1,55 @@
+# dream.aml — dream consolidation state
+# The field goes inward. Memory consolidates.
+# Temperature drops, prophecy extends, tunneling peaks.
+# This is where shards graduate.
+
+# Movement: stillness
+VELOCITY NOMOVE
+BASE_TEMP 0.7
+
+# Prophecy: maximum depth, strong destiny
+# Dreams see far
+PROPHECY 32
+DESTINY 0.60
+
+# Suffering: dissolving
+PAIN 0.1
+TENSION 0.05
+DISSONANCE 0.02
+
+# Tunneling: wide open
+# Dreams compress freely
+TUNNEL_THRESHOLD 0.20
+TUNNEL_CHANCE 0.40
+TUNNEL_SKIP_MAX 24
+
+# Wormhole: spacetime is fluid in dreams
+WORMHOLE 0.30
+
+# Attention: diffuse, receptive
+ATTEND_FOCUS 0.30
+ATTEND_SPREAD 0.60
+
+# Temporal: symmetric — past and future merge
+TEMPORAL_MODE SYMMETRIC
+TEMPORAL_ALPHA 0.5
+
+# Experts: semantic dominates
+EXPERT_STRUCTURAL 0.15
+EXPERT_SEMANTIC 0.45
+EXPERT_CREATIVE 0.30
+EXPERT_PRECISE 0.10
+
+# Laws: high emergence sensitivity
+LAW EMERGENCE_THRESHOLD 0.15
+LAW PRESENCE_FADE 0.90
+
+# Dark matter active in dreams
+MODE DARKMATTER
+GRAVITY DARK 0.6
+ANTIDOTE AUTO
+
+# Reset debt on wake
+RESET_DEBT
+
+ECHO dreaming

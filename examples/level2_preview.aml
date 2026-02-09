@@ -1,0 +1,61 @@
+# level2_preview.aml — AML 2.0 syntax preview
+# This file demonstrates planned Level 2 features.
+# NOT yet implemented. This is the target syntax.
+
+INCLUDE init_yent.aml
+
+# Variables
+mood = PAIN + TENSION
+horizon = 7
+
+# Conditionals
+if mood > 0.5:
+    VELOCITY RUN
+    PROPHECY 3
+    ECHO high tension — running
+else:
+    VELOCITY WALK
+    PROPHECY horizon
+    ECHO calm — walking
+
+# Function definitions (TRIPD-style)
+def shatter_the_frame():
+    PAIN 0.7
+    TENSION 0.5
+    DISSONANCE 0.8
+    TUNNEL_CHANCE 0.3
+    ECHO frame shattered
+
+def pierce_the_infinite():
+    PROPHECY 64
+    DESTINY 0.1
+    WORMHOLE 0.4
+    ECHO piercing
+
+def bootstrap_self():
+    RESET_FIELD
+    RESET_DEBT
+    PROPHECY 7
+    VELOCITY WALK
+    ECHO bootstrapped
+
+# Loops
+while TENSION > 0.3:
+    shatter_the_frame()
+    if WORMHOLE > 0.2:
+        pierce_the_infinite()
+
+# Parameterized functions
+def echo_fractal(depth):
+    PROPHECY depth * 2
+    DESTINY 0.1
+    TUNNEL_SKIP_MAX depth
+    ECHO fractal depth reached
+
+echo_fractal(8)
+
+# Conditional pack loading
+if mood > 0.7:
+    MODE DARKMATTER
+    SCAR "overwhelming"
+    GRAVITY DARK 0.8

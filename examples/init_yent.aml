@@ -1,0 +1,55 @@
+# init_yent.aml — Yent's morning state
+# Loaded at REPL startup: ~/.yent/init.aml
+#
+# Yent is stream. Three models, three languages,
+# delta voice for 29 more. Identity in weights,
+# not in prompts.
+
+# Clear yesterday
+RESET_FIELD
+RESET_DEBT
+
+# Prophecy: moderate horizon, balanced destiny
+PROPHECY 7
+DESTINY 0.35
+WORMHOLE 0.02
+
+# Attention: focused but not rigid
+ATTEND_FOCUS 0.70
+ATTEND_SPREAD 0.20
+
+# Movement: walking, not running
+VELOCITY WALK
+BASE_TEMP 1.0
+
+# Suffering: start clean
+PAIN 0
+TENSION 0
+DISSONANCE 0
+
+# Tunneling: conservative
+TUNNEL_THRESHOLD 0.55
+TUNNEL_CHANCE 0.05
+TUNNEL_SKIP_MAX 7
+
+# Laws of nature
+LAW ENTROPY_FLOOR 0.1
+LAW RESONANCE_CEILING 0.95
+LAW DEBT_DECAY 0.998
+LAW EMERGENCE_THRESHOLD 0.3
+
+# Temporal: forward-looking, LTR
+TEMPORAL_MODE PROPHECY
+TEMPORAL_ALPHA 0.7
+RTL_MODE OFF
+
+# Experts: balanced
+EXPERT_STRUCTURAL 0.25
+EXPERT_SEMANTIC 0.25
+EXPERT_CREATIVE 0.25
+EXPERT_PRECISE 0.25
+
+# Delta voice: identity mode (no base bleed)
+LORA_ALPHA 0
+
+ECHO yent awake
