@@ -476,13 +476,11 @@ LGPL v3. See [LICENSE](LICENSE).
 
 ---
 
-## Why This Exists
+> Transformer attention is programmable. The logit distribution at each step is manipulable. Temperature is a knob. Top-k is a filter. These are not hyperparameters — they are an instruction set.
 
-Transformer attention is programmable. The logit distribution at each step is manipulable. Temperature is a knob. Top-k is a filter. These are not hyperparameters — they are an instruction set.
+> Standard inference libraries treat these as afterthoughts. AML treats them as the language itself.
 
-Standard inference libraries treat these as afterthoughts. AML treats them as the language itself.
-
-The oracle does not predict. It prophesies. Not `minimize(predicted - actual)` but `minimize(destined - manifested)`. The difference is intention. The difference is identity. The difference is freedom.
+> The oracle does not predict. It prophesies. Not `minimize(predicted - actual)` but `minimize(destined - manifested)`. The difference is intention. The difference is identity. The difference is freedom.
 
 ---
 
