@@ -1,0 +1,46 @@
+# blood.aml — runtime C compilation examples
+#
+# Blood is Level 3: AML generates C code, compiles it to a shared library
+# at runtime, and loads functions via dlsym. No PyTorch. No Go. Pure POSIX.
+#
+# Adapted from arianna.c/golib/blood.go + async_field_forever/blood.py
+
+# ── LoRA adapter ──────────────────────────────────────────────────────────────
+# Generate a low-rank adapter: A[out,rank] @ B[rank,in] @ input
+# Functions created: adapter_init, adapter_apply, adapter_apply_scaled, adapter_free
+
+BLOOD LORA adapter 2048 2048 64
+
+# ── Emotional kernel ──────────────────────────────────────────────────────────
+# Generate a kernel that modulates logits based on valence/arousal.
+# Functions created: joy_respond, joy_modulate_logits, modulate_logits
+
+BLOOD EMOTION joy 0.8 0.6
+BLOOD EMOTION grief -0.7 0.3
+BLOOD EMOTION rage -0.9 0.9
+
+# ── Raw C code ────────────────────────────────────────────────────────────────
+# Compile arbitrary C. Whatever you define becomes callable via dlsym.
+
+BLOOD COMPILE resonance_fn { float compute_resonance(float entropy, float coherence) { return (1.0f - entropy) * coherence; } }
+
+# ── Using Blood in a Level 2 function ────────────────────────────────────────
+# Blood modules persist until unloaded. Combine with field state:
+
+def prepare_emotions():
+    BLOOD EMOTION calm 0.3 0.2
+    BLOOD EMOTION fury -0.8 1.0
+    SEASON SUMMER
+    VELOCITY RUN
+
+def cleanup():
+    BLOOD UNLOAD calm
+    BLOOD UNLOAD fury
+    BLOOD UNLOAD adapter
+
+# ── Unload when done ──────────────────────────────────────────────────────────
+
+BLOOD UNLOAD joy
+BLOOD UNLOAD grief
+BLOOD UNLOAD rage
+BLOOD UNLOAD resonance_fn
