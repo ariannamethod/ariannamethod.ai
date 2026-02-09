@@ -541,13 +541,27 @@ static char g_error[256] = {0};
 
 const char* am_get_error(void) { return g_error; }
 
-static void set_error(AML_ExecCtx* ctx, const char* msg) {
+// Set error with optional line number for Level 2 debugging
+// lineno <= 0 means no line number (Level 0 or internal error)
+static void set_error_at(AML_ExecCtx* ctx, int lineno, const char* msg) {
+    char buf[256];
+    if (lineno > 0) {
+        snprintf(buf, sizeof(buf), "line %d: %s", lineno, msg);
+    } else {
+        snprintf(buf, sizeof(buf), "%s", msg);
+    }
+    buf[255] = 0;
     if (ctx) {
-        strncpy(ctx->error, msg, 255);
+        strncpy(ctx->error, buf, 255);
         ctx->error[255] = 0;
     }
-    strncpy(g_error, msg, 255);
+    strncpy(g_error, buf, 255);
     g_error[255] = 0;
+}
+
+// Convenience: set error without line number
+static void set_error(AML_ExecCtx* ctx, const char* msg) {
+    set_error_at(ctx, 0, msg);
 }
 
 // AM_State field map — read state fields in expressions
@@ -1045,7 +1059,8 @@ void am_blood_unload(int module_idx);
 
 // Execute a single Level 0 command (CMD + ARG already split, CMD already upcased)
 // ctx may be NULL for backward compatibility
-static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx) {
+// lineno is the source line number (0 if unknown)
+static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, int lineno) {
     const char* t = cmd;
 
     // PROPHECY PHYSICS — numeric args use ctx_float/ctx_int for expression support
@@ -1473,7 +1488,7 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx) 
             int idx = am_blood_compile(bname, code);
             free(code);
             if (idx < 0 && ctx)
-              set_error(ctx, "blood: compilation failed");
+              set_error_at(ctx, lineno, "blood: compilation failed");
           }
         }
       }
@@ -1616,7 +1631,8 @@ static void aml_register_funcs(AML_ExecCtx* ctx) {
 }
 
 // Call a user-defined function
-static int aml_call_func(AML_ExecCtx* ctx, AML_Func* f, float* args, int nargs) {
+// lineno is the caller's line number (for error reporting)
+static int aml_call_func(AML_ExecCtx* ctx, AML_Func* f, float* args, int nargs, int lineno) {
     // Built-in functions: dispatch to C code directly
     if (f->is_builtin) {
         aml_exec_builtin(f->body_start, args, nargs);
@@ -1624,7 +1640,7 @@ static int aml_call_func(AML_ExecCtx* ctx, AML_Func* f, float* args, int nargs) 
     }
 
     if (ctx->call_depth >= AML_MAX_CALL_DEPTH) {
-        set_error(ctx, "max call depth exceeded");
+        set_error_at(ctx, lineno, "max call depth exceeded");
         return 1;
     }
 
@@ -1709,7 +1725,7 @@ static int aml_exec_line(AML_ExecCtx* ctx, int idx) {
     // --- INCLUDE ---
     if (strncasecmp(text, "INCLUDE ", 8) == 0) {
         if (ctx->include_depth >= AML_MAX_INCLUDE) {
-            set_error(ctx, "max include depth exceeded");
+            set_error_at(ctx, ctx->lines[idx].lineno, "max include depth exceeded");
             return idx + 1;
         }
         char path[512];
@@ -1792,7 +1808,7 @@ static int aml_exec_line(AML_ExecCtx* ctx, int idx) {
                             args[nargs++] = aml_eval(ctx, tok);
                         }
                     }
-                    aml_call_func(ctx, &ctx->funcs.funcs[fi], args, nargs);
+                    aml_call_func(ctx, &ctx->funcs.funcs[fi], args, nargs, ctx->lines[idx].lineno);
                     return idx + 1;
                 }
             }
@@ -1826,7 +1842,7 @@ static int aml_exec_line(AML_ExecCtx* ctx, int idx) {
         *cmd_end = 0;
         upcase(linebuf);
 
-        aml_exec_level0(linebuf, arg, ctx);
+        aml_exec_level0(linebuf, arg, ctx, ctx->lines[idx].lineno);
     }
     return idx + 1;
 }
