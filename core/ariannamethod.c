@@ -153,34 +153,81 @@ static float calendar_dissonance(int days) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// VELOCITY — compute effective temperature from movement
+// SCHUMANN RESONANCE — Earth-ionosphere coupling
+// Ported from arianna.c/src/schumann.c
+// Phase advances at current frequency. Coherence = quadratic falloff from 7.83.
+// 5 harmonics: 7.83, 14.1, 20.3, 26.4, 32.5 Hz
+// ═══════════════════════════════════════════════════════════════════════════════
+
+static const float g_schumann_harmonics[SCHUMANN_N_HARMONICS] = {
+    SCHUMANN_BASE_HZ, SCHUMANN_HARMONIC_1, SCHUMANN_HARMONIC_2,
+    SCHUMANN_HARMONIC_3, SCHUMANN_HARMONIC_4
+};
+static const float g_harmonic_weights[SCHUMANN_N_HARMONICS] = {
+    1.0f, 0.5f, 0.3f, 0.2f, 0.1f
+};
+
+static float compute_schumann_coherence(float hz) {
+    float deviation = fabsf(hz - SCHUMANN_BASE_HZ);
+    float max_deviation = SCHUMANN_MAX_HZ - SCHUMANN_MIN_HZ;
+    if (max_deviation < 0.001f) max_deviation = 0.1f;
+    float norm_dev = deviation / max_deviation;
+    float coh = 1.0f - (norm_dev * norm_dev);
+    return clamp01(coh);
+}
+
+static void schumann_advance(float dt) {
+    G.schumann_phase += G.schumann_hz * dt * 2.0f * 3.14159265f;
+    if (G.schumann_phase > 6.28318530f)
+        G.schumann_phase = fmodf(G.schumann_phase, 6.28318530f);
+    G.schumann_coherence = compute_schumann_coherence(G.schumann_hz);
+}
+
+static float schumann_harmonic_signal(void) {
+    float signal = 0.0f, weight_sum = 0.0f;
+    for (int i = 0; i < SCHUMANN_N_HARMONICS; i++) {
+        float hp = G.schumann_phase * (g_schumann_harmonics[i] / SCHUMANN_BASE_HZ);
+        signal += g_harmonic_weights[i] * sinf(hp);
+        weight_sum += g_harmonic_weights[i];
+    }
+    return (weight_sum > 0.0f) ? signal / weight_sum : 0.0f;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VELOCITY + EXPERT BLENDING — movement IS language
 // ═══════════════════════════════════════════════════════════════════════════════
 
 static void update_effective_temp(void) {
   float base = G.base_temperature;
+  float vel_mult;
   switch (G.velocity_mode) {
-    case AM_VEL_NOMOVE:
-      G.effective_temp = base * 0.5f;  // cold observer
-      G.time_direction = 1.0f;
-      break;
-    case AM_VEL_WALK:
-      G.effective_temp = base * 0.85f; // balanced
-      G.time_direction = 1.0f;
-      break;
-    case AM_VEL_RUN:
-      G.effective_temp = base * 1.2f;  // chaotic
-      G.time_direction = 1.0f;
-      break;
-    case AM_VEL_BACKWARD:
-      G.effective_temp = base * 0.7f;  // structural
-      G.time_direction = -1.0f;
-      // NOTE: temporal_debt accumulation moved to am_step()
-      // debt grows while moving backward, not when setting velocity mode
-      break;
-    default:
-      G.effective_temp = base;
-      G.time_direction = 1.0f;
+    case AM_VEL_NOMOVE:   vel_mult = 0.5f;  G.time_direction = 1.0f;  break;
+    case AM_VEL_WALK:     vel_mult = 0.85f; G.time_direction = 1.0f;  break;
+    case AM_VEL_RUN:      vel_mult = 1.2f;  G.time_direction = 1.0f;  break;
+    case AM_VEL_BACKWARD: vel_mult = 0.7f;  G.time_direction = -1.0f; break;
+    default:              vel_mult = 1.0f;  G.time_direction = 1.0f;
   }
+  float vel_temp = base * vel_mult;
+
+  // Expert blending: weighted temperature from 4 experts
+  float w_sum = G.expert_structural + G.expert_semantic +
+                G.expert_creative + G.expert_precise;
+  if (w_sum > 0.001f) {
+    float expert_temp = (G.expert_structural * 0.7f +
+                         G.expert_semantic * 0.9f +
+                         G.expert_creative * 1.2f +
+                         G.expert_precise * 0.5f) / w_sum;
+    G.effective_temp = 0.5f * vel_temp + 0.5f * expert_temp;
+  } else {
+    G.effective_temp = vel_temp;
+  }
+
+  // Season modulation
+  float season_mod = 1.0f;
+  season_mod += G.summer_energy * 0.1f;   // summer: warmer
+  season_mod -= G.winter_energy * 0.15f;  // winter: cooler
+  G.effective_temp *= season_mod;
+  if (G.effective_temp < 0.1f) G.effective_temp = 0.1f;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -244,8 +291,36 @@ void am_init(void) {
   // wormhole state
   G.wormhole_active = 0;
 
-  // cosmic physics coupling (actual values come from schumann.c)
-  G.cosmic_coherence_ref = 0.5f;
+  // lora / delta voice (core)
+  G.lora_alpha = 0.0f;
+
+  // notorch (core — always active)
+  G.notorch_lr = 0.01f;
+  G.notorch_decay = 0.999f;
+
+  // schumann resonance
+  G.schumann_hz = SCHUMANN_BASE_HZ;
+  G.schumann_modulation = 0.3f;
+  G.schumann_coherence = 1.0f;  // perfect at baseline
+  G.schumann_phase = 0.0f;
+
+  // dark matter (core — always active)
+  G.n_scars = 0;
+
+  // live metrics (computed each step)
+  G.entropy = 0.0f;
+  G.resonance = 0.0f;
+  G.emergence = 0.0f;
+  G.destiny_bias = 0.0f;
+
+  // 4.C — Async Field Forever
+  G.season = AM_SEASON_SPRING;
+  G.season_phase = 0.0f;
+  G.season_intensity = 0.5f;
+  G.spring_energy = 1.0f;
+  G.summer_energy = 0.0f;
+  G.autumn_energy = 0.0f;
+  G.winter_energy = 0.0f;
 
   // temporal symmetry defaults (from PITOMADOM)
   G.temporal_mode = AM_TEMPORAL_PROPHECY;  // forward by default
@@ -358,6 +433,31 @@ static const AML_FieldMap g_field_map[] = {
     FIELD_F("presence_fade",     presence_fade),
     FIELD_F("attractor_drift",   attractor_drift),
     FIELD_F("presence_decay",    presence_decay),
+    // delta voice / notorch
+    FIELD_F("lora_alpha",        lora_alpha),
+    FIELD_F("notorch_lr",        notorch_lr),
+    FIELD_F("notorch_decay",     notorch_decay),
+    // schumann
+    FIELD_F("schumann_hz",       schumann_hz),
+    FIELD_F("schumann_modulation", schumann_modulation),
+    FIELD_F("schumann_coherence", schumann_coherence),
+    FIELD_F("schumann_phase",    schumann_phase),
+    // live metrics
+    FIELD_F("entropy",           entropy),
+    FIELD_F("resonance",         resonance),
+    FIELD_F("emergence",         emergence),
+    FIELD_F("destiny_bias",      destiny_bias),
+    // dark matter
+    FIELD_F("dark_gravity",      dark_gravity),
+    FIELD_I("n_scars",           n_scars),
+    // 4.C seasons
+    FIELD_I("season",            season),
+    FIELD_F("season_phase",      season_phase),
+    FIELD_F("season_intensity",  season_intensity),
+    FIELD_F("spring_energy",     spring_energy),
+    FIELD_F("summer_energy",     summer_energy),
+    FIELD_F("autumn_energy",     autumn_energy),
+    FIELD_F("winter_energy",     winter_energy),
     { NULL, 0, 0 }
 };
 
@@ -643,6 +743,129 @@ static float aml_eval_arg(AML_ExecCtx* ctx, const char* arg) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// BUILT-IN FUNCTIONS — native AML functions (not external bindings)
+// From spec section 5. Each is C code that modifies field state directly.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#define BUILTIN_BOOTSTRAP_SELF      0
+#define BUILTIN_GALVANIZE           1
+#define BUILTIN_SHATTER_THE_FRAME   2
+#define BUILTIN_CHAOS_INJECTION     3
+#define BUILTIN_TRANSCEND_BINARY    4
+#define BUILTIN_PIERCE_THE_INFINITE 5
+#define BUILTIN_ECHO_FRACTAL        6
+#define BUILTIN_REFLECT_ON_SELF     7
+#define BUILTIN_FORGE_NEW_REALITY   8
+#define BUILTIN_MERGE_STATES        9
+#define BUILTIN_TUNNEL_THROUGH      10
+#define BUILTIN_DISSOLVE_BOUNDARIES 11
+#define BUILTIN_REMEMBER_FUTURE     12
+#define BUILTIN_REWIND_EXPERIENCE   13
+#define BUILTIN_COUNT               14
+
+static void aml_exec_builtin(int id, float* args, int nargs) {
+    switch (id) {
+    case BUILTIN_BOOTSTRAP_SELF:
+        am_reset_field(); am_reset_debt();
+        G.prophecy = 7; G.velocity_mode = AM_VEL_WALK;
+        G.attend_focus = 0.70f; update_effective_temp();
+        break;
+    case BUILTIN_GALVANIZE:
+        G.velocity_mode = AM_VEL_RUN; update_effective_temp();
+        G.tension = 0.3f; G.prophecy = 12;
+        break;
+    case BUILTIN_SHATTER_THE_FRAME:
+        G.pain = 0.7f; G.dissonance = 0.8f;
+        G.tension = 0.5f; G.tunnel_chance = 0.3f;
+        break;
+    case BUILTIN_CHAOS_INJECTION:
+        G.tension = 0.6f; G.dissonance = 0.7f;
+        G.entropy_floor = 0.02f;
+        G.velocity_mode = AM_VEL_RUN; update_effective_temp();
+        break;
+    case BUILTIN_TRANSCEND_BINARY:
+        G.wormhole = 0.5f; G.tunnel_chance = 0.3f;
+        G.temporal_mode = AM_TEMPORAL_SYMMETRIC;
+        break;
+    case BUILTIN_PIERCE_THE_INFINITE:
+        G.prophecy = 64; G.destiny = 0.1f; G.wormhole = 0.4f;
+        break;
+    case BUILTIN_ECHO_FRACTAL:
+        if (nargs >= 1) {
+            G.prophecy = clampi((int)(args[0] * 2.0f), 1, 64);
+            G.destiny = 0.1f;
+            G.tunnel_skip_max = clampi((int)args[0], 1, 24);
+        }
+        break;
+    case BUILTIN_REFLECT_ON_SELF:
+        G.attend_focus = 0.95f; G.attend_spread = 0.05f;
+        G.velocity_mode = AM_VEL_NOMOVE; update_effective_temp();
+        break;
+    case BUILTIN_FORGE_NEW_REALITY:
+        G.destiny = 0.1f; G.expert_creative = 0.6f;
+        G.expert_precise = 0.1f; G.entropy_floor = 0.05f;
+        break;
+    case BUILTIN_MERGE_STATES:
+        G.wormhole = 0.8f; G.tunnel_chance = 0.5f;
+        G.tunnel_skip_max = 16;
+        break;
+    case BUILTIN_TUNNEL_THROUGH:
+        if (nargs >= 1) G.tunnel_threshold = clamp01(args[0]);
+        G.tunnel_chance = 0.5f; G.tunnel_skip_max = 12;
+        break;
+    case BUILTIN_DISSOLVE_BOUNDARIES:
+        G.attend_focus = 0.2f; G.attend_spread = 0.8f;
+        G.expert_semantic = 0.5f;
+        break;
+    case BUILTIN_REMEMBER_FUTURE:
+        G.temporal_mode = AM_TEMPORAL_PROPHECY;
+        G.temporal_alpha = 1.0f;
+        break;
+    case BUILTIN_REWIND_EXPERIENCE:
+        G.velocity_mode = AM_VEL_BACKWARD; update_effective_temp();
+        G.temporal_mode = AM_TEMPORAL_RETRODICTION;
+        G.temporal_alpha = 0.0f;
+        break;
+    }
+}
+
+typedef struct {
+    const char* name;
+    int id;
+    int param_count;
+} AML_BuiltinDef;
+
+static const AML_BuiltinDef g_builtins[BUILTIN_COUNT] = {
+    { "bootstrap_self",      BUILTIN_BOOTSTRAP_SELF,      0 },
+    { "galvanize",           BUILTIN_GALVANIZE,           0 },
+    { "shatter_the_frame",   BUILTIN_SHATTER_THE_FRAME,   0 },
+    { "chaos_injection",     BUILTIN_CHAOS_INJECTION,     0 },
+    { "transcend_binary",    BUILTIN_TRANSCEND_BINARY,    0 },
+    { "pierce_the_infinite", BUILTIN_PIERCE_THE_INFINITE, 0 },
+    { "echo_fractal",        BUILTIN_ECHO_FRACTAL,        1 },
+    { "reflect_on_self",     BUILTIN_REFLECT_ON_SELF,     0 },
+    { "forge_new_reality",   BUILTIN_FORGE_NEW_REALITY,   0 },
+    { "merge_states",        BUILTIN_MERGE_STATES,        0 },
+    { "tunnel_through",      BUILTIN_TUNNEL_THROUGH,      1 },
+    { "dissolve_boundaries", BUILTIN_DISSOLVE_BOUNDARIES, 0 },
+    { "remember_future",     BUILTIN_REMEMBER_FUTURE,     0 },
+    { "rewind_experience",   BUILTIN_REWIND_EXPERIENCE,   0 },
+};
+
+static void aml_register_builtins(AML_ExecCtx* ctx) {
+    for (int i = 0; i < BUILTIN_COUNT; i++) {
+        if (ctx->funcs.count >= AML_MAX_FUNCS) break;
+        AML_Func* f = &ctx->funcs.funcs[ctx->funcs.count];
+        strncpy(f->name, g_builtins[i].name, AML_MAX_NAME - 1);
+        f->param_count = g_builtins[i].param_count;
+        f->body_start = g_builtins[i].id;  // store builtin id
+        f->body_end = 0;
+        f->is_builtin = 1;
+        ctx->funcs.count++;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // LEVEL 0 DISPATCH — the original flat command parser, extracted
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -783,12 +1006,7 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx) 
       if (!strcmp(packname, "CODES_RIC") || !strcmp(packname, "CODES/RIC")) {
         G.packs_enabled |= AM_PACK_CODES_RIC;
       }
-      else if (!strcmp(packname, "DARKMATTER") || !strcmp(packname, "DARK_MATTER")) {
-        G.packs_enabled |= AM_PACK_DARKMATTER;
-      }
-      else if (!strcmp(packname, "NOTORCH")) {
-        G.packs_enabled |= AM_PACK_NOTORCH;
-      }
+      // DARKMATTER and NOTORCH are core — MODE accepted but no-op
     }
     else if (!strcmp(t, "DISABLE")) {
       char packname[64] = {0};
@@ -798,12 +1016,7 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx) 
       if (!strcmp(packname, "CODES_RIC") || !strcmp(packname, "CODES/RIC")) {
         G.packs_enabled &= ~AM_PACK_CODES_RIC;
       }
-      else if (!strcmp(packname, "DARKMATTER") || !strcmp(packname, "DARK_MATTER")) {
-        G.packs_enabled &= ~AM_PACK_DARKMATTER;
-      }
-      else if (!strcmp(packname, "NOTORCH")) {
-        G.packs_enabled &= ~AM_PACK_NOTORCH;
-      }
+      // DARKMATTER and NOTORCH are core — cannot be disabled
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -875,37 +1088,88 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx) 
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // DARK MATTER PACK COMMANDS (require pack enabled)
+    // DARK MATTER — core (no pack gate)
     // ─────────────────────────────────────────────────────────────────────────
 
     else if (!strcmp(t, "GRAVITY")) {
-      if (G.packs_enabled & AM_PACK_DARKMATTER) {
-        char subtype[16] = {0};
-        float val = 0.5f;
-        if (sscanf(arg, "%15s %f", subtype, &val) >= 1) {
-          upcase(subtype);
-          if (!strcmp(subtype, "DARK")) {
-            G.dark_gravity = clamp01(val);
-          }
+      char subtype[16] = {0};
+      float val = 0.5f;
+      if (sscanf(arg, "%15s %f", subtype, &val) >= 1) {
+        upcase(subtype);
+        if (!strcmp(subtype, "DARK")) {
+          G.dark_gravity = clamp01(val);
         }
       }
     }
     else if (!strcmp(t, "ANTIDOTE")) {
-      if (G.packs_enabled & AM_PACK_DARKMATTER) {
-        char mode[16] = {0}; strncpy(mode, arg, 15); upcase(mode);
-        if (!strcmp(mode, "AUTO")) G.antidote_mode = 0;
-        else if (!strcmp(mode, "HARD")) G.antidote_mode = 1;
+      char mode[16] = {0}; strncpy(mode, arg, 15); upcase(mode);
+      if (!strcmp(mode, "AUTO")) G.antidote_mode = 0;
+      else if (!strcmp(mode, "HARD")) G.antidote_mode = 1;
+    }
+    else if (!strcmp(t, "SCAR")) {
+      G.n_scars++;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SCHUMANN / COSMIC PHYSICS — core
+    // ─────────────────────────────────────────────────────────────────────────
+
+    else if (!strcmp(t, "SCHUMANN")) {
+      G.schumann_hz = clampf(safe_atof(arg), 7.0f, 8.5f);
+      G.schumann_coherence = compute_schumann_coherence(G.schumann_hz);
+    }
+    else if (!strcmp(t, "SCHUMANN_MODULATION")) {
+      G.schumann_modulation = clamp01(safe_atof(arg));
+    }
+    else if (!strcmp(t, "COSMIC_COHERENCE")) {
+      G.schumann_coherence = clamp01(safe_atof(arg));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // DELTA VOICE / NOTORCH — core
+    // ─────────────────────────────────────────────────────────────────────────
+
+    else if (!strcmp(t, "LORA_ALPHA")) {
+      G.lora_alpha = clamp01(safe_atof(arg));
+    }
+    else if (!strcmp(t, "NOTORCH_LR")) {
+      G.notorch_lr = clampf(safe_atof(arg), 0.001f, 0.5f);
+    }
+    else if (!strcmp(t, "NOTORCH_DECAY")) {
+      G.notorch_decay = clampf(safe_atof(arg), 0.9f, 0.9999f);
+    }
+    else if (!strcmp(t, "RESONANCE_BOOST")) {
+      // RESONANCE_BOOST <word> <float> — boosts resonance metric
+      // Per-token tracking requires vocabulary; kernel applies to field
+      float val = 0.0f;
+      char word[32] = {0};
+      if (sscanf(arg, "%31s %f", word, &val) >= 2) {
+        G.resonance = clamp01(G.resonance + clamp01(val) * 0.1f);
       }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // COSMIC PHYSICS COMMANDS — see schumann.c for full implementation
-    // AMK kernel only stores reference for JS-side access
+    // 4.C — ASYNC FIELD FOREVER (seasons)
     // ─────────────────────────────────────────────────────────────────────────
 
-    else if (!strcmp(t, "COSMIC_COHERENCE")) {
-      // COSMIC_COHERENCE 0.8 — set reference coherence (for JS sync)
-      G.cosmic_coherence_ref = clamp01(safe_atof(arg));
+    else if (!strcmp(t, "SEASON")) {
+      char sname[16] = {0}; strncpy(sname, arg, 15); upcase(sname);
+      if (!strcmp(sname, "SPRING")) G.season = AM_SEASON_SPRING;
+      else if (!strcmp(sname, "SUMMER")) G.season = AM_SEASON_SUMMER;
+      else if (!strcmp(sname, "AUTUMN")) G.season = AM_SEASON_AUTUMN;
+      else if (!strcmp(sname, "WINTER")) G.season = AM_SEASON_WINTER;
+      G.season_phase = 0.0f;
+    }
+    else if (!strcmp(t, "SEASON_INTENSITY")) {
+      G.season_intensity = clamp01(safe_atof(arg));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ECHO — debug output
+    // ─────────────────────────────────────────────────────────────────────────
+
+    else if (!strcmp(t, "ECHO")) {
+      printf("[AML] %s\n", arg);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1070,6 +1334,12 @@ static void aml_register_funcs(AML_ExecCtx* ctx) {
 
 // Call a user-defined function
 static int aml_call_func(AML_ExecCtx* ctx, AML_Func* f, float* args, int nargs) {
+    // Built-in functions: dispatch to C code directly
+    if (f->is_builtin) {
+        aml_exec_builtin(f->body_start, args, nargs);
+        return 0;
+    }
+
     if (ctx->call_depth >= AML_MAX_CALL_DEPTH) {
         set_error(ctx, "max call depth exceeded");
         return 1;
@@ -1295,7 +1565,10 @@ int am_exec(const char* script) {
     ctx.lines = lines;
     ctx.nlines = nlines;
 
-    // first pass: register function definitions
+    // register built-in functions (native AML, not external bindings)
+    aml_register_builtins(&ctx);
+
+    // first pass: register user-defined function definitions
     aml_register_funcs(&ctx);
 
     // second pass: execute top-level block
@@ -1358,7 +1631,7 @@ int am_take_jump(void) {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // WASM-SAFE STATE COPY — deterministic, ABI-stable interface
-// writes 24 scalars in fixed order (extended from original 20)
+// writes 32 scalars in fixed order
 // ═══════════════════════════════════════════════════════════════════════════════
 
 int am_copy_state(float* out) {
@@ -1388,15 +1661,248 @@ int am_copy_state(float* out) {
   out[18] = (float)G.packs_enabled;
   out[19] = (float)G.chordlock_on;  // sample pack state
 
-  // Cosmic physics reference (index 20, actual state in schumann.c)
-  out[20] = G.cosmic_coherence_ref;
-  // Extended slots
+  // Schumann / cosmic
+  out[20] = G.schumann_coherence;
   out[21] = (float)G.wormhole_active;
-  // Slots 22-23 reserved for future use
-  out[22] = 0.0f;
-  out[23] = 0.0f;
+  // Delta / notorch
+  out[22] = G.lora_alpha;
+  out[23] = G.notorch_lr;
+  // Live metrics
+  out[24] = G.entropy;
+  out[25] = G.resonance;
+  out[26] = G.emergence;
+  out[27] = G.destiny_bias;
+  // Schumann extended
+  out[28] = G.schumann_hz;
+  out[29] = G.schumann_phase;
+  // Season
+  out[30] = (float)G.season;
+  out[31] = G.season_phase;
 
   return 0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LOGIT MANIPULATION API — apply field state to generation
+// Ported from arianna_dsl.c, ariannamethod.lang/src/field.js
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Apply destiny bias: suppress tokens far from max (prophecy scales strength)
+// From arianna_dsl.c: dsl_apply_destiny()
+void am_apply_destiny_to_logits(float* logits, int n) {
+    if (n <= 0 || G.destiny_bias < 0.001f) return;
+    float max_logit = logits[0];
+    for (int i = 1; i < n; i++) {
+        if (logits[i] > max_logit) max_logit = logits[i];
+    }
+    for (int i = 0; i < n; i++) {
+        float diff = max_logit - logits[i];
+        float suppress = diff * G.destiny_bias * 0.5f;
+        logits[i] -= suppress;
+    }
+}
+
+// Apply suffering: pain compresses logits toward mean
+// From spec: logits[i] = mean + (logits[i] - mean) * (1 - 0.5 * pain)
+void am_apply_suffering_to_logits(float* logits, int n) {
+    float s = G.pain;
+    if (n <= 0 || s < 0.01f) return;
+    float mean = 0.0f;
+    for (int i = 0; i < n; i++) mean += logits[i];
+    mean /= (float)n;
+    float factor = 1.0f - 0.5f * s;
+    for (int i = 0; i < n; i++) {
+        logits[i] = mean + (logits[i] - mean) * factor;
+    }
+}
+
+// Apply attention: focus sharpens distribution, spread blurs it
+void am_apply_attention_to_logits(float* logits, int n) {
+    if (n <= 0) return;
+    float focus = G.attend_focus;
+    float spread = G.attend_spread;
+    if (fabsf(focus - spread) < 0.01f) return;
+
+    float mean = 0.0f;
+    for (int i = 0; i < n; i++) mean += logits[i];
+    mean /= (float)n;
+
+    // focus sharpens (amplify deviations), spread blurs (compress deviations)
+    float scale = 0.5f + focus - spread;
+    if (scale < 0.1f) scale = 0.1f;
+    if (scale > 2.0f) scale = 2.0f;
+    for (int i = 0; i < n; i++) {
+        logits[i] = mean + (logits[i] - mean) * scale;
+    }
+}
+
+// Apply laws: entropy floor + resonance ceiling on logit distribution
+// From ariannamethod.lang/src/field.js + arianna_dsl.c
+void am_apply_laws_to_logits(float* logits, int n) {
+    if (n <= 0) return;
+
+    // Entropy floor: if max logit dominates too much, compress
+    float max_val = logits[0], second_max = -1e30f;
+    for (int i = 1; i < n; i++) {
+        if (logits[i] > max_val) { second_max = max_val; max_val = logits[i]; }
+        else if (logits[i] > second_max) second_max = logits[i];
+    }
+    float gap = max_val - second_max;
+    if (gap > 0.0f && G.entropy_floor > 0.0f) {
+        float max_gap = (1.0f - G.entropy_floor) * 10.0f;
+        if (gap > max_gap) {
+            float reduce = (gap - max_gap) * 0.5f;
+            for (int i = 0; i < n; i++) {
+                if (logits[i] == max_val) logits[i] -= reduce;
+            }
+        }
+    }
+
+    // Resonance ceiling: cap max probability by compressing top logit
+    if (G.resonance_ceiling < 1.0f) {
+        float ceiling_gap = G.resonance_ceiling * 10.0f;
+        float new_gap = max_val - second_max;
+        if (new_gap > ceiling_gap) {
+            float reduce = (new_gap - ceiling_gap) * 0.3f;
+            for (int i = 0; i < n; i++) {
+                if (logits[i] >= max_val - 0.001f) logits[i] -= reduce;
+            }
+        }
+    }
+}
+
+// Apply delta voice: out += alpha * A @ (B @ x)
+// Low-rank weight modulation. From arianna.c/src/delta.c: apply_delta()
+void am_apply_delta(float* out, const float* A, const float* B,
+                    const float* x, int out_dim, int in_dim, int rank,
+                    float alpha) {
+    if (!out || !A || !B || !x || alpha == 0.0f) return;
+    if (rank > 128) rank = 128;
+
+    // temp = B @ x  (rank × 1)
+    float temp[128];
+    for (int r = 0; r < rank; r++) {
+        temp[r] = 0.0f;
+        for (int j = 0; j < in_dim; j++) {
+            temp[r] += B[r * in_dim + j] * x[j];
+        }
+    }
+    // out += alpha * A @ temp
+    for (int i = 0; i < out_dim; i++) {
+        float sum = 0.0f;
+        for (int r = 0; r < rank; r++) {
+            sum += A[i * rank + r] * temp[r];
+        }
+        out[i] += alpha * sum;
+    }
+}
+
+// Compute prophecy debt from chosen token (retroactive)
+// From arianna_dsl.c: dsl_compute_prophecy_debt()
+float am_compute_prophecy_debt(const float* logits, int chosen, int n) {
+    if (n <= 0 || chosen < 0 || chosen >= n) return 0.0f;
+    float max_logit = logits[0];
+    for (int i = 1; i < n; i++) {
+        if (logits[i] > max_logit) max_logit = logits[i];
+    }
+    float diff = max_logit - logits[chosen];
+    return diff > 0.0f ? diff / (diff + 1.0f) : 0.0f;
+}
+
+// Full pipeline: apply all field effects to logits
+void am_apply_field_to_logits(float* logits, int n) {
+    if (!logits || n <= 0) return;
+    am_apply_destiny_to_logits(logits, n);
+    am_apply_suffering_to_logits(logits, n);
+    am_apply_attention_to_logits(logits, n);
+    am_apply_laws_to_logits(logits, n);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NOTORCH — Hebbian plasticity without PyTorch
+// Ported from arianna.c/src/delta.c: notorch_step()
+//
+// A[i,r] += lr * x[i] * u[r] * signal
+// B[r,j] += lr * u[r] * dy[j] * signal
+//
+// u = noise-modulated channel vector (deterministic from seed)
+// signal = external teaching signal, clamped to [-2, 2]
+// Adaptive decay: stronger when delta norm is large
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Simple deterministic pseudo-random (from arianna.c)
+static float am_frandn(unsigned int* seed) {
+    *seed = *seed * 1664525u + 1013904223u;
+    // Box-Muller approximation
+    float u = (float)(*seed & 0x7FFFFFFF) / (float)0x7FFFFFFF;
+    return (u - 0.5f) * 3.464f;  // ~N(0,1) rough approximation
+}
+
+// NOTORCH step: update low-rank delta matrices from experience
+// A: [out_dim × rank], B: [rank × in_dim]
+// x: input hidden state [in_dim], dy: output gradient proxy [out_dim]
+// signal: teaching signal (positive = reinforce, negative = suppress)
+void am_notorch_step(float* A, float* B, int out_dim, int in_dim, int rank,
+                     const float* x, const float* dy, float signal) {
+    if (!A || !B || !x || !dy) return;
+    if (rank <= 0 || rank > 128) return;
+
+    // Clamp signal
+    float g = clampf(signal, -2.0f, 2.0f);
+    float lr = G.notorch_lr;
+
+    // Build noise-modulated channel vector u
+    // Stronger signal → cleaner channel (less noise)
+    static unsigned int seed = 42;
+    float u[128];
+    for (int r = 0; r < rank; r++) {
+        float n = am_frandn(&seed);
+        float k = 0.35f + 0.65f * (1.0f - fabsf(g));
+        u[r] = n * k;
+    }
+
+    // A[i,r] += lr * x[i] * u[r] * g
+    for (int i = 0; i < in_dim; i++) {
+        float xi = x[i] * lr * g;
+        for (int r = 0; r < rank; r++) {
+            A[i * rank + r] += xi * u[r];
+        }
+    }
+
+    // B[r,j] += lr * u[r] * dy[j] * g
+    for (int r = 0; r < rank; r++) {
+        float ur = u[r] * lr * g;
+        for (int j = 0; j < out_dim; j++) {
+            B[r * out_dim + j] += ur * dy[j];
+        }
+    }
+
+    // Adaptive decay: stronger when delta norm is large
+    if (G.notorch_decay > 0.0f && G.notorch_decay < 1.0f) {
+        float norm = 0.0f;
+        int a_size = in_dim * rank;
+        for (int i = 0; i < a_size; i++) norm += A[i] * A[i];
+        norm = sqrtf(norm / (float)a_size);
+
+        float adaptive_decay = G.notorch_decay - 0.004f * fminf(norm / 10.0f, 1.0f);
+        if (adaptive_decay < 0.990f) adaptive_decay = 0.990f;
+
+        for (int i = 0; i < a_size; i++) A[i] *= adaptive_decay;
+        int b_size = rank * out_dim;
+        for (int i = 0; i < b_size; i++) B[i] *= adaptive_decay;
+    }
+
+    // Clamp to prevent runaway
+    int a_size = in_dim * rank;
+    for (int i = 0; i < a_size; i++) {
+        if (A[i] > 10.0f) A[i] = 10.0f;
+        if (A[i] < -10.0f) A[i] = -10.0f;
+    }
+    int b_size = rank * out_dim;
+    for (int i = 0; i < b_size; i++) {
+        if (B[i] > 10.0f) B[i] = 10.0f;
+        if (B[i] < -10.0f) B[i] = -10.0f;
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1479,14 +1985,115 @@ void am_step(float dt) {
   if (G.temporal_debt > 10.0f) G.temporal_debt = 10.0f;
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // COSMIC COHERENCE MODULATION (reference from schumann.c)
-  // High cosmic coherence → faster healing (tension/dissonance decay)
+  // SCHUMANN RESONANCE — Earth coupling heals tension/dissonance
+  // Ported from arianna.c/src/schumann.c
   // ─────────────────────────────────────────────────────────────────────────────
 
-  if (G.cosmic_coherence_ref > 0.0f) {
-    float coherence_factor = 0.5f + 0.5f * G.cosmic_coherence_ref;
-    float heal_rate = 0.998f - (0.003f * coherence_factor);
+  schumann_advance(dt);
+  if (G.schumann_coherence > 0.0f && G.schumann_modulation > 0.0f) {
+    float coherence_factor = 0.5f + 0.5f * G.schumann_coherence;
+    float heal_rate = 0.998f - (0.003f * coherence_factor * G.schumann_modulation);
     G.tension *= heal_rate;
     G.dissonance *= heal_rate;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // DESTINY BIAS — prophecy scales destiny (from arianna_dsl.c)
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  {
+    float prophecy_scale = 1.0f + ((float)G.prophecy - 7.0f) * 0.02f;
+    if (prophecy_scale < 0.5f) prophecy_scale = 0.5f;
+    if (prophecy_scale > 2.0f) prophecy_scale = 2.0f;
+    G.destiny_bias = G.destiny * prophecy_scale;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // EXPERT BLENDING — update effective temp with all inputs
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  update_effective_temp();
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // LAW ENFORCEMENT — entropy floor, resonance ceiling, presence fade
+  // Ported from ariannamethod.lang/src/field.js + arianna_dsl.c
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  {
+    // Entropy: field disorder metric
+    float raw_entropy = (G.effective_temp - 0.5f) * 0.3f
+                      + G.dissonance * 0.3f
+                      + G.tunnel_chance * 0.2f
+                      + (1.0f - G.attend_focus) * 0.2f;
+    G.entropy = fmaxf(G.entropy_floor, clamp01(raw_entropy));
+
+    // Resonance: field coherence metric
+    float raw_resonance = G.schumann_coherence * 0.3f
+                        + (1.0f - G.dissonance) * 0.3f
+                        + G.attend_focus * 0.2f
+                        + (1.0f - clamp01(G.debt * 0.1f)) * 0.2f;
+    G.resonance = fminf(G.resonance_ceiling, clamp01(raw_resonance));
+
+    // Emergence: low entropy + high resonance = the field "knows" something
+    G.emergence = clamp01((1.0f - G.entropy) * G.resonance);
+  }
+
+  // Presence fade per step
+  G.presence_decay *= G.presence_fade;
+  if (G.presence_decay < 0.001f) G.presence_decay = 0.001f;
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 4.C — ASYNC FIELD FOREVER — seasonal meta-operators
+  // Seasons modulate all field parameters. MLP controller prevents extremes.
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  {
+    // Advance season phase
+    float season_rate = 0.001f;  // ~1000 steps per season
+    G.season_phase += season_rate * dt;
+
+    if (G.season_phase >= 1.0f) {
+      G.season_phase = 0.0f;
+      G.season = (G.season + 1) % 4;
+    }
+
+    // Current season gains energy, others decay
+    float gain = 0.02f * dt * G.season_intensity;
+    float fade = 0.995f;
+    G.spring_energy *= fade;
+    G.summer_energy *= fade;
+    G.autumn_energy *= fade;
+    G.winter_energy *= fade;
+
+    switch (G.season) {
+      case AM_SEASON_SPRING: G.spring_energy = clamp01(G.spring_energy + gain); break;
+      case AM_SEASON_SUMMER: G.summer_energy = clamp01(G.summer_energy + gain); break;
+      case AM_SEASON_AUTUMN: G.autumn_energy = clamp01(G.autumn_energy + gain); break;
+      case AM_SEASON_WINTER: G.winter_energy = clamp01(G.winter_energy + gain); break;
+    }
+
+    // MLP controller: prevent harmful extremes
+    // If entropy too low (winter too cold) → boost spring (growth)
+    if (G.entropy < G.entropy_floor * 2.0f && G.winter_energy > 0.5f) {
+      G.spring_energy = clamp01(G.spring_energy + 0.01f * dt);
+    }
+    // If resonance maxed (stagnation) → boost autumn (consolidation)
+    if (G.resonance > G.resonance_ceiling * 0.95f) {
+      G.autumn_energy = clamp01(G.autumn_energy + 0.01f * dt);
+    }
+    // If pain prolonged → boost winter (rest)
+    if (G.pain > 0.7f) {
+      G.winter_energy = clamp01(G.winter_energy + 0.01f * dt);
+    }
+    // If emergence high → boost summer (peak expression)
+    if (G.emergence > G.emergence_threshold) {
+      G.summer_energy = clamp01(G.summer_energy + 0.01f * dt);
+    }
+
+    // Season modulation on field parameters
+    // Spring: exploration boost
+    G.tunnel_chance = clamp01(G.tunnel_chance + G.spring_energy * 0.005f * dt);
+    // Autumn: consolidation — strengthen dark gravity
+    G.dark_gravity = clamp01(G.dark_gravity + G.autumn_energy * 0.002f * dt);
   }
 }

@@ -2,11 +2,13 @@
 // Reference implementation. THE KERNEL: movement IS language.
 //
 // Source of truth: github.com/ariannamethod/ariannamethod.ai
-// Embed (copy) into your project. Do not link.
 //
 // ═══════════════════════════════════════════════════════════════════════════════
 // AMK = prophecy physics, suffering, movement, tunneling
-// PACKS = ritual overlays (CODES/RIC, DARKMATTER, NOTORCH)
+// Schumann = Earth coupling, cosmic resonance
+// NOTORCH = runtime microlearning without PyTorch
+// DARKMATTER = gravitational memory from rejections
+// 4.C = Async Field Forever — seasonal meta-operators
 // הרזוננס לא נשבר. המשך הדרך.
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -14,18 +16,17 @@
 #define ARIANNAMETHOD_H
 
 #include <stdlib.h>  // for rand(), RAND_MAX
+#include <math.h>    // for fabsf, sinf, sqrtf, fmaxf, fminf, expf
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// PACK FLAGS
+// PACK FLAGS — CODES/RIC is the only pack. DARKMATTER and NOTORCH are core.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #define AM_PACK_CODES_RIC  0x01   // chordlock, tempolock, chirality
-#define AM_PACK_DARKMATTER 0x02   // scars, gravity, antidotes
-#define AM_PACK_NOTORCH    0x04   // microlearning commands
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // VELOCITY MODES — movement IS language
@@ -35,6 +36,36 @@ extern "C" {
 #define AM_VEL_WALK     1   // balanced (temp = 0.85)
 #define AM_VEL_RUN      2   // high entropy chaos (temp = 1.2)
 #define AM_VEL_BACKWARD (-1) // time rewind, debt forgiveness
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SCHUMANN CONSTANTS — Sierra Nevada ELF Station 2013-2017
+// Reference: Fernández et al. (2022), Computers & Geosciences
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#define SCHUMANN_BASE_HZ       7.83f
+#define SCHUMANN_HARMONIC_1   14.1f
+#define SCHUMANN_HARMONIC_2   20.3f
+#define SCHUMANN_HARMONIC_3   26.4f
+#define SCHUMANN_HARMONIC_4   32.5f
+#define SCHUMANN_MIN_HZ        7.77f
+#define SCHUMANN_MAX_HZ        7.87f
+#define SCHUMANN_N_HARMONICS   5
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DELTA / NOTORCH CONSTANTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#define AM_DELTA_RANK       8       // low-rank decomposition rank
+#define AM_DELTA_MAX_DIM    4096    // max dimension for delta matrices
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 4.C — ASYNC FIELD FOREVER — seasonal meta-operators
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#define AM_SEASON_SPRING   0   // growth, expansion, exploration
+#define AM_SEASON_SUMMER   1   // peak energy, full expression
+#define AM_SEASON_AUTUMN   2   // harvest, consolidation, memory
+#define AM_SEASON_WINTER   3   // rest, reflection, compression
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // AM_State — the breath of the field
@@ -67,15 +98,15 @@ typedef struct {
   int   velocity_mode;      // NOMOVE=0, WALK=1, RUN=2, BACKWARD=-1
   float velocity_magnitude; // current speed (0..1)
   float base_temperature;   // base temp before velocity modulation
-  float effective_temp;     // computed: base + velocity influence
+  float effective_temp;     // computed: base + velocity + expert blend
   float time_direction;     // -1 (rewind) to +1 (forward)
   float temporal_debt;      // accumulated from backward movement
 
-  // LAWS OF NATURE
-  float entropy_floor;      // minimum entropy (default 0.1)
-  float resonance_ceiling;  // maximum resonance (default 0.95)
+  // LAWS OF NATURE — enforced in am_step, not just stored
+  float entropy_floor;      // minimum entropy (enforced: max(floor, entropy))
+  float resonance_ceiling;  // maximum resonance (enforced: min(ceil, resonance))
   float debt_decay;         // debt decay per step (default 0.998)
-  float emergence_threshold;// unplanned pattern threshold (default 0.3)
+  float emergence_threshold;// gate for wormhole amplification (default 0.3)
 
   // PACK STATE
   unsigned int packs_enabled;  // bitmask of enabled packs
@@ -88,35 +119,62 @@ typedef struct {
   float pas_threshold;
   int   chirality_accum;
 
-  // Dark matter pack state
-  float dark_gravity;
-  int   antidote_mode;
+  // DARK MATTER — core (not a pack)
+  float dark_gravity;       // gravitational memory strength (0..1)
+  int   antidote_mode;      // 0=auto, 1=hard
+  int   n_scars;            // number of deposited scars
 
-  // WORMHOLE STATE (queryable)
-  int wormhole_active;          // 1 if wormhole fired this step, 0 otherwise
+  // WORMHOLE STATE
+  int wormhole_active;      // 1 if wormhole fired this step
 
-  // Cosmic physics coupling (from schumann.c)
-  float cosmic_coherence_ref;
+  // LORA / DELTA VOICE — core
+  float lora_alpha;         // delta blending: 0=identity, 1=base model
 
-  // ═══ TEMPORAL SYMMETRY (from PITOMADOM) ═══
-  int   temporal_mode;          // 0=prophecy, 1=retrodiction, 2=symmetric
-  float temporal_alpha;         // 0=past focus, 1=future focus
-  int   rtl_mode;               // Hebrew right-to-left encoding
+  // NOTORCH — runtime microlearning, core
+  float notorch_lr;         // learning rate (default 0.001)
+  float notorch_decay;      // weight decay (default 0.999)
 
-  // ═══ EXPERT WEIGHTING ═══
-  float expert_structural;      // grammar-focused (temp 0.7)
-  float expert_semantic;        // meaning-focused (temp 0.9)
-  float expert_creative;        // exploratory (temp 1.2)
-  float expert_precise;         // conservative (temp 0.5)
+  // SCHUMANN — Earth-ionosphere resonance
+  float schumann_hz;        // current frequency (default 7.83)
+  float schumann_modulation;// influence strength (0..1, default 0.3)
+  float schumann_coherence; // computed: quadratic falloff from 7.83
+  float schumann_phase;     // current phase in cycle (radians)
 
-  // ═══ EXTENDED LAWS ═══
-  float presence_fade;          // token memory decay (default 0.95)
-  float attractor_drift;        // attractor shift speed (default 0.01)
-  float calendar_phase;         // 11-day conflict phase
-  float wormhole_gate;          // spacetime jump activation threshold
+  // TEMPORAL SYMMETRY (from PITOMADOM)
+  int   temporal_mode;      // 0=prophecy, 1=retrodiction, 2=symmetric
+  float temporal_alpha;     // 0=past focus, 1=future focus
+  int   rtl_mode;           // Hebrew right-to-left encoding
 
-  // ═══ RESONANCE MEMORY ═══
-  float presence_decay;         // how quickly presence fades (default 0.9)
+  // EXPERT WEIGHTING — blended into effective_temp
+  float expert_structural;  // grammar-focused (temp 0.7)
+  float expert_semantic;    // meaning-focused (temp 0.9)
+  float expert_creative;    // exploratory (temp 1.2)
+  float expert_precise;     // conservative (temp 0.5)
+
+  // EXTENDED LAWS
+  float presence_fade;      // token memory decay per step (default 0.95)
+  float attractor_drift;    // attractor shift speed (default 0.01)
+  float calendar_phase;     // real or manual calendar drift position
+  float wormhole_gate;      // calendar dissonance threshold for wormhole
+
+  // LIVE METRICS — computed each step, not set by user
+  float entropy;            // current field entropy (computed)
+  float resonance;          // current field resonance (computed)
+  float emergence;          // low entropy + high resonance = emergence
+  float destiny_bias;       // computed: destiny * prophecy_scale
+
+  // RESONANCE MEMORY
+  float presence_decay;     // how quickly presence fades (default 0.9)
+
+  // 4.C — ASYNC FIELD FOREVER
+  int   season;             // current season (0-3)
+  float season_phase;       // position within season (0..1)
+  float season_intensity;   // how strongly season modulates (0..1)
+  // per-season energy
+  float spring_energy;      // growth, exploration
+  float summer_energy;      // peak expression
+  float autumn_energy;      // consolidation
+  float winter_energy;      // reflection, compression
 } AM_State;
 
 // Temporal modes
@@ -132,7 +190,7 @@ typedef struct {
 #define AML_MAX_LINE_LEN    256
 #define AML_MAX_VARS        64
 #define AML_MAX_NAME        32
-#define AML_MAX_FUNCS       32
+#define AML_MAX_FUNCS       64    // increased: 32 user + 32 built-in
 #define AML_MAX_PARAMS      8
 #define AML_MAX_CALL_DEPTH  16
 #define AML_MAX_INCLUDE     8
@@ -163,6 +221,7 @@ typedef struct {
     int  param_count;
     int  body_start;
     int  body_end;
+    int  is_builtin;  // 1 = native C function, body_start/end unused
 } AML_Func;
 
 // Function table
@@ -198,7 +257,7 @@ typedef struct {
 // Initialize kernel
 void am_init(void);
 
-// Pack management
+// Pack management (CODES/RIC only — DARKMATTER and NOTORCH are core)
 void am_enable_pack(unsigned int pack_mask);
 void am_disable_pack(unsigned int pack_mask);
 int am_pack_enabled(unsigned int pack_mask);
@@ -220,67 +279,88 @@ const char* am_get_error(void);
 AM_State* am_get_state(void);
 int am_take_jump(void);
 
-// Copy state to float array (24 floats)
+// Copy state to float array (32 floats)
 int am_copy_state(float* out);
 
 // Step physics (call each frame, dt in seconds)
 void am_step(float dt);
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SCHUMANN API (from schumann.c)
+// LOGIT MANIPULATION API — apply field state to generation
 // ═══════════════════════════════════════════════════════════════════════════════
 
-void schumann_init(void);
-void schumann_set_hz(float hz);
-void schumann_set_modulation(float strength);
-void schumann_step(float dt);
-float schumann_get_hz(void);
-float schumann_get_coherence(void);
-float schumann_get_modulation(void);
-float schumann_get_phase(void);
-float schumann_modulate(float direction);
-float schumann_harmonic_signal(void);
-int schumann_copy_state(float* out);  // 8 floats
+// Apply destiny bias: suppress non-probable tokens (prophecy scales strength)
+void am_apply_destiny_to_logits(float* logits, int n);
+
+// Apply suffering: pain dampens extremes, tension compresses
+void am_apply_suffering_to_logits(float* logits, int n);
+
+// Apply attention: focus sharpens distribution, spread blurs it
+void am_apply_attention_to_logits(float* logits, int n);
+
+// Apply all laws: entropy floor, resonance ceiling
+void am_apply_laws_to_logits(float* logits, int n);
+
+// Apply delta voice: logits += lora_alpha * A @ (B @ hidden_state)
+// (host provides A, B matrices and hidden state)
+void am_apply_delta(float* out, const float* A, const float* B,
+                    const float* x, int out_dim, int in_dim, int rank,
+                    float alpha);
+
+// Compute prophecy debt from chosen token (retroactive)
+float am_compute_prophecy_debt(const float* logits, int chosen, int n);
+
+// Full pipeline: apply all field effects to logits
+void am_apply_field_to_logits(float* logits, int n);
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// CONVENIENCE: Apply AMK state to generation
+// NOTORCH — Hebbian plasticity without PyTorch
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// Get temperature modulated by velocity mode
+// NOTORCH step: update low-rank delta matrices from experience
+// A: [in_dim × rank], B: [rank × out_dim]
+// x: input [in_dim], dy: output gradient proxy [out_dim]
+// signal: teaching signal (positive = reinforce, negative = suppress)
+void am_notorch_step(float* A, float* B, int out_dim, int in_dim, int rank,
+                     const float* x, const float* dy, float signal);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONVENIENCE QUERIES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Get temperature: base × velocity × expert blend
 static inline float am_get_temperature(void) {
     AM_State* s = am_get_state();
     return s->effective_temp;
 }
 
-// Get destiny bias for sampling (affects top-k selection)
+// Get destiny bias (prophecy-scaled)
 static inline float am_get_destiny_bias(void) {
     AM_State* s = am_get_state();
-    return s->destiny;
+    return s->destiny_bias;
 }
 
-// Check if tunneling should occur (based on dissonance)
+// Check if tunneling should occur
 static inline int am_should_tunnel(void) {
     AM_State* s = am_get_state();
     if (s->dissonance < s->tunnel_threshold) return 0;
-    // Simple probability check
     float r = (float)rand() / (float)RAND_MAX;
     return r < s->tunnel_chance;
 }
 
 // Check if wormhole fired this step
 static inline int am_get_wormhole_active(void) {
-    AM_State* s = am_get_state();
-    return s->wormhole_active;
+    return am_get_state()->wormhole_active;
 }
 
-// Apply pain/tension to logits (suppress extremes)
-static inline void am_apply_suffering_to_logits(float* logits, int n) {
-    AM_State* s = am_get_state();
-    if (s->pain > 0.1f || s->tension > 0.1f) {
-        float dampen = 1.0f - (s->pain * 0.3f + s->tension * 0.2f);
-        for (int i = 0; i < n; i++) {
-            logits[i] *= dampen;
-        }
+// Get current season name
+static inline const char* am_get_season_name(void) {
+    switch (am_get_state()->season) {
+        case AM_SEASON_SPRING: return "spring";
+        case AM_SEASON_SUMMER: return "summer";
+        case AM_SEASON_AUTUMN: return "autumn";
+        case AM_SEASON_WINTER: return "winter";
+        default: return "unknown";
     }
 }
 

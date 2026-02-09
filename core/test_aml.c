@@ -446,6 +446,466 @@ static void test_wormhole_cycle(void) {
            "real date: phase in [0, 33]");
 }
 
+// ── TEST 18: Schumann resonance ────────────────────────────────────────────
+
+static void test_schumann(void) {
+    printf("\n── Schumann resonance ──\n");
+    am_init();
+    AM_State* s = am_get_state();
+
+    ASSERT_FLOAT(s->schumann_hz, 7.83f, 0.01f, "schumann_hz default 7.83");
+    ASSERT_FLOAT(s->schumann_coherence, 1.0f, 0.01f, "coherence 1.0 at baseline");
+    ASSERT_FLOAT(s->schumann_modulation, 0.3f, 0.01f, "modulation default 0.3");
+
+    // Change frequency → coherence drops
+    am_exec("SCHUMANN 7.77");
+    ASSERT_FLOAT(s->schumann_hz, 7.77f, 0.01f, "SCHUMANN 7.77");
+    ASSERT(s->schumann_coherence < 1.0f, "coherence drops at 7.77");
+    ASSERT(s->schumann_coherence > 0.0f, "coherence still positive");
+
+    // Back to baseline
+    am_exec("SCHUMANN 7.83");
+    ASSERT_FLOAT(s->schumann_coherence, 1.0f, 0.05f, "coherence ~1.0 at 7.83");
+
+    // Modulation
+    am_exec("SCHUMANN_MODULATION 0.8");
+    ASSERT_FLOAT(s->schumann_modulation, 0.8f, 0.01f, "SCHUMANN_MODULATION 0.8");
+
+    // Step advances phase
+    am_init();
+    am_step(1.0f);
+    ASSERT(s->schumann_phase > 0.0f, "phase advances after step");
+
+    // High coherence heals tension
+    am_init();
+    am_exec("TENSION 0.5\nDISSONANCE 0.5\nSCHUMANN_MODULATION 1.0");
+    float t_before = s->tension;
+    for (int i = 0; i < 100; i++) am_step(0.1f);
+    ASSERT(s->tension < t_before, "Schumann heals tension");
+}
+
+// ── TEST 19: LORA_ALPHA + NOTORCH commands ────────────────────────────────
+
+static void test_lora_notorch(void) {
+    printf("\n── LORA_ALPHA + NOTORCH ──\n");
+    am_init();
+    AM_State* s = am_get_state();
+
+    ASSERT_FLOAT(s->lora_alpha, 0.0f, 0.01f, "lora_alpha default 0");
+    am_exec("LORA_ALPHA 0.5");
+    ASSERT_FLOAT(s->lora_alpha, 0.5f, 0.01f, "LORA_ALPHA 0.5");
+
+    am_exec("NOTORCH_LR 0.05");
+    ASSERT_FLOAT(s->notorch_lr, 0.05f, 0.01f, "NOTORCH_LR 0.05");
+
+    am_exec("NOTORCH_DECAY 0.995");
+    ASSERT_FLOAT(s->notorch_decay, 0.995f, 0.001f, "NOTORCH_DECAY 0.995");
+}
+
+// ── TEST 20: DARKMATTER as core (no pack gate) ────────────────────────────
+
+static void test_darkmatter_core(void) {
+    printf("\n── DARKMATTER core ──\n");
+    am_init();
+    AM_State* s = am_get_state();
+
+    // GRAVITY DARK works WITHOUT MODE DARKMATTER
+    am_exec("GRAVITY DARK 0.8");
+    ASSERT_FLOAT(s->dark_gravity, 0.8f, 0.01f, "GRAVITY DARK 0.8 (no pack gate)");
+
+    // ANTIDOTE works WITHOUT MODE DARKMATTER
+    am_exec("ANTIDOTE HARD");
+    ASSERT_INT(s->antidote_mode, 1, "ANTIDOTE HARD (no pack gate)");
+
+    // SCAR increments count
+    am_init();
+    ASSERT_INT(s->n_scars, 0, "n_scars starts at 0");
+    am_exec("SCAR rejection\nSCAR another");
+    ASSERT_INT(s->n_scars, 2, "n_scars = 2 after two SCARs");
+}
+
+// ── TEST 21: ECHO command ─────────────────────────────────────────────────
+
+static void test_echo(void) {
+    printf("\n── ECHO command ──\n");
+    am_init();
+    // ECHO should not crash and should parse cleanly
+    int rc = am_exec("ECHO hello world\nPROPHECY 9");
+    ASSERT_INT(rc, 0, "ECHO + PROPHECY returns 0");
+    ASSERT_INT(am_get_state()->prophecy, 9, "PROPHECY after ECHO");
+}
+
+// ── TEST 22: Season commands ──────────────────────────────────────────────
+
+static void test_seasons(void) {
+    printf("\n── 4.C seasons ──\n");
+    am_init();
+    AM_State* s = am_get_state();
+
+    ASSERT_INT(s->season, 0, "default season SPRING (0)");
+
+    am_exec("SEASON WINTER");
+    ASSERT_INT(s->season, 3, "SEASON WINTER (3)");
+    ASSERT_FLOAT(s->season_phase, 0.0f, 0.01f, "season_phase reset on change");
+
+    am_exec("SEASON SUMMER");
+    ASSERT_INT(s->season, 1, "SEASON SUMMER (1)");
+
+    am_exec("SEASON_INTENSITY 0.9");
+    ASSERT_FLOAT(s->season_intensity, 0.9f, 0.01f, "SEASON_INTENSITY 0.9");
+
+    // Season energy changes over steps
+    am_init();
+    am_exec("SEASON SPRING\nSEASON_INTENSITY 1.0");
+    float spring_before = s->spring_energy;
+    for (int i = 0; i < 100; i++) am_step(0.1f);
+    ASSERT(s->spring_energy >= spring_before * 0.5f, "spring_energy maintained in SPRING");
+}
+
+// ── TEST 23: Built-in functions ───────────────────────────────────────────
+
+static void test_builtins(void) {
+    printf("\n── Built-in functions ──\n");
+
+    // bootstrap_self
+    am_init();
+    am_exec("PAIN 0.9\nDISSONANCE 0.8\nbootstrap_self()");
+    AM_State* s = am_get_state();
+    ASSERT_FLOAT(s->pain, 0.0f, 0.01f, "bootstrap_self resets pain");
+    ASSERT_INT(s->prophecy, 7, "bootstrap_self sets prophecy 7");
+    ASSERT_FLOAT(s->attend_focus, 0.7f, 0.01f, "bootstrap_self sets focus 0.7");
+
+    // galvanize
+    am_init();
+    am_exec("galvanize()");
+    ASSERT_INT(s->velocity_mode, AM_VEL_RUN, "galvanize → RUN");
+    ASSERT_INT(s->prophecy, 12, "galvanize → prophecy 12");
+
+    // shatter_the_frame
+    am_init();
+    am_exec("shatter_the_frame()");
+    ASSERT_FLOAT(s->pain, 0.7f, 0.01f, "shatter → pain 0.7");
+    ASSERT_FLOAT(s->dissonance, 0.8f, 0.01f, "shatter → dissonance 0.8");
+
+    // pierce_the_infinite
+    am_init();
+    am_exec("pierce_the_infinite()");
+    ASSERT_INT(s->prophecy, 64, "pierce → prophecy 64");
+    ASSERT_FLOAT(s->destiny, 0.1f, 0.01f, "pierce → destiny 0.1");
+
+    // reflect_on_self
+    am_init();
+    am_exec("reflect_on_self()");
+    ASSERT_FLOAT(s->attend_focus, 0.95f, 0.01f, "reflect → focus 0.95");
+    ASSERT_INT(s->velocity_mode, AM_VEL_NOMOVE, "reflect → NOMOVE");
+
+    // remember_future
+    am_init();
+    am_exec("remember_future()");
+    ASSERT_INT(s->temporal_mode, 0, "remember_future → PROPHECY mode");
+    ASSERT_FLOAT(s->temporal_alpha, 1.0f, 0.01f, "remember_future → alpha 1.0");
+
+    // rewind_experience
+    am_init();
+    am_exec("rewind_experience()");
+    ASSERT_INT(s->velocity_mode, AM_VEL_BACKWARD, "rewind → BACKWARD");
+    ASSERT_INT(s->temporal_mode, 1, "rewind → RETRODICTION");
+
+    // echo_fractal with parameter
+    am_init();
+    am_exec("echo_fractal(8)");
+    ASSERT_INT(s->prophecy, 16, "echo_fractal(8) → prophecy 16");
+    ASSERT_INT(s->tunnel_skip_max, 8, "echo_fractal(8) → skip_max 8");
+
+    // tunnel_through with parameter
+    am_init();
+    am_exec("tunnel_through(0.3)");
+    ASSERT_FLOAT(s->tunnel_threshold, 0.3f, 0.01f, "tunnel_through(0.3) → threshold 0.3");
+    ASSERT_FLOAT(s->tunnel_chance, 0.5f, 0.01f, "tunnel_through → chance 0.5");
+}
+
+// ── TEST 24: am_apply_destiny_to_logits ───────────────────────────────────
+
+static void test_logit_destiny(void) {
+    printf("\n── logit destiny ──\n");
+    am_init();
+    am_exec("DESTINY 0.7\nPROPHECY 7");
+    am_step(0.1f);  // compute destiny_bias
+
+    float logits[5] = {1.0f, 2.0f, 5.0f, 0.5f, 0.1f};
+    float orig_max = logits[2];
+    am_apply_destiny_to_logits(logits, 5);
+
+    // max should stay, others should be suppressed
+    ASSERT_FLOAT(logits[2], orig_max, 0.01f, "max logit unchanged");
+    ASSERT(logits[0] < 1.0f, "non-max logit suppressed");
+    ASSERT(logits[4] < 0.1f, "lowest logit most suppressed");
+}
+
+// ── TEST 25: am_apply_suffering_to_logits ─────────────────────────────────
+
+static void test_logit_suffering(void) {
+    printf("\n── logit suffering ──\n");
+    am_init();
+    am_exec("PAIN 0.8");
+
+    float logits[4] = {-2.0f, 0.0f, 1.0f, 3.0f};
+    float mean = (-2.0f + 0.0f + 1.0f + 3.0f) / 4.0f;  // 0.5
+    am_apply_suffering_to_logits(logits, 4);
+
+    // All should be compressed toward mean
+    ASSERT(logits[0] > -2.0f, "low logit rises toward mean");
+    ASSERT(logits[3] < 3.0f, "high logit falls toward mean");
+    // Check factor: mean + (orig - mean) * (1 - 0.5*0.8) = mean + (orig-mean)*0.6
+    float expected_3 = mean + (3.0f - mean) * 0.6f;
+    ASSERT_FLOAT(logits[3], expected_3, 0.1f, "suffering compression correct");
+}
+
+// ── TEST 26: am_apply_delta ───────────────────────────────────────────────
+
+static void test_apply_delta(void) {
+    printf("\n── am_apply_delta ──\n");
+
+    // Simple 2×2 with rank 1: A=[1,2; 3,4], B=[1,1], x=[1,1]
+    float A[4] = {1.0f, 2.0f, 3.0f, 4.0f};  // 2x2 (out=2, rank=2)
+    float B[4] = {1.0f, 0.0f, 0.0f, 1.0f};  // 2x2 (rank=2, in=2)
+    float x[2] = {1.0f, 1.0f};
+    float out[2] = {0.0f, 0.0f};
+
+    // B @ x = [1, 1]
+    // A @ [1,1] = [1+2, 3+4] = [3, 7]
+    // out += 0.5 * [3, 7] = [1.5, 3.5]
+    am_apply_delta(out, A, B, x, 2, 2, 2, 0.5f);
+    ASSERT_FLOAT(out[0], 1.5f, 0.01f, "delta out[0] = 1.5");
+    ASSERT_FLOAT(out[1], 3.5f, 0.01f, "delta out[1] = 3.5");
+}
+
+// ── TEST 27: am_compute_prophecy_debt ─────────────────────────────────────
+
+static void test_prophecy_debt(void) {
+    printf("\n── prophecy debt ──\n");
+
+    float logits[4] = {1.0f, 2.0f, 5.0f, 3.0f};
+
+    // Chose max → debt = 0
+    float debt0 = am_compute_prophecy_debt(logits, 2, 4);
+    ASSERT_FLOAT(debt0, 0.0f, 0.01f, "chose max → debt 0");
+
+    // Chose worst → debt > 0
+    float debt1 = am_compute_prophecy_debt(logits, 0, 4);
+    ASSERT(debt1 > 0.0f, "chose non-max → positive debt");
+
+    // Chose second worst → even more debt
+    float debt_worst = am_compute_prophecy_debt(logits, 0, 4);
+    float debt_mid = am_compute_prophecy_debt(logits, 3, 4);
+    ASSERT(debt_worst > debt_mid, "farther from max → more debt");
+}
+
+// ── TEST 28: am_apply_field_to_logits (full pipeline) ─────────────────────
+
+static void test_logit_pipeline(void) {
+    printf("\n── full logit pipeline ──\n");
+    am_init();
+    am_exec("PAIN 0.5\nDESTINY 0.5\nPROPHECY 7\nATTEND_FOCUS 0.8");
+    am_step(0.1f);
+
+    float logits[5] = {-1.0f, 0.0f, 2.0f, 0.5f, -0.5f};
+    float before_max = logits[2];
+    am_apply_field_to_logits(logits, 5);
+
+    // Some modification should have occurred
+    ASSERT(logits[2] != before_max || logits[0] != -1.0f,
+           "logits modified by pipeline");
+}
+
+// ── TEST 29: LAW enforcement in am_step ───────────────────────────────────
+
+static void test_law_enforcement(void) {
+    printf("\n── LAW enforcement ──\n");
+    am_init();
+    AM_State* s = am_get_state();
+
+    am_step(1.0f);
+    // Entropy should be >= entropy_floor
+    ASSERT(s->entropy >= s->entropy_floor, "entropy >= entropy_floor");
+    // Resonance should be <= resonance_ceiling
+    ASSERT(s->resonance <= s->resonance_ceiling, "resonance <= resonance_ceiling");
+    // Emergence computed
+    ASSERT(s->emergence >= 0.0f && s->emergence <= 1.0f, "emergence in [0,1]");
+
+    // High dissonance → lower resonance
+    am_init();
+    am_exec("DISSONANCE 0.9");
+    am_step(1.0f);
+    float res_high_diss = s->resonance;
+
+    am_init();
+    am_exec("DISSONANCE 0.0");
+    am_step(1.0f);
+    float res_low_diss = s->resonance;
+    ASSERT(res_low_diss > res_high_diss, "low dissonance → higher resonance");
+}
+
+// ── TEST 30: Destiny bias computation ─────────────────────────────────────
+
+static void test_destiny_bias(void) {
+    printf("\n── destiny bias ──\n");
+    am_init();
+    AM_State* s = am_get_state();
+
+    // Default: prophecy=7, destiny=0.35
+    am_step(0.1f);
+    // prophecy_scale = 1.0 + (7-7)*0.02 = 1.0
+    // destiny_bias = 0.35 * 1.0 = 0.35
+    ASSERT_FLOAT(s->destiny_bias, 0.35f, 0.01f, "destiny_bias at prophecy 7");
+
+    // Higher prophecy → higher bias
+    am_init();
+    am_exec("PROPHECY 20\nDESTINY 0.5");
+    am_step(0.1f);
+    // prophecy_scale = 1.0 + (20-7)*0.02 = 1.26
+    // destiny_bias = 0.5 * 1.26 = 0.63
+    ASSERT_FLOAT(s->destiny_bias, 0.63f, 0.02f, "destiny_bias at prophecy 20");
+}
+
+// ── TEST 31: Expert blending ──────────────────────────────────────────────
+
+static void test_expert_blending(void) {
+    printf("\n── expert blending ──\n");
+    am_init();
+    AM_State* s = am_get_state();
+
+    // All creative → temp should be higher (need am_step to recompute)
+    am_exec("EXPERT_CREATIVE 1.0\nEXPERT_STRUCTURAL 0\nEXPERT_SEMANTIC 0\nEXPERT_PRECISE 0");
+    am_step(0.01f);
+    float creative_temp = s->effective_temp;
+
+    am_init();
+    am_exec("EXPERT_PRECISE 1.0\nEXPERT_STRUCTURAL 0\nEXPERT_SEMANTIC 0\nEXPERT_CREATIVE 0");
+    am_step(0.01f);
+    float precise_temp = s->effective_temp;
+
+    ASSERT(creative_temp > precise_temp, "creative temp > precise temp");
+}
+
+// ── TEST 32: am_notorch_step (Hebbian plasticity) ─────────────────────────
+
+static void test_notorch_step(void) {
+    printf("\n── NOTORCH Hebbian plasticity ──\n");
+    am_init();
+    am_exec("NOTORCH_LR 0.1");
+
+    // Small matrices: in=2, out=2, rank=2
+    float A[4] = {0}; // 2x2
+    float B[4] = {0}; // 2x2
+    float x[2] = {1.0f, 0.5f};
+    float dy[2] = {0.3f, -0.1f};
+
+    // Positive signal should modify A and B
+    am_notorch_step(A, B, 2, 2, 2, x, dy, 1.0f);
+
+    int a_changed = 0, b_changed = 0;
+    for (int i = 0; i < 4; i++) {
+        if (fabsf(A[i]) > 0.0001f) a_changed = 1;
+        if (fabsf(B[i]) > 0.0001f) b_changed = 1;
+    }
+    ASSERT(a_changed, "A matrix modified by notorch_step");
+    ASSERT(b_changed, "B matrix modified by notorch_step");
+
+    // Multiple steps should accumulate
+    float a_before = fabsf(A[0]);
+    for (int i = 0; i < 10; i++) {
+        am_notorch_step(A, B, 2, 2, 2, x, dy, 1.0f);
+    }
+    // Norm should grow (or at least remain non-zero)
+    float a_norm = 0.0f;
+    for (int i = 0; i < 4; i++) a_norm += A[i] * A[i];
+    ASSERT(a_norm > 0.0f, "A has accumulated updates");
+}
+
+// ── TEST 33: Field map new fields ─────────────────────────────────────────
+
+static void test_field_map(void) {
+    printf("\n── field map new fields ──\n");
+    am_init();
+
+    // New fields should be readable in expressions
+    am_exec("LORA_ALPHA 0.5");
+    am_exec("if lora_alpha > 0.4:\n    PROPHECY 55");
+    ASSERT_INT(am_get_state()->prophecy, 55, "lora_alpha readable in expression");
+
+    am_init();
+    am_exec("SCHUMANN 7.80\nif schumann_hz < 7.82:\n    PROPHECY 33");
+    ASSERT_INT(am_get_state()->prophecy, 33, "schumann_hz readable in expression");
+
+    am_init();
+    am_step(1.0f);  // compute entropy
+    am_exec("if entropy >= 0:\n    PROPHECY 44");
+    ASSERT_INT(am_get_state()->prophecy, 44, "entropy readable in expression");
+}
+
+// ── TEST 34: am_apply_attention_to_logits ─────────────────────────────────
+
+static void test_logit_attention(void) {
+    printf("\n── logit attention ──\n");
+    am_init();
+
+    // High focus, low spread → sharpen
+    am_exec("ATTEND_FOCUS 0.9\nATTEND_SPREAD 0.1");
+    float logits1[4] = {0.0f, 1.0f, 2.0f, 0.5f};
+    am_apply_attention_to_logits(logits1, 4);
+    // scale = 0.5 + 0.9 - 0.1 = 1.3 → amplified
+    ASSERT(logits1[2] > 2.0f, "high focus amplifies max");
+
+    // Low focus, high spread → blur
+    am_init();
+    am_exec("ATTEND_FOCUS 0.1\nATTEND_SPREAD 0.9");
+    float logits2[4] = {0.0f, 1.0f, 2.0f, 0.5f};
+    am_apply_attention_to_logits(logits2, 4);
+    // scale = 0.5 + 0.1 - 0.9 = -0.3 → clamped to 0.1 → compressed
+    ASSERT(logits2[2] < 2.0f, "low focus compresses max");
+}
+
+// ── TEST 35: am_apply_laws_to_logits ──────────────────────────────────────
+
+static void test_logit_laws(void) {
+    printf("\n── logit laws ──\n");
+    am_init();
+
+    // One dominant logit, low entropy floor → should compress
+    am_exec("LAW ENTROPY_FLOOR 0.5");
+    float logits[4] = {0.0f, 0.0f, 20.0f, 0.0f};
+    am_apply_laws_to_logits(logits, 4);
+    ASSERT(logits[2] < 20.0f, "entropy floor compresses dominant logit");
+}
+
+// ── TEST 36: COSMIC_COHERENCE backward compat ─────────────────────────────
+
+static void test_cosmic_coherence_compat(void) {
+    printf("\n── COSMIC_COHERENCE compat ──\n");
+    am_init();
+    AM_State* s = am_get_state();
+
+    am_exec("COSMIC_COHERENCE 0.7");
+    ASSERT_FLOAT(s->schumann_coherence, 0.7f, 0.01f, "COSMIC_COHERENCE maps to schumann_coherence");
+}
+
+// ── TEST 37: am_copy_state 32 fields ──────────────────────────────────────
+
+static void test_copy_state_32(void) {
+    printf("\n── am_copy_state 32 ──\n");
+    am_init();
+    am_exec("LORA_ALPHA 0.3\nSCHUMANN 7.80\nSEASON AUTUMN");
+    am_step(0.1f);
+
+    float out[32];
+    int rc = am_copy_state(out);
+    ASSERT_INT(rc, 0, "am_copy_state returns 0");
+    ASSERT_FLOAT(out[22], 0.3f, 0.01f, "out[22] = lora_alpha");
+    ASSERT_FLOAT(out[28], 7.80f, 0.01f, "out[28] = schumann_hz");
+    ASSERT_FLOAT(out[30], 2.0f, 0.01f, "out[30] = season AUTUMN (2)");
+}
+
 // ── MAIN ────────────────────────────────────────────────────────────────────
 
 int main(void) {
@@ -468,6 +928,26 @@ int main(void) {
     test_init_script();
     test_calendar_physics();
     test_wormhole_cycle();
+    test_schumann();
+    test_lora_notorch();
+    test_darkmatter_core();
+    test_echo();
+    test_seasons();
+    test_builtins();
+    test_logit_destiny();
+    test_logit_suffering();
+    test_apply_delta();
+    test_prophecy_debt();
+    test_logit_pipeline();
+    test_law_enforcement();
+    test_destiny_bias();
+    test_expert_blending();
+    test_notorch_step();
+    test_field_map();
+    test_logit_attention();
+    test_logit_laws();
+    test_cosmic_coherence_compat();
+    test_copy_state_32();
 
     printf("\n═══ Results: %d/%d passed ═══\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
