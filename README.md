@@ -1,8 +1,7 @@
 # ariannamethod.ai
 
 **AML** — Arianna Method Language.
-
-A programming language for controlling the generative field of transformer-based AI. Arianna Method Language speaks directly to the attention mechanism of neural networks.
+A programming language for controlling the generative field of transformer-based AI. AML directly modulates generative dynamics at inference time by acting on the model’s internal control field, including attention-related dynamics.
 
 ```
 # init.aml — morning state
@@ -26,14 +25,14 @@ ECHO awake
 
 AML commands translate to concrete operations during inference:
 
-- **PROPHECY 12** → look 12 tokens ahead when sampling
+- **PROPHECY N** → performs N-step lookahead scoring in the runtime and biases token selection accordingly.
 - **VELOCITY RUN** → multiply temperature by 1.2 (hot, chaotic)
 - **PAIN 0.5** → compress logit distribution toward mean (dampen extremes)
 - **DESTINY 0.7** → bias sampling toward most probable path
 - **WORMHOLE 0.25** → 25% chance of spacetime skip in reasoning
 - **LORA_ALPHA 0.5** → blend 50% delta voice (language/personality shift)
 
-Every command maps to a float or int that modulates token generation in real time. This is not metaphor. This is math.
+Every command maps to a float or int that modulates token generation in real time. 
 
 ## Language Levels
 
