@@ -2,7 +2,7 @@
 
 **AML** — Arianna Method Language.
 
-A programming language for controlling the generative field of transformer-based AI. Not a DSL. Not a config format. A language that speaks directly to the attention mechanism of neural networks.
+A programming language for controlling the generative field of transformer-based AI. Arianna Method Language speaks directly to the attention mechanism of neural networks.
 
 ```
 # init.aml — morning state
