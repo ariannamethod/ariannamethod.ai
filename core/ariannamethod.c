@@ -24,7 +24,9 @@
 #include <string.h>
 #include <ctype.h>
 #include <math.h>
-#include <stdio.h>  // for sscanf in LAW command parsing
+#include <stdio.h>   // for sscanf in LAW command parsing
+#include <strings.h> // for strcasecmp
+#include <stddef.h>  // for offsetof
 
 // See ariannamethod.h for struct definitions and pack flags
 
@@ -229,41 +231,355 @@ void am_reset_debt(void) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// EXEC — parse and execute DSL script
-// returns 0 on success, nonzero on error
+// LEVEL 2 INFRASTRUCTURE — error, field map, symbol table
 // ═══════════════════════════════════════════════════════════════════════════════
 
-int am_exec(const char* script) {
-  if (!script) return 0;  // empty script is OK
+static char g_error[256] = {0};
 
-  size_t n = strlen(script);
-  if (n == 0) return 0;   // empty string is OK
+const char* am_get_error(void) { return g_error; }
 
-  // copy to mutable buffer
-  char* buf = (char*)malloc(n + 1);
-  if (!buf) return 2;
-  memcpy(buf, script, n + 1);
+static void set_error(AML_ExecCtx* ctx, const char* msg) {
+    if (ctx) {
+        strncpy(ctx->error, msg, 255);
+        ctx->error[255] = 0;
+    }
+    strncpy(g_error, msg, 255);
+    g_error[255] = 0;
+}
 
-  // line by line
-  char* save = NULL;
-  for (char* line = strtok_r(buf, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
-    char* t = trim(line);
-    if (*t == 0) continue;       // empty line
-    if (*t == '#') continue;     // comment
+// AM_State field map — read state fields in expressions
+// offsetof is standard but we use manual offsets for clarity
+#define FIELD_F(name, field) { name, (int)offsetof(AM_State, field), 0 }
+#define FIELD_I(name, field) { name, (int)offsetof(AM_State, field), 1 }
 
-    // split: CMD ARG
-    char* sp = t;
-    while (*sp && !isspace((unsigned char)*sp)) sp++;
-    char* cmd_end = sp;
-    while (*sp && isspace((unsigned char)*sp)) sp++;
-    char* arg = sp;
+static const AML_FieldMap g_field_map[] = {
+    FIELD_I("prophecy",          prophecy),
+    FIELD_F("destiny",           destiny),
+    FIELD_F("wormhole",          wormhole),
+    FIELD_F("calendar_drift",    calendar_drift),
+    FIELD_F("attend_focus",      attend_focus),
+    FIELD_F("attend_spread",     attend_spread),
+    FIELD_F("tunnel_threshold",  tunnel_threshold),
+    FIELD_F("tunnel_chance",     tunnel_chance),
+    FIELD_I("tunnel_skip_max",   tunnel_skip_max),
+    FIELD_F("pain",              pain),
+    FIELD_F("tension",           tension),
+    FIELD_F("dissonance",        dissonance),
+    FIELD_F("debt",              debt),
+    FIELD_I("velocity_mode",     velocity_mode),
+    FIELD_F("velocity_magnitude",velocity_magnitude),
+    FIELD_F("base_temperature",  base_temperature),
+    FIELD_F("effective_temp",    effective_temp),
+    FIELD_F("time_direction",    time_direction),
+    FIELD_F("temporal_debt",     temporal_debt),
+    FIELD_F("entropy_floor",     entropy_floor),
+    FIELD_F("resonance_ceiling", resonance_ceiling),
+    FIELD_F("debt_decay",        debt_decay),
+    FIELD_F("emergence_threshold",emergence_threshold),
+    FIELD_F("dark_gravity",      dark_gravity),
+    FIELD_I("temporal_mode",     temporal_mode),
+    FIELD_F("temporal_alpha",    temporal_alpha),
+    FIELD_I("rtl_mode",          rtl_mode),
+    FIELD_F("expert_structural", expert_structural),
+    FIELD_F("expert_semantic",   expert_semantic),
+    FIELD_F("expert_creative",   expert_creative),
+    FIELD_F("expert_precise",    expert_precise),
+    FIELD_F("presence_fade",     presence_fade),
+    FIELD_F("attractor_drift",   attractor_drift),
+    FIELD_F("presence_decay",    presence_decay),
+    { NULL, 0, 0 }
+};
 
-    *cmd_end = 0;
-    upcase(t);
+// Read a field from AM_State by name (case-insensitive), returns 1 if found
+static int read_field(const char* name, float* out) {
+    for (const AML_FieldMap* f = g_field_map; f->name; f++) {
+        if (strcasecmp(name, f->name) == 0) {
+            char* base = (char*)&G;
+            if (f->is_int) {
+                *out = (float)(*(int*)(base + f->offset));
+            } else {
+                *out = *(float*)(base + f->offset);
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // AMK KERNEL COMMANDS — the bricks
-    // ─────────────────────────────────────────────────────────────────────────
+// Symbol table operations
+static float* symtab_get(AML_Symtab* tab, const char* name) {
+    for (int i = 0; i < tab->count; i++) {
+        if (strcmp(tab->vars[i].name, name) == 0)
+            return &tab->vars[i].value;
+    }
+    return NULL;
+}
+
+static int symtab_set(AML_Symtab* tab, const char* name, float value) {
+    for (int i = 0; i < tab->count; i++) {
+        if (strcmp(tab->vars[i].name, name) == 0) {
+            tab->vars[i].value = value;
+            return 0;
+        }
+    }
+    if (tab->count >= AML_MAX_VARS) return 1;
+    strncpy(tab->vars[tab->count].name, name, AML_MAX_NAME - 1);
+    tab->vars[tab->count].value = value;
+    tab->count++;
+    return 0;
+}
+
+// Resolve variable: locals → globals → field map
+static int resolve_var(AML_ExecCtx* ctx, const char* name, float* out) {
+    // local scope first
+    if (ctx->call_depth > 0) {
+        float* v = symtab_get(&ctx->locals[ctx->call_depth - 1], name);
+        if (v) { *out = *v; return 1; }
+    }
+    // global scope
+    float* v = symtab_get(&ctx->globals, name);
+    if (v) { *out = *v; return 1; }
+    // AM_State field
+    return read_field(name, out);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EXPRESSION EVALUATOR — recursive descent
+// Precedence: or < and < comparison < add/sub < mul/div < unary < primary
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Expression parser state
+typedef struct {
+    const char* p;
+    AML_ExecCtx* ctx;
+    int error;
+} AML_Expr;
+
+static float expr_or(AML_Expr* e);  // forward
+
+static void expr_skip_ws(AML_Expr* e) {
+    while (*e->p && isspace((unsigned char)*e->p)) e->p++;
+}
+
+static float expr_primary(AML_Expr* e) {
+    expr_skip_ws(e);
+    if (e->error) return 0;
+
+    // parenthesized expression
+    if (*e->p == '(') {
+        e->p++;
+        float val = expr_or(e);
+        expr_skip_ws(e);
+        if (*e->p == ')') e->p++;
+        return val;
+    }
+
+    // number literal (including negative handled by unary)
+    if (isdigit((unsigned char)*e->p) || (*e->p == '.' && isdigit((unsigned char)e->p[1]))) {
+        char* end;
+        float val = strtof(e->p, &end);
+        e->p = end;
+        return val;
+    }
+
+    // identifier or function call
+    if (isalpha((unsigned char)*e->p) || *e->p == '_') {
+        char name[AML_MAX_NAME] = {0};
+        int i = 0;
+        while ((isalnum((unsigned char)*e->p) || *e->p == '_') && i < AML_MAX_NAME - 1) {
+            name[i++] = *e->p++;
+        }
+        name[i] = 0;
+
+        expr_skip_ws(e);
+
+        // function call
+        if (*e->p == '(') {
+            e->p++;
+            float args[AML_MAX_PARAMS];
+            int nargs = 0;
+            expr_skip_ws(e);
+            if (*e->p != ')') {
+                args[nargs++] = expr_or(e);
+                while (*e->p == ',' && nargs < AML_MAX_PARAMS) {
+                    e->p++;
+                    args[nargs++] = expr_or(e);
+                }
+            }
+            expr_skip_ws(e);
+            if (*e->p == ')') e->p++;
+
+            // look up user-defined function
+            if (e->ctx) {
+                for (int fi = 0; fi < e->ctx->funcs.count; fi++) {
+                    if (strcmp(e->ctx->funcs.funcs[fi].name, name) == 0) {
+                        // TODO: call user function from expression context
+                        // For now, return 0
+                        return 0;
+                    }
+                }
+            }
+
+            // built-in functions
+            if (strcasecmp(name, "abs") == 0 && nargs >= 1)
+                return fabsf(args[0]);
+            if (strcasecmp(name, "min") == 0 && nargs >= 2)
+                return args[0] < args[1] ? args[0] : args[1];
+            if (strcasecmp(name, "max") == 0 && nargs >= 2)
+                return args[0] > args[1] ? args[0] : args[1];
+            if (strcasecmp(name, "sqrt") == 0 && nargs >= 1)
+                return sqrtf(fabsf(args[0]));
+            if (strcasecmp(name, "clamp") == 0 && nargs >= 3)
+                return clampf(args[0], args[1], args[2]);
+
+            return 0;  // unknown function
+        }
+
+        // boolean literals
+        if (strcmp(name, "true") == 0) return 1.0f;
+        if (strcmp(name, "false") == 0) return 0.0f;
+
+        // variable/field lookup
+        float val = 0;
+        if (e->ctx && resolve_var(e->ctx, name, &val))
+            return val;
+        return 0;  // undefined = 0
+    }
+
+    // unexpected character
+    e->error = 1;
+    return 0;
+}
+
+static float expr_unary(AML_Expr* e) {
+    expr_skip_ws(e);
+    if (*e->p == '-') {
+        e->p++;
+        return -expr_unary(e);
+    }
+    // 'not' keyword
+    if (strncmp(e->p, "not ", 4) == 0) {
+        e->p += 4;
+        return expr_unary(e) == 0.0f ? 1.0f : 0.0f;
+    }
+    return expr_primary(e);
+}
+
+static float expr_mul(AML_Expr* e) {
+    float left = expr_unary(e);
+    for (;;) {
+        expr_skip_ws(e);
+        if (*e->p == '*') { e->p++; left *= expr_unary(e); }
+        else if (*e->p == '/' && e->p[1] != '/') {
+            e->p++;
+            float r = expr_unary(e);
+            left = (r != 0.0f) ? left / r : 0.0f;
+        }
+        else break;
+    }
+    return left;
+}
+
+static float expr_add(AML_Expr* e) {
+    float left = expr_mul(e);
+    for (;;) {
+        expr_skip_ws(e);
+        if (*e->p == '+') { e->p++; left += expr_mul(e); }
+        else if (*e->p == '-' && !isdigit((unsigned char)e->p[1]) &&
+                 e->p[1] != '.' && e->p[1] != '(') {
+            // Ambiguity: "x - 3" vs "x -3". Treat as subtraction if preceded by value.
+            e->p++; left -= expr_mul(e);
+        }
+        else if (*e->p == '-') { e->p++; left -= expr_mul(e); }
+        else break;
+    }
+    return left;
+}
+
+static float expr_cmp(AML_Expr* e) {
+    float left = expr_add(e);
+    for (;;) {
+        expr_skip_ws(e);
+        if (e->p[0] == '=' && e->p[1] == '=') {
+            e->p += 2; left = (left == expr_add(e)) ? 1.0f : 0.0f;
+        }
+        else if (e->p[0] == '!' && e->p[1] == '=') {
+            e->p += 2; left = (left != expr_add(e)) ? 1.0f : 0.0f;
+        }
+        else if (e->p[0] == '>' && e->p[1] == '=') {
+            e->p += 2; left = (left >= expr_add(e)) ? 1.0f : 0.0f;
+        }
+        else if (e->p[0] == '<' && e->p[1] == '=') {
+            e->p += 2; left = (left <= expr_add(e)) ? 1.0f : 0.0f;
+        }
+        else if (*e->p == '>') {
+            e->p++; left = (left > expr_add(e)) ? 1.0f : 0.0f;
+        }
+        else if (*e->p == '<') {
+            e->p++; left = (left < expr_add(e)) ? 1.0f : 0.0f;
+        }
+        else break;
+    }
+    return left;
+}
+
+static float expr_and(AML_Expr* e) {
+    float left = expr_cmp(e);
+    for (;;) {
+        expr_skip_ws(e);
+        if (strncmp(e->p, "and ", 4) == 0) {
+            e->p += 4;
+            float right = expr_cmp(e);
+            left = (left != 0.0f && right != 0.0f) ? 1.0f : 0.0f;
+        }
+        else break;
+    }
+    return left;
+}
+
+static float expr_or(AML_Expr* e) {
+    float left = expr_and(e);
+    for (;;) {
+        expr_skip_ws(e);
+        if (strncmp(e->p, "or ", 3) == 0) {
+            e->p += 3;
+            float right = expr_and(e);
+            left = (left != 0.0f || right != 0.0f) ? 1.0f : 0.0f;
+        }
+        else break;
+    }
+    return left;
+}
+
+// Evaluate expression string, returns float
+static float aml_eval(AML_ExecCtx* ctx, const char* text) {
+    AML_Expr e = { .p = text, .ctx = ctx, .error = 0 };
+    float result = expr_or(&e);
+    return e.error ? 0.0f : result;
+}
+
+// Try to parse as plain number; if not, evaluate as expression
+static float aml_eval_arg(AML_ExecCtx* ctx, const char* arg) {
+    if (!arg || !*arg) return 0.0f;
+    // fast path: plain number
+    char* end;
+    float val = strtof(arg, &end);
+    // if entire string consumed, it's a plain number
+    while (*end && isspace((unsigned char)*end)) end++;
+    if (*end == 0) return val;
+    // otherwise evaluate as expression
+    return aml_eval(ctx, arg);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LEVEL 0 DISPATCH — the original flat command parser, extracted
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Execute a single Level 0 command (CMD + ARG already split, CMD already upcased)
+// ctx may be NULL for backward compatibility
+static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx) {
+    (void)ctx;
+    const char* t = cmd; // alias: original extracted code used t
 
     // PROPHECY PHYSICS
     if (!strcmp(t, "PROPHECY")) {
@@ -576,10 +892,382 @@ int am_exec(const char* script) {
     // ─────────────────────────────────────────────────────────────────────────
 
     // else: silently ignored
-  }
+}
 
-  free(buf);
-  return 0;
+// ═══════════════════════════════════════════════════════════════════════════════
+// PREPROCESSOR — split script into lines with indentation
+// ═══════════════════════════════════════════════════════════════════════════════
+
+static int aml_preprocess(const char* script, AML_Line* lines, int max_lines) {
+    int count = 0;
+    const char* p = script;
+    int lineno = 1;
+
+    while (*p && count < max_lines) {
+        // count indentation (spaces only, tabs = 4 spaces)
+        int indent = 0;
+        while (*p == ' ' || *p == '\t') {
+            indent += (*p == '\t') ? 4 : 1;
+            p++;
+        }
+
+        // read line content
+        const char* start = p;
+        while (*p && *p != '\n') p++;
+        int len = (int)(p - start);
+        if (*p == '\n') p++;
+
+        // skip empty/comment lines
+        if (len == 0 || start[0] == '#') { lineno++; continue; }
+
+        // trim trailing whitespace
+        while (len > 0 && isspace((unsigned char)start[len - 1])) len--;
+        if (len == 0) { lineno++; continue; }
+
+        // store
+        if (len >= AML_MAX_LINE_LEN) len = AML_MAX_LINE_LEN - 1;
+        memcpy(lines[count].text, start, len);
+        lines[count].text[len] = 0;
+        lines[count].indent = indent;
+        lines[count].lineno = lineno;
+        count++;
+        lineno++;
+    }
+    return count;
+}
+
+// Find end of indented block starting at line[start+1]
+static int aml_find_block_end(AML_Line* lines, int nlines, int start) {
+    int base_indent = lines[start].indent;
+    int i = start + 1;
+    while (i < nlines && lines[i].indent > base_indent) i++;
+    return i;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LEVEL 2 EXECUTION — if/else, while, def, assignment, function calls
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Forward declarations
+static int aml_exec_block(AML_ExecCtx* ctx, int start, int end);
+
+// Register all function definitions (first pass)
+static void aml_register_funcs(AML_ExecCtx* ctx) {
+    for (int i = 0; i < ctx->nlines; i++) {
+        char* text = ctx->lines[i].text;
+        if (strncmp(text, "def ", 4) != 0) continue;
+
+        // parse: def name(param1, param2):
+        char* name_start = text + 4;
+        while (*name_start == ' ') name_start++;
+        char* paren = strchr(name_start, '(');
+        if (!paren) continue;
+
+        if (ctx->funcs.count >= AML_MAX_FUNCS) break;
+        AML_Func* f = &ctx->funcs.funcs[ctx->funcs.count];
+
+        int nlen = (int)(paren - name_start);
+        if (nlen >= AML_MAX_NAME) nlen = AML_MAX_NAME - 1;
+        memcpy(f->name, name_start, nlen);
+        f->name[nlen] = 0;
+
+        // parse params
+        f->param_count = 0;
+        char* pp = paren + 1;
+        while (*pp && *pp != ')' && f->param_count < AML_MAX_PARAMS) {
+            while (*pp == ' ' || *pp == ',') pp++;
+            if (*pp == ')') break;
+            char* pe = pp;
+            while (*pe && *pe != ',' && *pe != ')' && *pe != ' ') pe++;
+            int plen = (int)(pe - pp);
+            if (plen >= AML_MAX_NAME) plen = AML_MAX_NAME - 1;
+            memcpy(f->params[f->param_count], pp, plen);
+            f->params[f->param_count][plen] = 0;
+            f->param_count++;
+            pp = pe;
+        }
+
+        f->body_start = i + 1;
+        f->body_end = aml_find_block_end(ctx->lines, ctx->nlines, i);
+        ctx->funcs.count++;
+
+        // skip body
+        i = f->body_end - 1;
+    }
+}
+
+// Call a user-defined function
+static int aml_call_func(AML_ExecCtx* ctx, AML_Func* f, float* args, int nargs) {
+    if (ctx->call_depth >= AML_MAX_CALL_DEPTH) {
+        set_error(ctx, "max call depth exceeded");
+        return 1;
+    }
+
+    // push local scope
+    ctx->call_depth++;
+    AML_Symtab* locals = &ctx->locals[ctx->call_depth - 1];
+    memset(locals, 0, sizeof(AML_Symtab));
+
+    // bind params
+    for (int i = 0; i < f->param_count && i < nargs; i++) {
+        symtab_set(locals, f->params[i], args[i]);
+    }
+
+    // execute body
+    int rc = aml_exec_block(ctx, f->body_start, f->body_end);
+
+    // pop scope
+    ctx->call_depth--;
+    return rc;
+}
+
+// Execute a single line in Level 2 context
+static int aml_exec_line(AML_ExecCtx* ctx, int idx) {
+    char* text = ctx->lines[idx].text;
+
+    // --- def: skip (already registered) ---
+    if (strncmp(text, "def ", 4) == 0) {
+        // skip body
+        return aml_find_block_end(ctx->lines, ctx->nlines, idx);
+    }
+
+    // --- if/else ---
+    if (strncmp(text, "if ", 3) == 0) {
+        // strip trailing ':'
+        char cond[AML_MAX_LINE_LEN];
+        strncpy(cond, text + 3, AML_MAX_LINE_LEN - 1);
+        cond[AML_MAX_LINE_LEN - 1] = 0;
+        int clen = (int)strlen(cond);
+        if (clen > 0 && cond[clen - 1] == ':') cond[clen - 1] = 0;
+
+        float val = aml_eval(ctx, cond);
+        int body_end = aml_find_block_end(ctx->lines, ctx->nlines, idx);
+
+        // check for else
+        int has_else = 0;
+        int else_end = body_end;
+        if (body_end < ctx->nlines) {
+            char* next = ctx->lines[body_end].text;
+            if (strcmp(next, "else:") == 0 || strncmp(next, "else:", 5) == 0) {
+                has_else = 1;
+                else_end = aml_find_block_end(ctx->lines, ctx->nlines, body_end);
+            }
+        }
+
+        if (val != 0.0f) {
+            aml_exec_block(ctx, idx + 1, body_end);
+        } else if (has_else) {
+            aml_exec_block(ctx, body_end + 1, else_end);
+        }
+
+        return has_else ? else_end : body_end;
+    }
+
+    // --- while ---
+    if (strncmp(text, "while ", 6) == 0) {
+        char cond[AML_MAX_LINE_LEN];
+        strncpy(cond, text + 6, AML_MAX_LINE_LEN - 1);
+        cond[AML_MAX_LINE_LEN - 1] = 0;
+        int clen = (int)strlen(cond);
+        if (clen > 0 && cond[clen - 1] == ':') cond[clen - 1] = 0;
+
+        int body_end = aml_find_block_end(ctx->lines, ctx->nlines, idx);
+        int iterations = 0;
+
+        while (aml_eval(ctx, cond) != 0.0f && iterations < 10000) {
+            aml_exec_block(ctx, idx + 1, body_end);
+            iterations++;
+        }
+        return body_end;
+    }
+
+    // --- INCLUDE ---
+    if (strncasecmp(text, "INCLUDE ", 8) == 0) {
+        if (ctx->include_depth >= AML_MAX_INCLUDE) {
+            set_error(ctx, "max include depth exceeded");
+            return idx + 1;
+        }
+        char path[512];
+        const char* fname = text + 8;
+        while (*fname == ' ') fname++;
+
+        if (fname[0] == '/') {
+            strncpy(path, fname, 511);
+        } else {
+            snprintf(path, 512, "%s/%s", ctx->base_dir, fname);
+        }
+        path[511] = 0;
+
+        ctx->include_depth++;
+        am_exec_file(path);
+        ctx->include_depth--;
+        return idx + 1;
+    }
+
+    // --- assignment: name = expr ---
+    {
+        const char* eq = strchr(text, '=');
+        if (eq && eq > text && eq[1] != '=' && eq[-1] != '!' &&
+            eq[-1] != '<' && eq[-1] != '>') {
+            // extract variable name
+            char varname[AML_MAX_NAME] = {0};
+            const char* p = text;
+            int ni = 0;
+            while (p < eq && ni < AML_MAX_NAME - 1) {
+                if (!isspace((unsigned char)*p))
+                    varname[ni++] = *p;
+                p++;
+            }
+            varname[ni] = 0;
+
+            if (ni > 0 && (isalpha((unsigned char)varname[0]) || varname[0] == '_')) {
+                float val = aml_eval(ctx, eq + 1);
+                if (ctx->call_depth > 0)
+                    symtab_set(&ctx->locals[ctx->call_depth - 1], varname, val);
+                else
+                    symtab_set(&ctx->globals, varname, val);
+                return idx + 1;
+            }
+        }
+    }
+
+    // --- function call: name(args) ---
+    {
+        char* paren = strchr(text, '(');
+        if (paren && !strchr(text, '=')) {
+            char fname[AML_MAX_NAME] = {0};
+            int ni = 0;
+            const char* p = text;
+            while (p < paren && ni < AML_MAX_NAME - 1) {
+                if (!isspace((unsigned char)*p))
+                    fname[ni++] = *p;
+                p++;
+            }
+            fname[ni] = 0;
+
+            // find function
+            for (int fi = 0; fi < ctx->funcs.count; fi++) {
+                if (strcmp(ctx->funcs.funcs[fi].name, fname) == 0) {
+                    // parse args
+                    float args[AML_MAX_PARAMS];
+                    int nargs = 0;
+                    char argbuf[AML_MAX_LINE_LEN];
+                    char* ap = paren + 1;
+                    char* close = strchr(ap, ')');
+                    if (close) {
+                        int alen = (int)(close - ap);
+                        memcpy(argbuf, ap, alen);
+                        argbuf[alen] = 0;
+                        // split by comma
+                        char* save = NULL;
+                        for (char* tok = strtok_r(argbuf, ",", &save);
+                             tok && nargs < AML_MAX_PARAMS;
+                             tok = strtok_r(NULL, ",", &save)) {
+                            while (*tok == ' ') tok++;
+                            args[nargs++] = aml_eval(ctx, tok);
+                        }
+                    }
+                    aml_call_func(ctx, &ctx->funcs.funcs[fi], args, nargs);
+                    return idx + 1;
+                }
+            }
+        }
+    }
+
+    // --- Level 0 fallback: split CMD ARG, dispatch ---
+    {
+        char linebuf[AML_MAX_LINE_LEN];
+        strncpy(linebuf, text, AML_MAX_LINE_LEN - 1);
+        linebuf[AML_MAX_LINE_LEN - 1] = 0;
+
+        char* sp = linebuf;
+        while (*sp && !isspace((unsigned char)*sp)) sp++;
+        char* cmd_end = sp;
+        while (*sp && isspace((unsigned char)*sp)) sp++;
+        char* arg = sp;
+        *cmd_end = 0;
+        upcase(linebuf);
+
+        aml_exec_level0(linebuf, arg, ctx);
+    }
+    return idx + 1;
+}
+
+// Execute a block of lines [start, end)
+static int aml_exec_block(AML_ExecCtx* ctx, int start, int end) {
+    int i = start;
+    while (i < end && i < ctx->nlines) {
+        i = aml_exec_line(ctx, i);
+    }
+    return 0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PUBLIC EXEC — AML Level 0 + Level 2
+// ═══════════════════════════════════════════════════════════════════════════════
+
+int am_exec(const char* script) {
+    if (!script || !*script) return 0;
+    g_error[0] = 0;
+
+    // preprocess into lines
+    AML_Line* lines = (AML_Line*)malloc(AML_MAX_LINES * sizeof(AML_Line));
+    if (!lines) return 2;
+
+    int nlines = aml_preprocess(script, lines, AML_MAX_LINES);
+    if (nlines == 0) { free(lines); return 0; }
+
+    // set up execution context
+    AML_ExecCtx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.lines = lines;
+    ctx.nlines = nlines;
+
+    // first pass: register function definitions
+    aml_register_funcs(&ctx);
+
+    // second pass: execute top-level block
+    aml_exec_block(&ctx, 0, nlines);
+
+    free(lines);
+
+    if (ctx.error[0]) {
+        strncpy(g_error, ctx.error, 255);
+        return 1;
+    }
+    return 0;
+}
+
+int am_exec_file(const char* path) {
+    if (!path) return 1;
+    g_error[0] = 0;
+
+    FILE* f = fopen(path, "r");
+    if (!f) {
+        snprintf(g_error, 256, "cannot open: %s", path);
+        return 1;
+    }
+
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    if (sz <= 0 || sz > 1024 * 1024) {
+        fclose(f);
+        snprintf(g_error, 256, "bad size: %s (%ld)", path, sz);
+        return 1;
+    }
+
+    char* buf = (char*)malloc(sz + 1);
+    if (!buf) { fclose(f); return 2; }
+
+    size_t rd = fread(buf, 1, sz, f);
+    fclose(f);
+    buf[rd] = 0;
+
+    int rc = am_exec(buf);
+    free(buf);
+    return rc;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

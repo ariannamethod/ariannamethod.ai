@@ -125,6 +125,73 @@ typedef struct {
 #define AM_TEMPORAL_SYMMETRIC    2
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// AML LEVEL 2 — flow control, variables, expressions
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#define AML_MAX_LINES       1024
+#define AML_MAX_LINE_LEN    256
+#define AML_MAX_VARS        64
+#define AML_MAX_NAME        32
+#define AML_MAX_FUNCS       32
+#define AML_MAX_PARAMS      8
+#define AML_MAX_CALL_DEPTH  16
+#define AML_MAX_INCLUDE     8
+
+// Preprocessed line
+typedef struct {
+    char text[AML_MAX_LINE_LEN];
+    int  indent;
+    int  lineno;
+} AML_Line;
+
+// Variable
+typedef struct {
+    char  name[AML_MAX_NAME];
+    float value;
+} AML_Var;
+
+// Symbol table
+typedef struct {
+    AML_Var vars[AML_MAX_VARS];
+    int     count;
+} AML_Symtab;
+
+// User-defined function
+typedef struct {
+    char name[AML_MAX_NAME];
+    char params[AML_MAX_PARAMS][AML_MAX_NAME];
+    int  param_count;
+    int  body_start;
+    int  body_end;
+} AML_Func;
+
+// Function table
+typedef struct {
+    AML_Func funcs[AML_MAX_FUNCS];
+    int      count;
+} AML_Functab;
+
+// Execution context
+typedef struct {
+    AML_Line*    lines;
+    int          nlines;
+    AML_Symtab   globals;
+    AML_Symtab   locals[AML_MAX_CALL_DEPTH];
+    int          call_depth;
+    AML_Functab  funcs;
+    int          include_depth;
+    char         base_dir[256];
+    char         error[256];
+} AML_ExecCtx;
+
+// AM_State field map entry (for reading state in expressions)
+typedef struct {
+    const char* name;
+    int         offset;
+    int         is_int;
+} AML_FieldMap;
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // API
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -140,8 +207,14 @@ int am_pack_enabled(unsigned int pack_mask);
 void am_reset_field(void);
 void am_reset_debt(void);
 
-// Execute DSL script
+// Execute AML script (Level 0 + Level 2)
 int am_exec(const char* script);
+
+// Execute AML file (convenience: reads file, executes)
+int am_exec_file(const char* path);
+
+// Get last error from am_exec (empty string = no error)
+const char* am_get_error(void);
 
 // State access
 AM_State* am_get_state(void);
