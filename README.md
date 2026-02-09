@@ -438,7 +438,7 @@ const char* am_get_season_name(void);
 core/
   ariannamethod.c      Reference implementation (2685 lines)
   ariannamethod.h      Header with AM_State, Level 2 structures, Blood API (442 lines)
-  test_aml.c           179 tests
+  test_aml.c           190 tests
 spec/
   AML_SPEC.md          Full language specification with EBNF grammar
 examples/
@@ -448,6 +448,7 @@ examples/
   dream.aml            Dream consolidation state
   level2_preview.aml   Level 2 syntax: def, if/else, while, variables
   common.aml           Shared macros and functions (INCLUDE example)
+  blood.aml            Blood compiler: LoRA, emotions, raw C
 ACCEPTABLE_USE.md      What you may and may not do with AML
 TRADEMARK.md           Use of the Arianna Method name and marks
 Makefile

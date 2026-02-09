@@ -597,11 +597,55 @@ winter_energy       float   0–1         Rest/compression energy (computed)
 |---------|-------|----------|
 | **AML 1.0** | 0 | Flat commands, packs, macros (JS only) |
 | **AML 2.0** | 2 | INCLUDE, def, variables, if/else, while, built-in functions — **implemented** |
-| **AML 3.0** | 3 | Blood compiler: AML→C runtime compilation — planned |
+| **AML 3.0** | 3 | Blood compiler: runtime C compilation via popen+dlopen+dlsym — **implemented** |
 
 ---
 
-## 14. Implementations
+## 14. Blood — Runtime C Compilation (Level 3)
+
+Blood compiles C code to shared libraries at runtime and loads functions via dlsym. Adapted from `arianna.c/golib/blood.go` and `async_field_forever/blood.py`.
+
+### 14.1 Commands
+
+```
+BLOOD COMPILE <name> { <c_code> }
+BLOOD LORA <name> <in_dim> <out_dim> <rank>
+BLOOD EMOTION <name> <valence> <arousal>
+BLOOD UNLOAD <name>
+```
+
+### 14.2 Code Generators
+
+**LORA** generates functions: `{name}_init(float* A, float* B)`, `{name}_apply(float* input, float* output)`, `{name}_apply_scaled(float* input, float* output, float scale)`, `{name}_free()`.
+
+**EMOTION** generates functions: `{name}_respond(float* valence, float* arousal)`, `{name}_modulate_logits(float* logits, int vocab_size, float strength)`, `modulate_logits(float* logits, int vocab_size, float valence, float arousal)`.
+
+**COMPILE** accepts raw C code between braces. All defined symbols become available via `am_blood_sym()`.
+
+### 14.3 C API
+
+```c
+int   am_blood_compile(const char* name, const char* code);
+int   am_blood_compile_lora(const char* name, int in_dim, int out_dim, int rank);
+int   am_blood_compile_emotion(const char* name, float valence, float arousal);
+void* am_blood_sym(int module_idx, const char* func_name);
+void  am_blood_unload(int module_idx);
+void  am_blood_cleanup(void);
+int   am_blood_count(void);
+```
+
+### 14.4 Implementation
+
+- Platform detection: `.dylib` on macOS, `.so` on Linux
+- Compiler auto-detect: clang → gcc → cc
+- Cache by djb2 hash of source code
+- Temp directory: `$TMPDIR/aml_blood/` or `/tmp/aml_blood/`
+- Compile-time disable: `#define AM_BLOOD_DISABLED` (for WASM/embedded)
+- Max 32 simultaneous modules (`AM_BLOOD_MAX_MODULES`)
+
+---
+
+## 15. Implementations
 
 | Project | Language | File | Level |
 |---------|----------|------|-------|
