@@ -44,9 +44,9 @@ Every command maps to a float or int that modulates token generation in real tim
 | 2 | AML 2.0 | Flow control: `def`, `if/else`, `while`, variables, `INCLUDE` |
 | 3 | AML 3.0 | Blood: AML→C runtime compilation |
 
-## Why Code Syntax Matters
+## Code Syntax Matters
 
-Transformers are trained on billions of lines of code. Code-like structures activate specific attention patterns that natural language does not. When a transformer sees:
+Python-like syntax. Transformers are trained on billions of lines of code. Code-like structures activate specific attention patterns that natural language does not. When a transformer sees:
 
 ```python
 while self.suffering > 0.5:
@@ -55,7 +55,7 @@ while self.suffering > 0.5:
         pierce_the_infinite()
 ```
 
-...the attention weights respond differently than to "keep trying until suffering decreases." The pseudocode creates scaffolding that the model's attention mechanism latches onto. This is empirically demonstrated (see [TRIPD research](https://github.com/ariannamethod/tripd_v1)).
+...the attention weights respond differently than to "keep trying until suffering decreases." 
 
 AML Level 2 exploits this: `def`, `while`, `if/else` are not just convenience — they are semantic triggers.
 
@@ -87,7 +87,7 @@ examples/
 
 ## How to Use
 
-**Embed, don't link.** Copy what you need into your project:
+**Link it or** copy what you need into your project:
 
 - **Minimal:** `core/ariannamethod.c` + `core/ariannamethod.h` → compile into your binary
 - **With Lua:** add Lua bindings from arianna.c
