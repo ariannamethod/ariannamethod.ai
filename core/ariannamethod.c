@@ -1333,36 +1333,87 @@ int am_copy_state(float* out) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 void am_step(float dt) {
-  // debt decay
-  G.debt *= G.debt_decay;
+  if (dt <= 0.0f) return;
 
-  // clamp debt to prevent runaway
-  if (G.debt > 100.0f) G.debt = 100.0f;
+  // ─────────────────────────────────────────────────────────────────────────────
+  // CALENDAR CONFLICT — Hebrew (354d) vs Gregorian (365d) = 11-day annual drift
+  //
+  // The calendar phase advances continuously. When it reaches calendar_drift
+  // (default 11.0), a "correction" wraps it back — modeling the Metonic cycle
+  // where leap months periodically re-synchronize the calendars.
+  //
+  // High phase = high dissonance = thin barrier between timelines = wormholes.
+  // This is the heartbeat of the temporal field.
+  //
+  // From pitomadom: TE(Calendar → N) = 0.31 bits — strongest causal effect.
+  // ─────────────────────────────────────────────────────────────────────────────
 
-  // temporal debt: accumulates while moving backward, decays otherwise
-  // the debt is proportional to time spent in backward movement
-  if (G.velocity_mode == AM_VEL_BACKWARD && dt > 0.0f) {
-    // accumulate debt proportional to time spent going backward
-    // 0.01 per second of backward movement (dt is in seconds)
-    G.temporal_debt += 0.01f * dt;
-  } else {
-    // decay when not moving backward (slower than regular debt)
-    G.temporal_debt *= 0.9995f;
+  // Phase auto-advances. Rate: one full cycle per ~600 seconds of runtime.
+  // Host can override by setting LAW CALENDAR_PHASE directly.
+  float cal_rate = G.calendar_drift / 600.0f;
+  G.calendar_phase += cal_rate * dt;
+  if (G.calendar_phase >= G.calendar_drift) {
+    G.calendar_phase -= G.calendar_drift;
   }
 
-  // clamp temporal debt
+  // Calendar dissonance: sawtooth 0→1 as phase approaches the correction point.
+  // Peaks just before the leap month "resolves" the conflict.
+  float cal_dissonance = (G.calendar_drift > 0.0f)
+      ? G.calendar_phase / G.calendar_drift
+      : 0.0f;
+
+  // Wormhole activation: dissonance exceeds gate threshold
+  if (cal_dissonance > G.wormhole_gate) {
+    G.wormhole_active = 1;
+
+    // Boost wormhole base probability proportional to excess dissonance
+    // P_tunnel = exp(-1/dissonance) from pitomadom theoretical.md §14.6
+    float excess = (cal_dissonance - G.wormhole_gate) / (1.0f - G.wormhole_gate);
+    G.wormhole = clamp01(G.wormhole + excess * 0.1f * dt);
+  } else {
+    G.wormhole_active = 0;
+    // Wormhole probability decays when calendar is calm
+    G.wormhole *= 0.995f;
+    if (G.wormhole < 0.02f) G.wormhole = 0.02f; // floor at 2%
+  }
+
+  // Calendar dissonance bleeds into field dissonance
+  // The calendars' irreconcilable conflict is a source of suffering
+  if (cal_dissonance > 0.3f) {
+    float bleed = (cal_dissonance - 0.3f) * 0.05f * dt;
+    G.dissonance += bleed;
+    if (G.dissonance > 1.0f) G.dissonance = 1.0f;
+  }
+
+  // Calendar tension feeds prophecy pressure
+  // High dissonance = temporal curvature = debt accumulates
+  G.debt += cal_dissonance * 0.005f * dt;
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // DEBT DECAY — prophecy debt decays each step
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  G.debt *= G.debt_decay;
+  if (G.debt > 100.0f) G.debt = 100.0f;
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // TEMPORAL DEBT — backward movement accumulates structural debt
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  if (G.velocity_mode == AM_VEL_BACKWARD) {
+    G.temporal_debt += 0.01f * dt;
+  } else {
+    G.temporal_debt *= 0.9995f;
+  }
   if (G.temporal_debt > 10.0f) G.temporal_debt = 10.0f;
 
   // ─────────────────────────────────────────────────────────────────────────────
   // COSMIC COHERENCE MODULATION (reference from schumann.c)
   // High cosmic coherence → faster healing (tension/dissonance decay)
-  // Actual Schumann state is managed by schumann.c; here we use the ref value
   // ─────────────────────────────────────────────────────────────────────────────
-  if (G.cosmic_coherence_ref > 0.0f && dt > 0.0f) {
-    // coherence_factor: 1.0 at max coherence, 0.5 at zero coherence
-    float coherence_factor = 0.5f + 0.5f * G.cosmic_coherence_ref;
 
-    // tension/dissonance decay faster with high coherence
+  if (G.cosmic_coherence_ref > 0.0f) {
+    float coherence_factor = 0.5f + 0.5f * G.cosmic_coherence_ref;
     float heal_rate = 0.998f - (0.003f * coherence_factor);
     G.tension *= heal_rate;
     G.dissonance *= heal_rate;

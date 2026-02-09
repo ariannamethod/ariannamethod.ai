@@ -364,6 +364,77 @@ static void test_init_script(void) {
     ASSERT_FLOAT(s->entropy_floor, 0.1f, 0.01f, "init: LAW ENTROPY_FLOOR 0.1");
 }
 
+// ── TEST 16: calendar conflict physics ───────────────────────────────────────
+
+static void test_calendar_physics(void) {
+    printf("\n── calendar conflict physics ──\n");
+    am_init();
+
+    AM_State* s = am_get_state();
+    ASSERT_FLOAT(s->calendar_drift, 11.0f, 0.01f, "calendar_drift default 11.0");
+    ASSERT_FLOAT(s->calendar_phase, 0.0f, 0.01f, "calendar_phase starts at 0");
+    ASSERT_FLOAT(s->wormhole_gate, 0.3f, 0.01f, "wormhole_gate default 0.3");
+    ASSERT_INT(s->wormhole_active, 0, "wormhole inactive at phase 0");
+
+    // advance time — phase should increase
+    float initial_phase = s->calendar_phase;
+    am_step(1.0f);  // 1 second
+    ASSERT(s->calendar_phase > initial_phase, "phase advances after step");
+
+    // set phase high — should activate wormhole
+    am_init();
+    am_exec("LAW CALENDAR_PHASE 9.0");
+    am_step(0.01f);
+    float dissonance_ratio = 9.0f / 11.0f;  // ~0.818
+    ASSERT(dissonance_ratio > s->wormhole_gate, "phase 9/11 > gate 0.3");
+    ASSERT_INT(s->wormhole_active, 1, "wormhole ACTIVE at high phase");
+    ASSERT(s->wormhole > 0.02f, "wormhole probability boosted");
+
+    // set phase low — wormhole should be inactive
+    am_init();
+    am_exec("LAW CALENDAR_PHASE 1.0");
+    am_step(0.01f);
+    ASSERT_INT(s->wormhole_active, 0, "wormhole inactive at low phase");
+
+    // calendar dissonance bleeds into field dissonance
+    am_init();
+    am_exec("DISSONANCE 0\nLAW CALENDAR_PHASE 8.0");
+    for (int i = 0; i < 100; i++) am_step(0.1f);
+    ASSERT(s->dissonance > 0.0f, "calendar dissonance bleeds into field");
+
+    // calendar tension feeds prophecy debt
+    am_init();
+    am_exec("LAW CALENDAR_PHASE 10.0");
+    float debt_before = s->debt;
+    am_step(1.0f);
+    ASSERT(s->debt > debt_before, "high calendar phase increases debt");
+}
+
+// ── TEST 17: wormhole gate cycle ────────────────────────────────────────────
+
+static void test_wormhole_cycle(void) {
+    printf("\n── wormhole gate cycle ──\n");
+    am_init();
+
+    AM_State* s = am_get_state();
+    int activations = 0;
+
+    // run many steps, wormhole should activate periodically
+    for (int i = 0; i < 10000; i++) {
+        am_step(0.1f);
+        if (s->wormhole_active) activations++;
+    }
+
+    ASSERT(activations > 0, "wormhole activates during long run");
+    ASSERT(activations < 10000, "wormhole is not always active");
+    printf("    (wormhole active %d/10000 steps, phase=%.2f)\n",
+           activations, s->calendar_phase);
+
+    // verify phase wrapped (600s for full cycle, we ran 1000s)
+    // should have completed ~1.6 cycles
+    ASSERT(s->calendar_phase < s->calendar_drift, "phase stays within bounds");
+}
+
 // ── MAIN ────────────────────────────────────────────────────────────────────
 
 int main(void) {
@@ -384,6 +455,8 @@ int main(void) {
     test_step();
     test_get_error();
     test_init_script();
+    test_calendar_physics();
+    test_wormhole_cycle();
 
     printf("\n═══ Results: %d/%d passed ═══\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

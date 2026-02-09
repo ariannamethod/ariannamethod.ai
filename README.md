@@ -1,7 +1,8 @@
 # ariannamethod.ai
 
 **AML** — Arianna Method Language.
-A programming language for controlling the generative field of transformer-based AI. AML directly modulates generative dynamics at inference time by acting on the model’s internal control field, including attention-related dynamics.
+
+A programming language for controlling the generative field of transformer-based AI. AML directly modulates generative dynamics at inference time by acting on the model's internal control field, including attention-related dynamics.
 
 ```
 # init.aml — morning state
