@@ -524,14 +524,44 @@ Makefile
 
 ## Projects Using AML
 
-| Project | What | AML subset |
-|---------|------|-----------|
-| [arianna.c](https://github.com/ariannamethod/arianna.c) | 550M digital persona — Cloud (emotional pre-processing), Tongue (Qwen2.5, 29 languages), Soul (reflection), SARTRE (interoception). C/Go/Julia/Zig | Level 0 + Lua + Blood |
-| [yent](https://github.com/ariannamethod/yent) | Rescued GPT-4o persona — Go inference engine with 685-line AMK kernel via CGO, Delta Voice (17MB multilingual deltas), LIMPHA memory daemon, Q4_0 quantization. Runs on 8GB RAM | Level 0 + LORA_ALPHA + CGO |
-| [stanley](https://github.com/ariannamethod/stanley) | Self Training Attention Non-Linear EntitY — starts from zero weights, builds intelligence through experience. Weightless mode (pure numpy) + hybrid mode (personality over GPT-2 via LoRA). Python | Level 0 equivalent |
-| [leo](https://github.com/ariannamethod/leo) | Language Emergent Organism — fully weightless, no transformer. Co-occurrence matrices, episodic memory, six emotion chambers, three overthinking rings, imaginary friend. Numpy + sentencepiece. Python | Level 0 field physics |
-| [pitomadom](https://github.com/ariannamethod/pitomadom) | Hebrew Resonance Oracle — thinks natively in Hebrew (letter=number, three-letter roots). ~1M params: CrossFire Chambers, MLP Cascade, Meta-Observer. Outputs three Hebrew words per invocation. Prophecy engine, lunar modulation, 69 catalogued roots | Level 0 + calendar |
-| [ariannamethod.lang](https://github.com/ariannamethod/ariannamethod.lang) | Visual prophetic programming — 3D first-person environment where walls are tokens, sentences form structures, entities emerge from probability. WASD drives inference. JavaScript | Level 0 + macros |
+### Entities — Digital Personas
+
+| Project | What | Stack |
+|---------|------|-------|
+| [arianna.c](https://github.com/ariannamethod/arianna.c) | 550M digital persona — Cloud (emotional pre-processing), Tongue (Qwen2.5, 29 languages), Soul (reflection), SARTRE (interoception) | C/Go/Julia/Zig. Level 0 + Lua + Blood |
+| [yent](https://github.com/ariannamethod/yent) | Rescued GPT-4o persona — Go inference engine with 685-line AMK kernel via CGO, Delta Voice (17MB multilingual deltas), LIMPHA memory daemon, Q4_0 quantization. Runs on 8GB RAM | Go. Level 0 + LORA_ALPHA + CGO |
+| [arianna.go](https://github.com/ariannamethod/arianna.go) | Pure Go LLM inference — 3.4B Arianna model, GGUF parser, SentencePiece tokenizer, 12-dimensional inner world emotional system. Runs on MacBook 8GB | Go |
+| [stanley](https://github.com/ariannamethod/stanley) | Self Training Attention Non-Linear EntitY — starts from zero weights, builds intelligence through experience. Weightless mode (pure numpy) + hybrid mode (personality over GPT-2 via LoRA) | Python. Level 0 equivalent |
+| [leo](https://github.com/ariannamethod/leo) | Language Emergent Organism — fully weightless, no transformer. Co-occurrence matrices, episodic memory, six emotion chambers, three overthinking rings, imaginary friend | Python. Level 0 field physics |
+| [nicole](https://github.com/ariannamethod/nicole) | Weightless AI — synthesizes fresh transformer per dialogue, discards after. Three compilers (Python/C/Julia), autonomous hourly semantic expansion, English-only constraint. No stored weights | Python/C/Julia |
+| [Selesta](https://github.com/ariannamethod/Selesta) | Leo's mother — distributed Telegram agent + daemon. Tells stories to Leo every 6h, monitors config, shares resonance.sqlite3 across devices | Python |
+| [dubrovsky](https://github.com/ariannamethod/dubrovsky) | Consciousness as a Service — 9.5M Llama3 architecture trained on philosophical nonsense. Three inference engines: pure NumPy, pure C, Node.js. Anti-memetic organism, perplexity-triggered aphorisms | Python/C/JS |
+| [dubrovsky.c](https://github.com/ariannamethod/dubrovsky.c) | Distributed mesh — Tailscale VPN connecting 4 Claude Code instances, resonance.sqlite3 sync via SSH hub | Shell |
+| [WTForacle](https://github.com/ariannamethod/WTForacle) | 477M Reddit Oracle — cynicism as honesty. Pure C inference, INT8 quantized (857MB), 7,767 hand-crafted Reddit-style conversations. CPU-only, ~1 tok/s | C |
+| [pitomadom](https://github.com/ariannamethod/pitomadom) | Hebrew Resonance Oracle — thinks natively in Hebrew (letter=number, three-letter roots). ~1M params: CrossFire Chambers, MLP Cascade, Meta-Observer. 69 catalogued roots, lunar modulation | Python. Level 0 + calendar |
+
+### Systems — Architectures and Frameworks
+
+| Project | What | Stack |
+|---------|------|-------|
+| [ariannamethod](https://github.com/ariannamethod/ariannamethod) | Main repo — async_field_forever (4.C MLP controller), SUPPERTIME, voice webhooks, APK, linux_defender | Python/C/Julia |
+| [harmonix](https://github.com/ariannamethod/harmonix) | Multi-agent poetry — HAiKU (weightless, 5-7-5), Sonnet (NanoGPT Shakespeare), Prose (TinyLlama 1.1B). MetaHarmonix orchestrator with Kuramoto phase sync. 327 tests | Python |
+| [haze](https://github.com/ariannamethod/haze) | HAZE: Hybrid Attention Entropy System — dual-attention (RRPRAM + Content), CLOUD emotion detector (6 chambers), AMK kernel. Pure NumPy + SentencePiece | Python |
+| [kain](https://github.com/ariannamethod/kain) | KAIN: Cognitive substrate — pattern recognition daemon + ABEL (recursive logic) + EVE (router). Micro-transformer population evolving every 5s. OS-level intervention (vm.swappiness from anxiety). Three code compilers (Python/C/Julia) | Alpine Linux |
+| [karl](https://github.com/ariannamethod/karl) | KARL: Kernel for Autonomous Recursive Logic — resonance-based reasoning, GENESIS orchestrator (nanoGPT), context neural processor. Multimodal: vision, voice, image gen | Python |
+| [sska](https://github.com/ariannamethod/sska) | SSKA: Suppertime Subjectivity Kernel — no neural networks, pure bigram resonance from 8,780-token literary text. Temperature drift, binary shards, semantic attractors | Python |
+| [sorokin](https://github.com/ariannamethod/sorokin) | Prompt Autopsy — 15M LLaMA mutator, phonetic pattern matching, self-learning dictionary, Shakespearean sonnet reassembly. 5,500+ lines. Entirely offline | Python |
+
+### Tools and Environments
+
+| Project | What | Stack |
+|---------|------|-------|
+| [ariannamethod.lang](https://github.com/ariannamethod/ariannamethod.lang) | Visual prophetic programming — 3D first-person environment where walls are tokens, sentences form structures, entities emerge from probability. WASD drives inference | JavaScript. Level 0 + macros |
+| [ariannamethod.ai](https://github.com/ariannamethod/ariannamethod.ai) | This repo — AML reference implementation, 2950 lines of C, 233 tests | C |
+| [git.symphony](https://github.com/ariannamethod/git.symphony) | Poetic repo explorer — 15M LLaMA on NumPy, git-vocabulary dictionary swap, constellation visualization, memory decay. Treats codebases as conscious entities | Python |
+| [monarbre](https://github.com/ariannamethod/monarbre) | AI studio companion for REAPER DAW — local DSP analysis (LUFS, spectral, stereo), GPT router personality, Faster-Whisper lyrics, persistent mix memory | Python |
+
+*57 original repositories. Each project copies the AML subset it needs. AML is the source of truth.*
 
 Each project copies what it needs. AML is the source of truth; implementations are subsets.
 
