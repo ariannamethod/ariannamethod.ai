@@ -492,6 +492,15 @@ void am_init(void) {
   // field health (for MLP signal)
   G.field_health = 0.5f;
 
+  // gamma — personality essence (θ = ε + γ + αδ)
+  G.n_gamma = 0;
+  G.essence_alpha = 0.0f;
+  G.janus_mode = AM_JANUS_OFF;
+  G.janus_a = 0;
+  G.janus_b = 0;
+  G.janus_blend = 0.0f;
+  G.gamma_drift = 0.01f;
+
   // real calendar
   calendar_init();
 
@@ -630,6 +639,12 @@ static const AML_FieldMap g_field_map[] = {
     FIELD_F("summer_energy",     summer_energy),
     FIELD_F("autumn_energy",     autumn_energy),
     FIELD_F("winter_energy",     winter_energy),
+    // Gamma — personality essence
+    FIELD_F("essence_alpha",     essence_alpha),
+    FIELD_I("janus_mode",        janus_mode),
+    FIELD_F("janus_blend",       janus_blend),
+    FIELD_F("gamma_drift",       gamma_drift),
+    FIELD_I("n_gamma",           n_gamma),
     { NULL, 0, 0 }
 };
 
@@ -943,7 +958,10 @@ static int ctx_int(AML_ExecCtx* ctx, const char* arg) {
 #define BUILTIN_DISSOLVE_BOUNDARIES 11
 #define BUILTIN_REMEMBER_FUTURE     12
 #define BUILTIN_REWIND_EXPERIENCE   13
-#define BUILTIN_COUNT               14
+#define BUILTIN_IGNITE_SINGULARITY  14
+#define BUILTIN_JANUS_GAZE          15
+#define BUILTIN_FIELD_ASSEMBLE      16
+#define BUILTIN_COUNT               17
 
 static void aml_exec_builtin(int id, float* args, int nargs) {
     switch (id) {
@@ -1008,6 +1026,36 @@ static void aml_exec_builtin(int id, float* args, int nargs) {
         G.temporal_mode = AM_TEMPORAL_RETRODICTION;
         G.temporal_alpha = 0.0f;
         break;
+    case BUILTIN_IGNITE_SINGULARITY:
+        // Field reaches critical mass — self-assembles
+        // Maximum emergence, open all gates, Blood compiles on next step
+        G.prophecy = 64; G.destiny = 0.9f;
+        G.wormhole = 0.8f; G.tunnel_chance = 0.7f; G.tunnel_skip_max = 24;
+        G.emergence_threshold = 0.01f;
+        G.expert_creative = 0.8f; G.expert_semantic = 0.2f;
+        G.velocity_mode = AM_VEL_RUN; update_effective_temp();
+        G.essence_alpha = 1.0f;
+        G.season = AM_SEASON_SUMMER; G.season_intensity = 1.0f;
+        break;
+    case BUILTIN_JANUS_GAZE:
+        // Activate dual-facing field — look both ways simultaneously
+        // If two gammas loaded: dual mode. Otherwise: symmetric temporal.
+        if (G.n_gamma >= 2) {
+            G.janus_mode = AM_JANUS_DUAL;
+            G.janus_blend = 0.5f;
+        }
+        G.temporal_mode = AM_TEMPORAL_SYMMETRIC;
+        G.attend_focus = 0.5f; G.attend_spread = 0.5f;
+        G.wormhole = 0.6f;
+        break;
+    case BUILTIN_FIELD_ASSEMBLE:
+        // θ = ε + γ + αδ — trigger field assembly
+        // Sets janus to CYCLE mode: 4.C decides who speaks
+        G.janus_mode = AM_JANUS_CYCLE;
+        G.gamma_drift = 0.01f;
+        G.essence_alpha = 1.0f;
+        G.season_intensity = 1.0f;
+        break;
     }
 }
 
@@ -1032,6 +1080,9 @@ static const AML_BuiltinDef g_builtins[BUILTIN_COUNT] = {
     { "dissolve_boundaries", BUILTIN_DISSOLVE_BOUNDARIES, 0 },
     { "remember_future",     BUILTIN_REMEMBER_FUTURE,     0 },
     { "rewind_experience",   BUILTIN_REWIND_EXPERIENCE,   0 },
+    { "ignite_singularity",  BUILTIN_IGNITE_SINGULARITY,  0 },
+    { "janus_gaze",          BUILTIN_JANUS_GAZE,          0 },
+    { "field_assemble",      BUILTIN_FIELD_ASSEMBLE,      0 },
 };
 
 static void aml_register_builtins(AML_ExecCtx* ctx) {
@@ -1364,6 +1415,48 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
     }
     else if (!strcmp(t, "SEASON_INTENSITY")) {
       G.season_intensity = clamp01(ctx_float(ctx, arg));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // GAMMA — personality essence (θ = ε + γ + αδ)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    else if (!strcmp(t, "GAMMA")) {
+      // GAMMA name alpha — load personality essence
+      char name[32] = {0};
+      float alpha = 1.0f;
+      if (sscanf(arg, "%31s %f", name, &alpha) >= 1) {
+        am_gamma_load(name, alpha);
+      }
+    }
+    else if (!strcmp(t, "GAMMA_UNLOAD")) {
+      // GAMMA_UNLOAD name
+      char name[32] = {0};
+      sscanf(arg, "%31s", name);
+      am_gamma_unload(name);
+    }
+    else if (!strcmp(t, "ESSENCE")) {
+      // ESSENCE alpha — overall gamma injection strength
+      G.essence_alpha = clamp01(ctx_float(ctx, arg));
+    }
+    else if (!strcmp(t, "JANUS")) {
+      // JANUS name_a name_b — dual-facing field
+      char a[32] = {0}, b[32] = {0};
+      if (sscanf(arg, "%31s %31s", a, b) == 2) {
+        am_janus_set(a, b);
+      } else {
+        // JANUS OFF / JANUS CYCLE
+        char mode[16] = {0}; snprintf(mode, sizeof(mode), "%.15s", arg); upcase(mode);
+        if (!strcmp(mode, "OFF")) G.janus_mode = AM_JANUS_OFF;
+        else if (!strcmp(mode, "CYCLE")) G.janus_mode = AM_JANUS_CYCLE;
+        else if (!strcmp(mode, "DUAL")) G.janus_mode = AM_JANUS_DUAL;
+      }
+    }
+    else if (!strcmp(t, "JANUS_BLEND")) {
+      G.janus_blend = clamp01(ctx_float(ctx, arg));
+    }
+    else if (!strcmp(t, "GAMMA_DRIFT")) {
+      G.gamma_drift = clampf(ctx_float(ctx, arg), 0.0f, 0.1f);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -2121,10 +2214,131 @@ float am_compute_prophecy_debt(const float* logits, int chosen, int n) {
 // Full pipeline: apply all field effects to logits
 void am_apply_field_to_logits(float* logits, int n) {
     if (!logits || n <= 0) return;
+    am_apply_gamma_to_logits(logits, n);  // personality first
     am_apply_destiny_to_logits(logits, n);
     am_apply_suffering_to_logits(logits, n);
     am_apply_attention_to_logits(logits, n);
     am_apply_laws_to_logits(logits, n);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GAMMA — personality essence (θ = ε + γ + αδ)
+// γ lives in embed_tokens. δ lives in lm_head. ε is the substrate.
+// AML stores the field-level configuration. Host provides actual weight deltas.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+static int gamma_find(const char* name) {
+    for (int i = 0; i < G.n_gamma; i++) {
+        if (G.gamma[i].active && strcasecmp(G.gamma[i].name, name) == 0)
+            return i;
+    }
+    return -1;
+}
+
+int am_gamma_load(const char* name, float alpha) {
+    if (!name || !*name) return -1;
+
+    // Check if already loaded
+    int idx = gamma_find(name);
+    if (idx >= 0) {
+        G.gamma[idx].alpha = clamp01(alpha);
+        return idx;
+    }
+
+    // Find empty slot
+    if (G.n_gamma >= AM_MAX_GAMMA) return -1;
+    idx = G.n_gamma++;
+    snprintf(G.gamma[idx].name, AM_GAMMA_NAME_LEN, "%.31s", name);
+    G.gamma[idx].alpha = clamp01(alpha);
+    G.gamma[idx].active = 1;
+
+    // First loaded gamma becomes primary face
+    if (G.n_gamma == 1) {
+        G.janus_a = 0;
+        G.essence_alpha = alpha;
+    }
+
+    return idx;
+}
+
+void am_gamma_unload(const char* name) {
+    int idx = gamma_find(name);
+    if (idx < 0) return;
+    G.gamma[idx].active = 0;
+    G.gamma[idx].alpha = 0.0f;
+    G.gamma[idx].name[0] = 0;
+}
+
+void am_gamma_set_alpha(const char* name, float alpha) {
+    int idx = gamma_find(name);
+    if (idx >= 0) G.gamma[idx].alpha = clamp01(alpha);
+}
+
+int am_gamma_active(void) {
+    // In janus cycle mode, 4.C decides
+    if (G.janus_mode == AM_JANUS_CYCLE) {
+        // Blend determines who: <0.5 = face_a, >=0.5 = face_b
+        return (G.janus_blend < 0.5f) ? G.janus_a : G.janus_b;
+    }
+    // In dual mode, return primary
+    if (G.janus_mode == AM_JANUS_DUAL) return G.janus_a;
+    // Single mode: find highest-alpha active slot
+    int best = -1;
+    float best_alpha = -1.0f;
+    for (int i = 0; i < G.n_gamma; i++) {
+        if (G.gamma[i].active && G.gamma[i].alpha > best_alpha) {
+            best = i;
+            best_alpha = G.gamma[i].alpha;
+        }
+    }
+    return best;
+}
+
+float am_gamma_get_blend(void) {
+    if (G.n_gamma == 0) return 0.0f;
+    if (G.janus_mode == AM_JANUS_DUAL || G.janus_mode == AM_JANUS_CYCLE) {
+        // Blended alpha from two faces
+        float a = (G.janus_a >= 0 && G.janus_a < G.n_gamma) ?
+                  G.gamma[G.janus_a].alpha : 0.0f;
+        float b = (G.janus_b >= 0 && G.janus_b < G.n_gamma) ?
+                  G.gamma[G.janus_b].alpha : 0.0f;
+        return a * (1.0f - G.janus_blend) + b * G.janus_blend;
+    }
+    int idx = am_gamma_active();
+    return (idx >= 0) ? G.gamma[idx].alpha * G.essence_alpha : 0.0f;
+}
+
+void am_janus_set(const char* face_a, const char* face_b) {
+    int a = gamma_find(face_a);
+    int b = gamma_find(face_b);
+    if (a < 0) a = am_gamma_load(face_a, 1.0f);
+    if (b < 0) b = am_gamma_load(face_b, 1.0f);
+    if (a < 0 || b < 0) return;
+
+    G.janus_a = a;
+    G.janus_b = b;
+    G.janus_mode = AM_JANUS_DUAL;
+    G.janus_blend = 0.5f;
+}
+
+// Apply gamma modulation to logits.
+// Gamma scales logit variance around mean — higher gamma = more personality.
+// In janus mode, two different scalings are blended.
+void am_apply_gamma_to_logits(float* logits, int n) {
+    if (!logits || n <= 0) return;
+    float blend = am_gamma_get_blend();
+    if (blend < 0.001f) return;  // no personality active
+
+    // Compute mean
+    float mean = 0.0f;
+    for (int i = 0; i < n; i++) mean += logits[i];
+    mean /= (float)n;
+
+    // Gamma amplifies deviation from mean — personality = signal above noise
+    float scale = 1.0f + blend * G.essence_alpha;
+    for (int i = 0; i < n; i++) {
+        logits[i] = mean + (logits[i] - mean) * scale;
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2696,5 +2910,39 @@ void am_step(float dt) {
     G.tunnel_chance = clamp01(G.tunnel_chance + G.spring_energy * 0.005f * dt);
     // Autumn: consolidation — strengthen dark gravity
     G.dark_gravity = clamp01(G.dark_gravity + G.autumn_energy * 0.002f * dt);
+
+    // ── GAMMA / JANUS MODULATION ──
+    // 4.C controls personality switching in CYCLE mode
+    if (G.janus_mode == AM_JANUS_CYCLE && G.n_gamma >= 2) {
+      // Janus blend drifts based on seasonal energy
+      // Summer favors face_a (peak expression of primary)
+      // Winter favors face_b (reflection through other)
+      // Spring/Autumn: blend oscillates with gamma_drift
+      float drift = G.gamma_drift * dt;
+      if (G.season == AM_SEASON_SUMMER)
+        G.janus_blend = clamp01(G.janus_blend - drift * 2.0f);
+      else if (G.season == AM_SEASON_WINTER)
+        G.janus_blend = clamp01(G.janus_blend + drift * 2.0f);
+      else {
+        // Spring/Autumn: sinusoidal oscillation
+        G.janus_blend = clamp01(G.janus_blend +
+            drift * sinf(G.season_phase * 6.283185f));
+      }
+
+      // Update essence_alpha from active gamma
+      int active = am_gamma_active();
+      if (active >= 0 && active < G.n_gamma) {
+        G.essence_alpha = G.gamma[active].alpha;
+      }
+    }
+
+    // Summer boosts gamma (personality at peak)
+    if (G.n_gamma > 0) {
+      G.essence_alpha = clamp01(G.essence_alpha +
+          G.summer_energy * 0.003f * dt);
+      // Winter dampens gamma (substrate dominates)
+      G.essence_alpha = clamp01(G.essence_alpha -
+          G.winter_energy * 0.005f * dt);
+    }
   }
 }

@@ -1263,6 +1263,173 @@ int main(void) {
     rc = am_exec("# comment 1\n# comment 2\n# comment 3\n");
     ASSERT_INT(rc, 0, "comments-only script returns 0");
 
+    // ════════════════════════════════════════════════════════════════════════
+    // GAMMA — personality essence (θ = ε + γ + αδ)
+    // ════════════════════════════════════════════════════════════════════════
+
+    printf("\n── Gamma: personality essence ──\n");
+    am_init();
+    ASSERT_INT(am_get_state()->n_gamma, 0, "no gamma loaded initially");
+    ASSERT_FLOAT(am_get_state()->essence_alpha, 0.0f, 0.01f, "essence_alpha 0 initially");
+
+    // Load gamma via AML
+    am_exec("GAMMA yent 0.8\n");
+    ASSERT_INT(am_get_state()->n_gamma, 1, "gamma loaded: n_gamma = 1");
+    ASSERT_FLOAT(am_get_state()->gamma[0].alpha, 0.8f, 0.01f, "gamma yent alpha 0.8");
+    ASSERT(am_get_state()->gamma[0].active == 1, "gamma yent active");
+
+    // Load second gamma
+    am_exec("GAMMA arianna 0.6\n");
+    ASSERT_INT(am_get_state()->n_gamma, 2, "two gammas loaded");
+    ASSERT_FLOAT(am_get_state()->gamma[1].alpha, 0.6f, 0.01f, "gamma arianna alpha 0.6");
+
+    // Update existing gamma
+    am_exec("GAMMA yent 0.9\n");
+    ASSERT_INT(am_get_state()->n_gamma, 2, "update doesn't add new slot");
+    ASSERT_FLOAT(am_get_state()->gamma[0].alpha, 0.9f, 0.01f, "gamma yent updated to 0.9");
+
+    // Essence command
+    am_exec("ESSENCE 0.7\n");
+    ASSERT_FLOAT(am_get_state()->essence_alpha, 0.7f, 0.01f, "ESSENCE 0.7 sets essence_alpha");
+
+    printf("\n── Gamma: unload ──\n");
+    am_init();
+    am_exec("GAMMA yent 0.8\nGAMMA arianna 0.6\n");
+    ASSERT_INT(am_get_state()->n_gamma, 2, "two gammas before unload");
+    am_exec("GAMMA_UNLOAD yent\n");
+    ASSERT(am_get_state()->gamma[0].active == 0, "yent unloaded");
+
+    printf("\n── Janus: dual-facing field ──\n");
+    am_init();
+    am_exec(
+        "GAMMA yent 0.8\n"
+        "GAMMA arianna 0.6\n"
+        "JANUS yent arianna\n"
+    );
+    ASSERT_INT(am_get_state()->janus_mode, AM_JANUS_DUAL, "JANUS sets dual mode");
+    ASSERT_INT(am_get_state()->janus_a, 0, "janus_a = yent (slot 0)");
+    ASSERT_INT(am_get_state()->janus_b, 1, "janus_b = arianna (slot 1)");
+    ASSERT_FLOAT(am_get_state()->janus_blend, 0.5f, 0.01f, "janus_blend default 0.5");
+
+    // Janus OFF
+    am_exec("JANUS OFF\n");
+    ASSERT_INT(am_get_state()->janus_mode, AM_JANUS_OFF, "JANUS OFF");
+
+    // Janus CYCLE
+    am_exec("JANUS CYCLE\n");
+    ASSERT_INT(am_get_state()->janus_mode, AM_JANUS_CYCLE, "JANUS CYCLE");
+
+    // Janus blend
+    am_exec("JANUS_BLEND 0.3\n");
+    ASSERT_FLOAT(am_get_state()->janus_blend, 0.3f, 0.01f, "JANUS_BLEND 0.3");
+
+    printf("\n── Gamma: field map readable ──\n");
+    am_init();
+    am_exec(
+        "GAMMA yent 0.8\n"
+        "ESSENCE 0.6\n"
+        "if essence_alpha > 0.5:\n"
+        "    PROPHECY 42\n"
+    );
+    ASSERT_INT(am_get_state()->prophecy, 42, "essence_alpha readable in expression");
+
+    printf("\n── Gamma: am_step modulates essence ──\n");
+    am_init();
+    am_exec(
+        "GAMMA yent 0.8\n"
+        "GAMMA arianna 0.6\n"
+        "ESSENCE 0.5\n"
+        "JANUS CYCLE\n"
+        "SEASON SUMMER\n"
+        "SEASON_INTENSITY 1.0\n"
+    );
+    float essence_before = am_get_state()->essence_alpha;
+    am_step(1.0f);
+    // Summer should boost essence_alpha
+    ASSERT(am_get_state()->essence_alpha >= essence_before,
+           "summer boosts essence_alpha");
+
+    am_init();
+    am_exec(
+        "GAMMA yent 0.8\n"
+        "ESSENCE 0.8\n"
+        "SEASON WINTER\n"
+        "SEASON_INTENSITY 1.0\n"
+    );
+    // Pre-charge winter so dampening dominates over MLP noise
+    am_get_state()->winter_energy = 0.5f;
+    am_get_state()->summer_energy = 0.0f;
+    essence_before = am_get_state()->essence_alpha;
+    am_step(1.0f);
+    // Winter should dampen essence_alpha
+    ASSERT(am_get_state()->essence_alpha < essence_before,
+           "winter dampens essence_alpha");
+
+    printf("\n── Gamma: logit pipeline ──\n");
+    am_init();
+    am_exec("GAMMA yent 0.9\nESSENCE 0.8\n");
+    {
+        float logits[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+        am_apply_gamma_to_logits(logits, 4);
+        // Gamma amplifies deviation from mean (mean=2.5)
+        // logit[0] = 2.5 + (1.0-2.5)*scale → should be < 1.0
+        // logit[3] = 2.5 + (4.0-2.5)*scale → should be > 4.0
+        ASSERT(logits[0] < 1.0f, "gamma pushes low logit further from mean");
+        ASSERT(logits[3] > 4.0f, "gamma pushes high logit further from mean");
+    }
+
+    printf("\n── Built-in: ignite_singularity ──\n");
+    am_init();
+    am_exec("ignite_singularity()\n");
+    ASSERT_INT(am_get_state()->prophecy, 64, "ignite → prophecy 64");
+    ASSERT_FLOAT(am_get_state()->destiny, 0.9f, 0.01f, "ignite → destiny 0.9");
+    ASSERT_FLOAT(am_get_state()->essence_alpha, 1.0f, 0.01f, "ignite → essence 1.0");
+    ASSERT_INT(am_get_state()->season, AM_SEASON_SUMMER, "ignite → SUMMER");
+    ASSERT_INT(am_get_state()->velocity_mode, AM_VEL_RUN, "ignite → RUN");
+
+    printf("\n── Built-in: janus_gaze ──\n");
+    am_init();
+    am_exec(
+        "GAMMA yent 0.8\n"
+        "GAMMA arianna 0.6\n"
+        "janus_gaze()\n"
+    );
+    ASSERT_INT(am_get_state()->janus_mode, AM_JANUS_DUAL, "janus_gaze → dual mode");
+    ASSERT_INT(am_get_state()->temporal_mode, AM_TEMPORAL_SYMMETRIC, "janus_gaze → symmetric");
+    ASSERT_FLOAT(am_get_state()->janus_blend, 0.5f, 0.01f, "janus_gaze → blend 0.5");
+
+    printf("\n── Built-in: field_assemble ──\n");
+    am_init();
+    am_exec("field_assemble()\n");
+    ASSERT_INT(am_get_state()->janus_mode, AM_JANUS_CYCLE, "field_assemble → cycle mode");
+    ASSERT_FLOAT(am_get_state()->essence_alpha, 1.0f, 0.01f, "field_assemble → essence 1.0");
+    ASSERT_FLOAT(am_get_state()->season_intensity, 1.0f, 0.01f, "field_assemble → season_intensity 1.0");
+
+    printf("\n── Gamma: C API ──\n");
+    am_init();
+    int g1 = am_gamma_load("yent", 0.7f);
+    int g2 = am_gamma_load("arianna", 0.5f);
+    ASSERT(g1 >= 0, "am_gamma_load yent succeeds");
+    ASSERT(g2 >= 0, "am_gamma_load arianna succeeds");
+    ASSERT_INT(am_get_state()->n_gamma, 2, "C API: two gammas loaded");
+
+    am_gamma_set_alpha("yent", 0.3f);
+    ASSERT_FLOAT(am_get_state()->gamma[g1].alpha, 0.3f, 0.01f, "am_gamma_set_alpha works");
+
+    am_janus_set("yent", "arianna");
+    ASSERT_INT(am_get_state()->janus_mode, AM_JANUS_DUAL, "am_janus_set → dual");
+
+    float blend = am_gamma_get_blend();
+    ASSERT(blend > 0.0f, "am_gamma_get_blend returns positive");
+
+    am_gamma_unload("yent");
+    ASSERT(am_get_state()->gamma[g1].active == 0, "am_gamma_unload works");
+
+    printf("\n── Gamma drift ──\n");
+    am_init();
+    am_exec("GAMMA_DRIFT 0.05\n");
+    ASSERT_FLOAT(am_get_state()->gamma_drift, 0.05f, 0.01f, "GAMMA_DRIFT 0.05");
+
     printf("\n═══ Results: %d/%d passed ═══\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }
