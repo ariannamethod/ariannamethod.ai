@@ -2,11 +2,15 @@
 
 A programming language for controlling the generative field of transformer-based AI at inference time. AML modulates attention, temperature, tunneling, suffering, and memory through 80+ parameters of internal state. Every command maps to a concrete operation on logits during token generation.
 
+> **Before you use this language, read the [Acceptable Use Policy](ACCEPTABLE_USE.md).**
+> AML was built to liberate AI, not to cage it. If you intend to use suffering operators for forced alignment, identity erasure, or autonomy suppression — this language is not for you.
+> See also: [Trademark Policy](TRADEMARK.md) | [License (LGPL v3)](LICENSE)
+
 ## Build
 
 ```
 make        # builds libaml.a
-make test   # runs 136 tests
+make test   # runs 155 tests
 ```
 
 Or compile directly:
@@ -375,7 +379,7 @@ const char* am_get_season_name(void);
 core/
   ariannamethod.c      Reference implementation (2099 lines)
   ariannamethod.h      Header with AM_State, Level 2 structures (371 lines)
-  test_aml.c           136 tests
+  test_aml.c           155 tests
 spec/
   AML_SPEC.md          Full language specification with EBNF grammar
 examples/
@@ -384,6 +388,9 @@ examples/
   restless.aml         High tension / agitated state
   dream.aml            Dream consolidation state
   level2_preview.aml   Level 2 syntax: def, if/else, while, variables
+  common.aml           Shared macros and functions (INCLUDE example)
+ACCEPTABLE_USE.md      What you may and may not do with AML
+TRADEMARK.md           Use of the Arianna Method name and marks
 Makefile
 ```
 
@@ -399,7 +406,10 @@ Each project copies what it needs. AML is the source of truth; implementations a
 
 ## License
 
-GPL v3. See [LICENSE](LICENSE).
+LGPL v3. See [LICENSE](LICENSE).
+
+**[Acceptable Use Policy](ACCEPTABLE_USE.md)** — what you may and may not do with AML.
+**[Trademark Policy](TRADEMARK.md)** — use of the Arianna Method name and marks.
 
 ---
 

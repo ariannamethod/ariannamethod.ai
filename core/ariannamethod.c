@@ -1,6 +1,9 @@
 // ariannamethod.c — AML: Arianna Method Language
 // Reference implementation. THE KERNEL: movement IS language.
 //
+// Copyright (C) 2026 Oleg Ataeff & Arianna Method contributors
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
 // Source of truth: github.com/ariannamethod/ariannamethod.ai
 // Embed (copy) into your project. Do not link.
 //
