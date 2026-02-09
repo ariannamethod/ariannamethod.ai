@@ -1,3 +1,14 @@
 *.o
 *.a
 core/test_aml
+
+# LaTeX artifacts
+*.aux
+*.log
+*.out
+*.toc
+*.bbl
+*.blg
+*.synctex.gz
+*.fdb_latexmk
+*.fls
