@@ -1,6 +1,5 @@
-# level2_preview.aml — AML 2.0 syntax preview
-# This file demonstrates planned Level 2 features.
-# NOT yet implemented. This is the target syntax.
+# level2_preview.aml — AML 2.0 syntax demo
+# All features below are implemented in the C reference kernel.
 
 INCLUDE init_yent.aml
 

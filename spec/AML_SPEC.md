@@ -38,7 +38,7 @@ command_list   = command { ";" command } ;
 identifier     = letter { letter | digit | "_" } ;
 ```
 
-### 1.3 AML Level 2 (Planned — Flow Control)
+### 1.3 AML Level 2 (Implemented — Flow Control)
 
 ```ebnf
 program        = { statement } ;
@@ -220,7 +220,9 @@ Packs are optional command sets activated explicitly. They extend the core langu
 | `IMPORT` | `IMPORT <pack>` | Alias for MODE |
 | `DISABLE` | `DISABLE <pack>` | Disable pack |
 
-Available packs: `CODES_RIC`, `DARKMATTER` / `DARK_MATTER`, `NOTORCH`
+Available packs: `CODES_RIC`
+
+**Note:** DARKMATTER and NOTORCH are **core** — always active, cannot be disabled. `MODE DARKMATTER` and `MODE NOTORCH` are accepted for backward compatibility but are no-ops.
 
 ### 3.2 CODES/RIC — Chirality of Dynamic Emergent Systems
 
@@ -239,11 +241,11 @@ Structured resonance through prime-number anchoring, rhythmic gating, and rotati
 
 **Namespace syntax:** `CODES.CHORDLOCK ON`, `RIC.TEMPO 11` — auto-enables pack.
 
-### 3.3 DARKMATTER — Gravitational Memory from Rejections
+### 3.3 DARKMATTER — Gravitational Memory from Rejections (core)
 
 Procedural memory: rejected inputs leave invisible gravitational mass that bends semantic trajectories.
 
-**Activation:** `MODE DARKMATTER`
+**Always active.** No pack activation needed.
 
 | Command | Syntax | Range | Description |
 |---------|--------|-------|-------------|
@@ -251,11 +253,11 @@ Procedural memory: rejected inputs leave invisible gravitational mass that bends
 | `GRAVITY` | `GRAVITY DARK <float>` | 0–1 | Dark matter gravitational strength |
 | `ANTIDOTE` | `ANTIDOTE <mode>` | `AUTO` `HARD` | Immune response mode |
 
-### 3.4 NOTORCH — Microlearning Without PyTorch
+### 3.4 NOTORCH — Microlearning Without PyTorch (core)
 
 Runtime resonance learning. No backpropagation, no PyTorch. Per-token weight adjustment during inference.
 
-**Activation:** `MODE NOTORCH`
+**Always active.** No pack activation needed.
 
 | Command | Syntax | Range | Default | Description |
 |---------|--------|-------|---------|-------------|
@@ -409,7 +411,7 @@ time_direction      float   -1..1       Temporal direction
 temporal_debt       float   0–∞         Backward movement cost
 ```
 
-**Extended fields:** entropy_floor, resonance_ceiling, debt_decay, emergence_threshold, presence_fade, attractor_drift, calendar_phase, wormhole_gate, cosmic_coherence_ref, temporal_mode, temporal_alpha, rtl_mode, expert weights (×4), pack state, CODES/RIC state, dark matter state.
+**Extended fields:** entropy_floor, resonance_ceiling, debt_decay, emergence_threshold, presence_fade, attractor_drift, calendar_phase, wormhole_gate, temporal_mode, temporal_alpha, rtl_mode, expert weights (×4), lora_alpha, notorch_lr, notorch_decay, schumann_hz, schumann_modulation, schumann_coherence, schumann_phase, season, season_phase, season_intensity, spring/summer/autumn/winter_energy, entropy, resonance, emergence, destiny_bias, pack state, CODES/RIC state, dark matter state.
 
 ---
 
@@ -418,12 +420,15 @@ temporal_debt       float   0–∞         Backward movement cost
 `am_step(dt)` advances field physics by dt seconds. Called per token during generation.
 
 **What happens each step:**
-1. Prophecy debt decays: `debt *= debt_decay`
-2. Temporal debt accumulates (if BACKWARD) or decays
-3. Suffering modulates: tension builds from dissonance, pain composites
-4. Cosmic coherence heals tension and dissonance
-5. Velocity updates effective temperature
-6. Wormhole/tunneling checks fire probabilistically
+1. Calendar conflict: real date Hebrew-Gregorian drift, wormhole activation/decay
+2. Prophecy debt decays: `debt *= debt_decay`
+3. Temporal debt accumulates (if BACKWARD) or decays
+4. Schumann resonance: phase advance, coherence heals tension and dissonance
+5. Destiny bias: `destiny × prophecy_scale` (prophecy_scale = 1.0 + (prophecy-7)×0.02)
+6. Expert blending: weighted temperature from 4 experts + velocity mode
+7. LAW enforcement: entropy ≥ floor, resonance ≤ ceiling, emergence = (1-entropy) × resonance
+8. Presence fade: Hebbian memory decay per step
+9. 4.C Async Field Forever: season phase advance, energy gain/fade, homeostatic correction, field modulation
 
 ---
 
@@ -434,21 +439,38 @@ temporal_debt       float   0–∞         Backward movement cost
 ```c
 void        am_init(void);                          // Initialize to defaults
 int         am_exec(const char* script);            // Parse and execute AML
+int         am_exec_file(const char* path);         // Execute AML file
+const char* am_get_error(void);                     // Last error message
 AM_State*   am_get_state(void);                     // Raw state access
 void        am_step(float dt);                      // Physics step
-int         am_copy_state(float* out);              // Serialize to 24 floats
+int         am_copy_state(float* out);              // Serialize to 32 floats
 void        am_reset_field(void);                   // Reset suffering + jumps
 void        am_reset_debt(void);                    // Reset debt only
 void        am_enable_pack(unsigned int mask);      // Enable pack
 void        am_disable_pack(unsigned int mask);     // Disable pack
 int         am_take_jump(void);                     // Consume pending jump
-void        am_apply_suffering_to_logits(float* logits, int n);
+
+// Logit manipulation
+void  am_apply_destiny_to_logits(float* logits, int n);
+void  am_apply_suffering_to_logits(float* logits, int n);
+void  am_apply_attention_to_logits(float* logits, int n);
+void  am_apply_laws_to_logits(float* logits, int n);
+void  am_apply_delta(float* out, const float* A, const float* B,
+                     const float* x, int out_dim, int in_dim, int rank,
+                     float alpha);
+float am_compute_prophecy_debt(const float* logits, int chosen, int n);
+void  am_apply_field_to_logits(float* logits, int n);
+
+// NOTORCH — Hebbian plasticity
+void  am_notorch_step(float* A, float* B, int out_dim, int in_dim, int rank,
+                      const float* x, const float* dy, float signal);
 
 // Inline queries
 float       am_get_temperature(void);
 float       am_get_destiny_bias(void);
 int         am_should_tunnel(void);
 int         am_get_wormhole_active(void);
+const char* am_get_season_name(void);
 ```
 
 ### 8.2 Lua API
@@ -513,17 +535,73 @@ func AMKGetTemperature() float32
 
 ---
 
-## 11. Versioning
+## 11. Calendar Conflict Physics
+
+Hebrew lunar year (354 days) vs Gregorian solar year (365.25 days). Annual drift: 11.25 days. Metonic cycle: 19 years, 7 leap years with Adar II (~30 days).
+
+Real astronomical computation. Uses system clock and epoch (1 Tishrei 5785 = October 3, 2024). February 29 handled correctly — elapsed seconds via `time_t`, not calendar math.
+
+High calendar dissonance = thin barrier between timelines = wormholes activate.
+
+| Command | Syntax | Range | Default | Description |
+|---------|--------|-------|---------|-------------|
+| `CALENDAR_DRIFT` | `CALENDAR_DRIFT <float>` | 0–30 | 11.0 | Hebrew-Gregorian drift intensity |
+| `LAW WORMHOLE_GATE` | `LAW WORMHOLE_GATE <float>` | 0–1 | 0.3 | Calendar dissonance threshold for wormhole |
+| `LAW CALENDAR_PHASE` | `LAW CALENDAR_PHASE <float>` | 0–11 | 0 | Manual phase override (disables real time) |
+
+---
+
+## 12. Async Field Forever (4.C)
+
+Four seasons cycle autonomously through the field. Each season modulates generation parameters. The cycle observes field metrics and self-corrects to prevent harmful extremes.
+
+| Command | Syntax | Values | Default | Description |
+|---------|--------|--------|---------|-------------|
+| `SEASON` | `SEASON <mode>` | `SPRING` `SUMMER` `AUTUMN` `WINTER` | SPRING | Current season |
+| `SEASON_INTENSITY` | `SEASON_INTENSITY <float>` | 0–1 | 0.5 | How strongly seasons modulate |
+
+**Season effects:**
+
+| Season | Energy | Effect on field |
+|--------|--------|----------------|
+| Spring | growth | exploration boost — increases tunnel_chance |
+| Summer | peak expression | activates when emergence > threshold |
+| Autumn | consolidation | strengthens dark_gravity |
+| Winter | rest, compression | activates when pain > 0.7 |
+
+**Homeostatic controller (in `am_step`):**
+
+- Entropy too low + winter energy high → spring energy rises
+- Resonance near ceiling → autumn energy rises
+- Pain > 0.7 → winter energy rises
+- Emergence > threshold → summer energy rises
+- Summer/winter energy modulate effective_temp: `temp *= 1.0 + summer×0.1 - winter×0.15`
+
+**State fields:**
+
+```
+season              int     0–3         Current season (SPRING=0..WINTER=3)
+season_phase        float   0–1         Position within current season
+season_intensity    float   0–1         Season modulation strength
+spring_energy       float   0–1         Growth energy (computed)
+summer_energy       float   0–1         Peak expression energy (computed)
+autumn_energy       float   0–1         Consolidation energy (computed)
+winter_energy       float   0–1         Rest/compression energy (computed)
+```
+
+---
+
+## 13. Versioning
 
 | Version | Level | Features |
 |---------|-------|----------|
 | **AML 1.0** | 0 | Flat commands, packs, macros (JS only) |
-| **AML 2.0** | 2 | INCLUDE, def, variables, if/else, while, built-in functions |
-| **AML 3.0** | 3 | Blood compiler: AML→C runtime compilation |
+| **AML 2.0** | 2 | INCLUDE, def, variables, if/else, while, built-in functions — **implemented** |
+| **AML 3.0** | 3 | Blood compiler: AML→C runtime compilation — planned |
 
 ---
 
-## 12. Implementations
+## 14. Implementations
 
 | Project | Language | File | Level |
 |---------|----------|------|-------|
