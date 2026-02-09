@@ -58,6 +58,7 @@ static char g_blood_cc[64] = {0};
 // HELPERS — the small bones
 // ═══════════════════════════════════════════════════════════════════════════════
 
+__attribute__((unused))
 static char* trim(char* s) {
   while (*s && isspace((unsigned char)*s)) s++;
   char* e = s + strlen(s);
@@ -65,6 +66,7 @@ static char* trim(char* s) {
   *e = 0;
   return s;
 }
+
 
 static void upcase(char* s) {
   for (; *s; s++) *s = (char)toupper((unsigned char)*s);
@@ -552,14 +554,13 @@ static void set_error_at(AML_ExecCtx* ctx, int lineno, const char* msg) {
     }
     buf[255] = 0;
     if (ctx) {
-        strncpy(ctx->error, buf, 255);
-        ctx->error[255] = 0;
+        snprintf(ctx->error, sizeof(ctx->error), "%s", buf);
     }
-    strncpy(g_error, buf, 255);
-    g_error[255] = 0;
+    snprintf(g_error, sizeof(g_error), "%s", buf);
 }
 
 // Convenience: set error without line number
+__attribute__((unused))
 static void set_error(AML_ExecCtx* ctx, const char* msg) {
     set_error_at(ctx, 0, msg);
 }
@@ -665,7 +666,7 @@ static int symtab_set(AML_Symtab* tab, const char* name, float value) {
         }
     }
     if (tab->count >= AML_MAX_VARS) return 1;
-    strncpy(tab->vars[tab->count].name, name, AML_MAX_NAME - 1);
+    snprintf(tab->vars[tab->count].name, AML_MAX_NAME, "%s", name);
     tab->vars[tab->count].value = value;
     tab->count++;
     return 0;
@@ -1037,7 +1038,7 @@ static void aml_register_builtins(AML_ExecCtx* ctx) {
     for (int i = 0; i < BUILTIN_COUNT; i++) {
         if (ctx->funcs.count >= AML_MAX_FUNCS) break;
         AML_Func* f = &ctx->funcs.funcs[ctx->funcs.count];
-        strncpy(f->name, g_builtins[i].name, AML_MAX_NAME - 1);
+        snprintf(f->name, AML_MAX_NAME, "%s", g_builtins[i].name);
         f->param_count = g_builtins[i].param_count;
         f->body_start = g_builtins[i].id;  // store builtin id
         f->body_end = 0;
@@ -1122,7 +1123,7 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
     else if (!strcmp(t, "VELOCITY")) {
       // VELOCITY RUN|WALK|NOMOVE|BACKWARD or VELOCITY <int>
       char argup[32] = {0};
-      strncpy(argup, arg, 31);
+      snprintf(argup, sizeof(argup), "%.31s", arg);
       upcase(argup);
 
       if (!strcmp(argup, "RUN")) G.velocity_mode = AM_VEL_RUN;
@@ -1189,7 +1190,7 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
     else if (!strcmp(t, "MODE") || !strcmp(t, "IMPORT")) {
       // MODE CODES_RIC or IMPORT CODES_RIC
       char packname[64] = {0};
-      strncpy(packname, arg, 63);
+      snprintf(packname, sizeof(packname), "%.63s", arg);
       upcase(packname);
 
       if (!strcmp(packname, "CODES_RIC") || !strcmp(packname, "CODES/RIC")) {
@@ -1199,7 +1200,7 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
     }
     else if (!strcmp(t, "DISABLE")) {
       char packname[64] = {0};
-      strncpy(packname, arg, 63);
+      snprintf(packname, sizeof(packname), "%.63s", arg);
       upcase(packname);
 
       if (!strcmp(packname, "CODES_RIC") || !strcmp(packname, "CODES/RIC")) {
@@ -1220,15 +1221,15 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
       const char* subcmd = t + (t[0] == 'C' ? 6 : 4); // skip CODES. or RIC.
 
       if (!strcmp(subcmd, "CHORDLOCK")) {
-        char mode[16] = {0}; strncpy(mode, arg, 15); upcase(mode);
+        char mode[16] = {0}; snprintf(mode, sizeof(mode), "%.15s", arg); upcase(mode);
         G.chordlock_on = (!strcmp(mode, "ON") || !strcmp(mode, "1"));
       }
       else if (!strcmp(subcmd, "TEMPOLOCK")) {
-        char mode[16] = {0}; strncpy(mode, arg, 15); upcase(mode);
+        char mode[16] = {0}; snprintf(mode, sizeof(mode), "%.15s", arg); upcase(mode);
         G.tempolock_on = (!strcmp(mode, "ON") || !strcmp(mode, "1"));
       }
       else if (!strcmp(subcmd, "CHIRALITY")) {
-        char mode[16] = {0}; strncpy(mode, arg, 15); upcase(mode);
+        char mode[16] = {0}; snprintf(mode, sizeof(mode), "%.15s", arg); upcase(mode);
         G.chirality_on = (!strcmp(mode, "ON") || !strcmp(mode, "1"));
       }
       else if (!strcmp(subcmd, "TEMPO")) {
@@ -1242,20 +1243,20 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
     // Unqualified: CHORDLOCK works only when pack enabled
     else if (!strcmp(t, "CHORDLOCK")) {
       if (G.packs_enabled & AM_PACK_CODES_RIC) {
-        char mode[16] = {0}; strncpy(mode, arg, 15); upcase(mode);
+        char mode[16] = {0}; snprintf(mode, sizeof(mode), "%.15s", arg); upcase(mode);
         G.chordlock_on = (!strcmp(mode, "ON") || !strcmp(mode, "1"));
       }
       // else: ignored (pack not enabled)
     }
     else if (!strcmp(t, "TEMPOLOCK")) {
       if (G.packs_enabled & AM_PACK_CODES_RIC) {
-        char mode[16] = {0}; strncpy(mode, arg, 15); upcase(mode);
+        char mode[16] = {0}; snprintf(mode, sizeof(mode), "%.15s", arg); upcase(mode);
         G.tempolock_on = (!strcmp(mode, "ON") || !strcmp(mode, "1"));
       }
     }
     else if (!strcmp(t, "CHIRALITY")) {
       if (G.packs_enabled & AM_PACK_CODES_RIC) {
-        char mode[16] = {0}; strncpy(mode, arg, 15); upcase(mode);
+        char mode[16] = {0}; snprintf(mode, sizeof(mode), "%.15s", arg); upcase(mode);
         G.chirality_on = (!strcmp(mode, "ON") || !strcmp(mode, "1"));
       }
     }
@@ -1271,7 +1272,7 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
     }
     else if (!strcmp(t, "ANCHOR")) {
       if (G.packs_enabled & AM_PACK_CODES_RIC) {
-        char mode[16] = {0}; strncpy(mode, arg, 15); upcase(mode);
+        char mode[16] = {0}; snprintf(mode, sizeof(mode), "%.15s", arg); upcase(mode);
         if (!strcmp(mode, "PRIME")) G.chordlock_on = 1;
       }
     }
@@ -1291,7 +1292,7 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
       }
     }
     else if (!strcmp(t, "ANTIDOTE")) {
-      char mode[16] = {0}; strncpy(mode, arg, 15); upcase(mode);
+      char mode[16] = {0}; snprintf(mode, sizeof(mode), "%.15s", arg); upcase(mode);
       if (!strcmp(mode, "AUTO")) G.antidote_mode = 0;
       else if (!strcmp(mode, "HARD")) G.antidote_mode = 1;
     }
@@ -1301,7 +1302,7 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
         const char* text_start = arg;
         // strip quotes if present
         if (*text_start == '"') text_start++;
-        strncpy(G.scar_texts[G.n_scars], text_start, AM_SCAR_MAX_LEN - 1);
+        snprintf(G.scar_texts[G.n_scars], AM_SCAR_MAX_LEN, "%.63s", text_start);
         G.scar_texts[G.n_scars][AM_SCAR_MAX_LEN - 1] = 0;
         // strip trailing quote
         int slen = (int)strlen(G.scar_texts[G.n_scars]);
@@ -1354,7 +1355,7 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
     // ─────────────────────────────────────────────────────────────────────────
 
     else if (!strcmp(t, "SEASON")) {
-      char sname[16] = {0}; strncpy(sname, arg, 15); upcase(sname);
+      char sname[16] = {0}; snprintf(sname, sizeof(sname), "%.15s", arg); upcase(sname);
       if (!strcmp(sname, "SPRING")) G.season = AM_SEASON_SPRING;
       else if (!strcmp(sname, "SUMMER")) G.season = AM_SEASON_SUMMER;
       else if (!strcmp(sname, "AUTUMN")) G.season = AM_SEASON_AUTUMN;
@@ -1378,7 +1379,7 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
     // ─────────────────────────────────────────────────────────────────────────
 
     else if (!strcmp(t, "TEMPORAL_MODE")) {
-      char mode[32] = {0}; strncpy(mode, arg, 31); upcase(mode);
+      char mode[32] = {0}; snprintf(mode, sizeof(mode), "%.31s", arg); upcase(mode);
       if (!strcmp(mode, "PROPHECY") || !strcmp(mode, "0")) G.temporal_mode = AM_TEMPORAL_PROPHECY;
       else if (!strcmp(mode, "RETRODICTION") || !strcmp(mode, "1")) G.temporal_mode = AM_TEMPORAL_RETRODICTION;
       else if (!strcmp(mode, "SYMMETRIC") || !strcmp(mode, "2")) G.temporal_mode = AM_TEMPORAL_SYMMETRIC;
@@ -1387,7 +1388,7 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
       G.temporal_alpha = clamp01(ctx_float(ctx, arg));
     }
     else if (!strcmp(t, "RTL_MODE")) {
-      char mode[16] = {0}; strncpy(mode, arg, 15); upcase(mode);
+      char mode[16] = {0}; snprintf(mode, sizeof(mode), "%.15s", arg); upcase(mode);
       G.rtl_mode = (!strcmp(mode, "ON") || !strcmp(mode, "1"));
     }
     else if (!strcmp(t, "PROPHECY_MODE")) {
@@ -1442,7 +1443,7 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
         brace++;
         const char* end = strchr(brace, '}');
         if (end && ni > 0) {
-          strncpy(g_macros[g_macro_count].name, mname, AML_MAX_NAME - 1);
+          snprintf(g_macros[g_macro_count].name, AML_MAX_NAME, "%s", mname);
           int bi = 0;
           while (brace < end && bi < AML_MACRO_MAX_LEN - 1) {
             if (*brace == ';')
@@ -1676,8 +1677,7 @@ static int aml_exec_line(AML_ExecCtx* ctx, int idx) {
     if (strncmp(text, "if ", 3) == 0) {
         // strip trailing ':'
         char cond[AML_MAX_LINE_LEN];
-        strncpy(cond, text + 3, AML_MAX_LINE_LEN - 1);
-        cond[AML_MAX_LINE_LEN - 1] = 0;
+        snprintf(cond, sizeof(cond), "%s", text + 3);
         int clen = (int)strlen(cond);
         if (clen > 0 && cond[clen - 1] == ':') cond[clen - 1] = 0;
 
@@ -1707,8 +1707,7 @@ static int aml_exec_line(AML_ExecCtx* ctx, int idx) {
     // --- while ---
     if (strncmp(text, "while ", 6) == 0) {
         char cond[AML_MAX_LINE_LEN];
-        strncpy(cond, text + 6, AML_MAX_LINE_LEN - 1);
-        cond[AML_MAX_LINE_LEN - 1] = 0;
+        snprintf(cond, sizeof(cond), "%s", text + 6);
         int clen = (int)strlen(cond);
         if (clen > 0 && cond[clen - 1] == ':') cond[clen - 1] = 0;
 
@@ -1733,11 +1732,10 @@ static int aml_exec_line(AML_ExecCtx* ctx, int idx) {
         while (*fname == ' ') fname++;
 
         if (fname[0] == '/') {
-            strncpy(path, fname, 511);
+            snprintf(path, sizeof(path), "%s", fname);
         } else {
-            snprintf(path, 512, "%s/%s", ctx->base_dir, fname);
+            snprintf(path, sizeof(path), "%s/%s", ctx->base_dir, fname);
         }
-        path[511] = 0;
 
         ctx->include_depth++;
         am_exec_file(path);
@@ -1831,8 +1829,7 @@ static int aml_exec_line(AML_ExecCtx* ctx, int idx) {
     // --- Level 0 fallback: split CMD ARG, dispatch ---
     {
         char linebuf[AML_MAX_LINE_LEN];
-        strncpy(linebuf, text, AML_MAX_LINE_LEN - 1);
-        linebuf[AML_MAX_LINE_LEN - 1] = 0;
+        snprintf(linebuf, sizeof(linebuf), "%s", text);
 
         char* sp = linebuf;
         while (*sp && !isspace((unsigned char)*sp)) sp++;
@@ -1889,7 +1886,7 @@ int am_exec(const char* script) {
     free(lines);
 
     if (ctx.error[0]) {
-        strncpy(g_error, ctx.error, 255);
+        snprintf(g_error, sizeof(g_error), "%s", ctx.error);
         return 1;
     }
     return 0;
@@ -2256,7 +2253,8 @@ void am_blood_init(void) {
     // Create directory (ignore error if exists)
     char mkdir_cmd[300];
     snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p '%s'", g_blood_dir);
-    (void)system(mkdir_cmd);
+    int rc = system(mkdir_cmd);
+    (void)rc;
 
     // Detect compiler: clang → gcc → cc
     g_blood_cc[0] = 0;
@@ -2265,7 +2263,7 @@ void am_blood_init(void) {
         char check[128];
         snprintf(check, sizeof(check), "which %s >/dev/null 2>&1", candidates[i]);
         if (system(check) == 0) {
-            strncpy(g_blood_cc, candidates[i], sizeof(g_blood_cc) - 1);
+            snprintf(g_blood_cc, sizeof(g_blood_cc), "%s", candidates[i]);
             break;
         }
     }
@@ -2298,7 +2296,7 @@ int am_blood_compile(const char* name, const char* code) {
     }
 
     // Write source file
-    char src_path[256], lib_path[256];
+    char src_path[512], lib_path[512];
     snprintf(src_path, sizeof(src_path), "%s/blood_%s_%s.c",
              g_blood_dir, safe_name, hash);
     snprintf(lib_path, sizeof(lib_path), "%s/blood_%s_%s%s",
@@ -2310,7 +2308,7 @@ int am_blood_compile(const char* name, const char* code) {
     fclose(f);
 
     // Compile: cc -O2 -shared -fPIC -o lib.dylib src.c
-    char cmd[1024];
+    char cmd[2048];
     snprintf(cmd, sizeof(cmd), "%s -O2 %s -o '%s' '%s' -lm 2>&1",
              g_blood_cc, AM_BLOOD_FLAGS, lib_path, src_path);
 
@@ -2346,9 +2344,10 @@ int am_blood_compile(const char* name, const char* code) {
 
     // Register module
     int idx = g_blood_count++;
-    strncpy(g_blood_modules[idx].name, safe_name, AM_BLOOD_MAX_NAME - 1);
-    strncpy(g_blood_modules[idx].hash, hash, AM_BLOOD_HASH_LEN - 1);
-    strncpy(g_blood_modules[idx].lib_path, lib_path, 255);
+    memset(&g_blood_modules[idx], 0, sizeof(AM_BloodModule));
+    snprintf(g_blood_modules[idx].name, AM_BLOOD_MAX_NAME, "%s", safe_name);
+    snprintf(g_blood_modules[idx].hash, AM_BLOOD_HASH_LEN, "%s", hash);
+    snprintf(g_blood_modules[idx].lib_path, sizeof(g_blood_modules[idx].lib_path), "%.511s", lib_path);
     g_blood_modules[idx].handle = handle;
 
     return idx;
@@ -2380,7 +2379,7 @@ void am_blood_unload(int module_idx) {
     if (m->lib_path[0]) {
         remove(m->lib_path);
         // Also remove source
-        char src_path[256];
+        char src_path[512];
         snprintf(src_path, sizeof(src_path), "%s/blood_%s_%s.c",
                  g_blood_dir, m->name, m->hash);
         remove(src_path);

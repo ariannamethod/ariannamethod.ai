@@ -357,7 +357,7 @@ void am_notorch_step(float* A, float* B, int out_dim, int in_dim, int rank,
 typedef struct {
     char  name[AM_BLOOD_MAX_NAME];
     char  hash[AM_BLOOD_HASH_LEN];
-    char  lib_path[256];
+    char  lib_path[512];
     void* handle;   // dlopen handle (NULL if unloaded)
 } AM_BloodModule;
 

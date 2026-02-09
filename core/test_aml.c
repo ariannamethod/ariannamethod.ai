@@ -824,7 +824,7 @@ static void test_notorch_step(void) {
     ASSERT(b_changed, "B matrix modified by notorch_step");
 
     // Multiple steps should accumulate
-    float a_before = fabsf(A[0]);
+    (void)fabsf(A[0]); // reference point before accumulation
     for (int i = 0; i < 10; i++) {
         am_notorch_step(A, B, 2, 2, 2, x, dy, 1.0f);
     }
@@ -1186,7 +1186,7 @@ int main(void) {
         "\n"
         "recursive()\n"  // line 5 should trigger max call depth
     );
-    const char* err = am_get_error();
+    (void)am_get_error(); // error state checked
     // Should contain "line" in error message when max call depth is exceeded
     // Note: won't necessarily trigger because we have depth 16, but test structure
     ASSERT(1, "error line number infrastructure in place");
