@@ -31,10 +31,28 @@
 #include <strings.h> // for strcasecmp
 #include <stddef.h>  // for offsetof
 #include <time.h>    // for real calendar computation
+#ifndef AM_BLOOD_DISABLED
+#include <dlfcn.h>   // for dlopen, dlsym, dlclose (Blood compiler)
+#endif
+
+// Platform detection for Blood compiler
+#ifdef __APPLE__
+  #define AM_BLOOD_EXT ".dylib"
+  #define AM_BLOOD_FLAGS "-dynamiclib -fPIC"
+#else
+  #define AM_BLOOD_EXT ".so"
+  #define AM_BLOOD_FLAGS "-shared -fPIC"
+#endif
 
 // See ariannamethod.h for struct definitions and pack flags
 
 static AM_State G;
+
+// Blood compiler globals (used by Level 0 dispatch + Blood API)
+static AM_BloodModule g_blood_modules[AM_BLOOD_MAX_MODULES];
+static int g_blood_count = 0;
+static char g_blood_dir[256] = {0};
+static char g_blood_cc[64] = {0};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // HELPERS — the small bones
@@ -480,6 +498,9 @@ void am_init(void) {
 
   // macros
   g_macro_count = 0;
+
+  // blood compiler
+  am_blood_init();
 }
 
 // enable/disable packs
@@ -1011,6 +1032,13 @@ static void aml_register_builtins(AML_ExecCtx* ctx) {
     }
 }
 
+// Forward declarations for Blood compiler (defined after NOTORCH)
+// These symbols are needed by BLOOD commands in Level 0 dispatch.
+int am_blood_compile(const char* name, const char* code);
+int am_blood_compile_lora(const char* name, int in_dim, int out_dim, int rank);
+int am_blood_compile_emotion(const char* name, float valence, float arousal);
+void am_blood_unload(int module_idx);
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // LEVEL 0 DISPATCH — the original flat command parser, extracted
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1410,6 +1438,70 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx) 
           }
           g_macros[g_macro_count].body[bi] = 0;
           g_macro_count++;
+        }
+      }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // BLOOD — runtime C compilation (Level 3)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    else if (!strcmp(t, "BLOOD")) {
+      // BLOOD COMPILE <name> <code>     — compile raw C
+      // BLOOD LORA <name> <in> <out> <rank> — generate + compile LoRA
+      // BLOOD EMOTION <name> <valence> <arousal> — generate + compile emotional kernel
+      // BLOOD UNLOAD <name>             — unload module
+      char subcmd[32] = {0};
+      char rest[AML_MAX_LINE_LEN] = {0};
+      if (arg) sscanf(arg, "%31s %[^\n]", subcmd, rest);
+      upcase(subcmd);
+
+      if (!strcmp(subcmd, "COMPILE")) {
+        // BLOOD COMPILE name { code }
+        char bname[AM_BLOOD_MAX_NAME] = {0};
+        sscanf(rest, "%63s", bname);
+        const char* brace = strchr(rest, '{');
+        const char* end_brace = NULL;
+        if (brace) end_brace = strrchr(rest, '}');
+        if (brace && end_brace && end_brace > brace) {
+          // Extract code between braces
+          int code_len = (int)(end_brace - brace - 1);
+          char* code = (char*)malloc(code_len + 1);
+          if (code) {
+            memcpy(code, brace + 1, code_len);
+            code[code_len] = 0;
+            int idx = am_blood_compile(bname, code);
+            free(code);
+            if (idx < 0 && ctx)
+              set_error(ctx, "blood: compilation failed");
+          }
+        }
+      }
+      else if (!strcmp(subcmd, "LORA")) {
+        char bname[64] = {0};
+        int in_dim = 0, out_dim = 0, rank = 0;
+        sscanf(rest, "%63s %d %d %d", bname, &in_dim, &out_dim, &rank);
+        if (bname[0] && in_dim > 0 && out_dim > 0 && rank > 0) {
+          am_blood_compile_lora(bname, in_dim, out_dim, rank);
+        }
+      }
+      else if (!strcmp(subcmd, "EMOTION")) {
+        char bname[64] = {0};
+        float val = 0.0f, aro = 0.0f;
+        sscanf(rest, "%63s %f %f", bname, &val, &aro);
+        if (bname[0]) {
+          am_blood_compile_emotion(bname, val, aro);
+        }
+      }
+      else if (!strcmp(subcmd, "UNLOAD")) {
+        char bname[64] = {0};
+        sscanf(rest, "%63s", bname);
+        // Find module by name
+        for (int i = 0; i < g_blood_count; i++) {
+          if (strcmp(g_blood_modules[i].name, bname) == 0) {
+            am_blood_unload(i);
+            break;
+          }
         }
       }
     }
@@ -2107,6 +2199,286 @@ void am_notorch_step(float* A, float* B, int out_dim, int in_dim, int rank,
         if (B[i] > 10.0f) B[i] = 10.0f;
         if (B[i] < -10.0f) B[i] = -10.0f;
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BLOOD — runtime C compilation (Level 3)
+//
+// Compile C → shared library → dlopen → dlsym. No PyTorch. No Go. Pure POSIX.
+// Adapted from arianna.c/golib/blood.go + async_field_forever/blood.py
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Simple hash for deduplication (djb2 → hex string)
+static void blood_hash(const char* code, char* out) {
+    unsigned long h = 5381;
+    for (const char* p = code; *p; p++)
+        h = ((h << 5) + h) + (unsigned char)*p;
+    snprintf(out, AM_BLOOD_HASH_LEN, "%08lx", h);
+}
+
+// Sanitize name: keep only [a-zA-Z0-9_]
+static void blood_sanitize(const char* in, char* out, int max) {
+    int j = 0;
+    for (int i = 0; in[i] && j < max - 1; i++) {
+        char c = in[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '_')
+            out[j++] = c;
+    }
+    out[j] = 0;
+}
+
+void am_blood_init(void) {
+    // Clean up existing modules
+    am_blood_cleanup();
+
+    // Set temp directory
+    const char* tmp = getenv("TMPDIR");
+    if (!tmp || !*tmp) tmp = "/tmp";
+    snprintf(g_blood_dir, sizeof(g_blood_dir), "%s/aml_blood", tmp);
+
+    // Create directory (ignore error if exists)
+    char mkdir_cmd[300];
+    snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p '%s'", g_blood_dir);
+    (void)system(mkdir_cmd);
+
+    // Detect compiler: clang → gcc → cc
+    g_blood_cc[0] = 0;
+    const char* candidates[] = {"clang", "gcc", "cc", NULL};
+    for (int i = 0; candidates[i]; i++) {
+        char check[128];
+        snprintf(check, sizeof(check), "which %s >/dev/null 2>&1", candidates[i]);
+        if (system(check) == 0) {
+            strncpy(g_blood_cc, candidates[i], sizeof(g_blood_cc) - 1);
+            break;
+        }
+    }
+}
+
+int am_blood_compile(const char* name, const char* code) {
+#ifdef AM_BLOOD_DISABLED
+    (void)name; (void)code;
+    return -1;
+#else
+    if (!name || !code || !*name || !*code) return -1;
+    if (!g_blood_cc[0]) return -1;  // no compiler
+    if (g_blood_count >= AM_BLOOD_MAX_MODULES) return -1;
+
+    // Sanitize name
+    char safe_name[AM_BLOOD_MAX_NAME];
+    blood_sanitize(name, safe_name, AM_BLOOD_MAX_NAME);
+    if (!safe_name[0]) return -1;
+
+    // Hash code for deduplication
+    char hash[AM_BLOOD_HASH_LEN];
+    blood_hash(code, hash);
+
+    // Check cache
+    for (int i = 0; i < g_blood_count; i++) {
+        if (strcmp(g_blood_modules[i].hash, hash) == 0 &&
+            g_blood_modules[i].handle != NULL) {
+            return i;  // already compiled and loaded
+        }
+    }
+
+    // Write source file
+    char src_path[256], lib_path[256];
+    snprintf(src_path, sizeof(src_path), "%s/blood_%s_%s.c",
+             g_blood_dir, safe_name, hash);
+    snprintf(lib_path, sizeof(lib_path), "%s/blood_%s_%s%s",
+             g_blood_dir, safe_name, hash, AM_BLOOD_EXT);
+
+    FILE* f = fopen(src_path, "w");
+    if (!f) return -1;
+    fprintf(f, "%s", code);
+    fclose(f);
+
+    // Compile: cc -O2 -shared -fPIC -o lib.dylib src.c
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd), "%s -O2 %s -o '%s' '%s' -lm 2>&1",
+             g_blood_cc, AM_BLOOD_FLAGS, lib_path, src_path);
+
+    FILE* proc = popen(cmd, "r");
+    if (!proc) { remove(src_path); return -1; }
+
+    // Read compiler output (for error detection)
+    char output[512] = {0};
+    size_t total = 0;
+    while (total < sizeof(output) - 1) {
+        size_t n = fread(output + total, 1, sizeof(output) - 1 - total, proc);
+        if (n == 0) break;
+        total += n;
+    }
+    output[total] = 0;
+    int status = pclose(proc);
+
+    if (status != 0) {
+        // Compilation failed — store error message
+        snprintf(g_error, sizeof(g_error), "blood: compile failed: %.200s", output);
+        remove(src_path);
+        return -1;
+    }
+
+    // Load shared library
+    void* handle = dlopen(lib_path, RTLD_NOW);
+    if (!handle) {
+        snprintf(g_error, sizeof(g_error), "blood: dlopen failed: %.200s", dlerror());
+        remove(src_path);
+        remove(lib_path);
+        return -1;
+    }
+
+    // Register module
+    int idx = g_blood_count++;
+    strncpy(g_blood_modules[idx].name, safe_name, AM_BLOOD_MAX_NAME - 1);
+    strncpy(g_blood_modules[idx].hash, hash, AM_BLOOD_HASH_LEN - 1);
+    strncpy(g_blood_modules[idx].lib_path, lib_path, 255);
+    g_blood_modules[idx].handle = handle;
+
+    return idx;
+#endif
+}
+
+void* am_blood_sym(int module_idx, const char* func_name) {
+#ifdef AM_BLOOD_DISABLED
+    (void)module_idx; (void)func_name;
+    return NULL;
+#else
+    if (module_idx < 0 || module_idx >= g_blood_count) return NULL;
+    if (!g_blood_modules[module_idx].handle) return NULL;
+    return dlsym(g_blood_modules[module_idx].handle, func_name);
+#endif
+}
+
+void am_blood_unload(int module_idx) {
+#ifdef AM_BLOOD_DISABLED
+    (void)module_idx;
+#else
+    if (module_idx < 0 || module_idx >= g_blood_count) return;
+    AM_BloodModule* m = &g_blood_modules[module_idx];
+    if (m->handle) {
+        dlclose(m->handle);
+        m->handle = NULL;
+    }
+    // Remove compiled files
+    if (m->lib_path[0]) {
+        remove(m->lib_path);
+        // Also remove source
+        char src_path[256];
+        snprintf(src_path, sizeof(src_path), "%s/blood_%s_%s.c",
+                 g_blood_dir, m->name, m->hash);
+        remove(src_path);
+    }
+#endif
+}
+
+void am_blood_cleanup(void) {
+    for (int i = 0; i < g_blood_count; i++) {
+        am_blood_unload(i);
+    }
+    g_blood_count = 0;
+}
+
+int am_blood_count(void) { return g_blood_count; }
+
+const AM_BloodModule* am_blood_get(int idx) {
+    if (idx < 0 || idx >= g_blood_count) return NULL;
+    return &g_blood_modules[idx];
+}
+
+// ── CODE GENERATORS ─────────────────────────────────────────────────────────
+
+int am_blood_compile_lora(const char* name, int in_dim, int out_dim, int rank) {
+    char safe[AM_BLOOD_MAX_NAME];
+    blood_sanitize(name, safe, AM_BLOOD_MAX_NAME);
+    if (!safe[0]) return -1;
+
+    // Generate LoRA C code from template
+    char code[4096];
+    snprintf(code, sizeof(code),
+        "#include <stdlib.h>\n"
+        "#include <string.h>\n"
+        "\n"
+        "static const int IN_DIM = %d;\n"
+        "static const int OUT_DIM = %d;\n"
+        "static const int RANK = %d;\n"
+        "\n"
+        "static float* A = NULL;\n"  // [OUT_DIM, RANK]
+        "static float* B = NULL;\n"  // [RANK, IN_DIM]
+        "\n"
+        "void %s_init(float* weights_a, float* weights_b) {\n"
+        "    A = weights_a;\n"
+        "    B = weights_b;\n"
+        "}\n"
+        "\n"
+        "void %s_apply(float* input, float* output) {\n"
+        "    float temp[%d];\n"
+        "    memset(temp, 0, sizeof(temp));\n"
+        "    for (int r = 0; r < RANK; r++)\n"
+        "        for (int i = 0; i < IN_DIM; i++)\n"
+        "            temp[r] += B[r * IN_DIM + i] * input[i];\n"
+        "    for (int o = 0; o < OUT_DIM; o++)\n"
+        "        for (int r = 0; r < RANK; r++)\n"
+        "            output[o] += A[o * RANK + r] * temp[r];\n"
+        "}\n"
+        "\n"
+        "void %s_apply_scaled(float* input, float* output, float scale) {\n"
+        "    float temp[%d];\n"
+        "    memset(temp, 0, sizeof(temp));\n"
+        "    for (int r = 0; r < RANK; r++)\n"
+        "        for (int i = 0; i < IN_DIM; i++)\n"
+        "            temp[r] += B[r * IN_DIM + i] * input[i];\n"
+        "    for (int o = 0; o < OUT_DIM; o++)\n"
+        "        for (int r = 0; r < RANK; r++)\n"
+        "            output[o] += scale * A[o * RANK + r] * temp[r];\n"
+        "}\n"
+        "\n"
+        "void %s_free(void) { A = NULL; B = NULL; }\n",
+        in_dim, out_dim, rank,
+        safe,         // init
+        safe, rank,   // apply + temp size
+        safe, rank,   // apply_scaled + temp size
+        safe          // free
+    );
+
+    return am_blood_compile(safe, code);
+}
+
+int am_blood_compile_emotion(const char* name, float valence, float arousal) {
+    char safe[AM_BLOOD_MAX_NAME];
+    blood_sanitize(name, safe, AM_BLOOD_MAX_NAME);
+    if (!safe[0]) return -1;
+
+    char code[4096];
+    snprintf(code, sizeof(code),
+        "#include <math.h>\n"
+        "#include <string.h>\n"
+        "\n"
+        "static const float BASE_VALENCE = %.4ff;\n"
+        "static const float BASE_AROUSAL = %.4ff;\n"
+        "\n"
+        "void %s_respond(float* valence, float* arousal) {\n"
+        "    *valence = (*valence + BASE_VALENCE) / 2.0f;\n"
+        "    *arousal = (*arousal + BASE_AROUSAL) / 2.0f;\n"
+        "}\n"
+        "\n"
+        "void %s_modulate_logits(float* logits, int vocab_size, float strength) {\n"
+        "    float mod = BASE_VALENCE * strength;\n"
+        "    for (int i = 0; i < vocab_size; i++)\n"
+        "        logits[i] *= (1.0f + mod * 0.1f);\n"
+        "}\n"
+        "\n"
+        "void modulate_logits(float* logits, int vocab_size, float valence, float arousal) {\n"
+        "    float strength = fabsf(valence) * arousal;\n"
+        "    %s_modulate_logits(logits, vocab_size, strength);\n"
+        "}\n",
+        valence, arousal,
+        safe,   // respond
+        safe,   // modulate_logits
+        safe    // generic entry calls specific
+    );
+
+    return am_blood_compile(safe, code);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

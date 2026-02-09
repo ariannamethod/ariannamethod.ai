@@ -343,6 +343,59 @@ void am_notorch_step(float* A, float* B, int out_dim, int in_dim, int rank,
                      const float* x, const float* dy, float signal);
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// BLOOD — runtime C compilation (Level 3)
+//
+// Compile C code to shared libraries at runtime. Load functions via dlsym.
+// Adapted from arianna.c/golib/blood.go + async_field_forever/blood.py
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#define AM_BLOOD_MAX_MODULES   32
+#define AM_BLOOD_MAX_NAME      64
+#define AM_BLOOD_HASH_LEN      33   // MD5 hex + null
+
+// Compiled module handle
+typedef struct {
+    char  name[AM_BLOOD_MAX_NAME];
+    char  hash[AM_BLOOD_HASH_LEN];
+    char  lib_path[256];
+    void* handle;   // dlopen handle (NULL if unloaded)
+} AM_BloodModule;
+
+// Initialize Blood compiler (call once, or re-call to reset)
+void am_blood_init(void);
+
+// Compile C source code to a shared library. Returns module index or -1.
+// Name is used for file naming and symbol lookup.
+// Code is raw C source (must include necessary headers).
+int am_blood_compile(const char* name, const char* code);
+
+// Generate and compile a LoRA adapter module.
+// Returns module index or -1.
+// Generated functions: {name}_init, {name}_apply, {name}_apply_scaled, {name}_free
+int am_blood_compile_lora(const char* name, int in_dim, int out_dim, int rank);
+
+// Generate and compile an emotional kernel module.
+// Returns module index or -1.
+// Generated functions: {name}_check, {name}_respond, {name}_modulate_logits, modulate_logits
+int am_blood_compile_emotion(const char* name, float valence, float arousal);
+
+// Look up a function pointer from a compiled module.
+// Returns NULL if not found.
+void* am_blood_sym(int module_idx, const char* func_name);
+
+// Unload a compiled module (dlclose + remove files).
+void am_blood_unload(int module_idx);
+
+// Unload all modules and clean up.
+void am_blood_cleanup(void);
+
+// Get module count.
+int am_blood_count(void);
+
+// Get module by index (NULL if out of range).
+const AM_BloodModule* am_blood_get(int idx);
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // CONVENIENCE QUERIES
 // ═══════════════════════════════════════════════════════════════════════════════
 

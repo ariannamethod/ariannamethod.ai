@@ -10,7 +10,7 @@ A programming language for controlling the generative field of transformer-based
 
 ```
 make        # builds libaml.a
-make test   # runs 155 tests
+make test   # runs 179 tests
 ```
 
 Or compile directly:
@@ -316,6 +316,44 @@ NOTORCH_LR 0.01       # learning rate
 NOTORCH_DECAY 0.999   # weight decay per step
 ```
 
+## Blood — Runtime C Compilation (Level 3)
+
+Compile C code to shared libraries at runtime. Load and call functions via dlsym. No PyTorch. No Go. Pure POSIX.
+
+Adapted from [arianna.c/blood.go](https://github.com/ariannamethod/arianna.c) + [async_field_forever/blood.py](https://github.com/ariannamethod/ariannamethod).
+
+```aml
+# Compile a LoRA adapter at runtime
+BLOOD LORA my_adapter 2048 2048 64
+
+# Compile an emotional kernel
+BLOOD EMOTION joy 0.8 0.6
+
+# Compile raw C code
+BLOOD COMPILE my_fn { float my_fn(float x) { return x * x; } }
+
+# Unload a module
+BLOOD UNLOAD my_adapter
+```
+
+Three code generators:
+
+| Generator | What | Generated functions |
+|-----------|------|-------------------|
+| `BLOOD LORA name in out rank` | Low-rank adapter (A @ B @ x) | `{name}_init`, `{name}_apply`, `{name}_apply_scaled`, `{name}_free` |
+| `BLOOD EMOTION name val aro` | Emotional kernel (logit modulation) | `{name}_respond`, `{name}_modulate_logits`, `modulate_logits` |
+| `BLOOD COMPILE name { code }` | Raw C | Whatever you define |
+
+```c
+// C API
+int   am_blood_compile(const char* name, const char* code);
+int   am_blood_compile_lora(const char* name, int in_dim, int out_dim, int rank);
+int   am_blood_compile_emotion(const char* name, float valence, float arousal);
+void* am_blood_sym(int module_idx, const char* func_name);
+void  am_blood_unload(int module_idx);
+void  am_blood_cleanup(void);
+```
+
 ## Extension Packs
 
 One optional pack. Dark Matter and NOTORCH are core — always active.
@@ -365,6 +403,14 @@ void  am_apply_field_to_logits(float* logits, int n);
 void am_notorch_step(float* A, float* B, int out_dim, int in_dim, int rank,
                      const float* x, const float* dy, float signal);
 
+// Blood compiler
+int   am_blood_compile(const char* name, const char* code);
+int   am_blood_compile_lora(const char* name, int in_dim, int out_dim, int rank);
+int   am_blood_compile_emotion(const char* name, float valence, float arousal);
+void* am_blood_sym(int module_idx, const char* func_name);
+void  am_blood_unload(int module_idx);
+void  am_blood_cleanup(void);
+
 // Inline queries
 float       am_get_temperature(void);
 float       am_get_destiny_bias(void);
@@ -377,9 +423,9 @@ const char* am_get_season_name(void);
 
 ```
 core/
-  ariannamethod.c      Reference implementation (2099 lines)
-  ariannamethod.h      Header with AM_State, Level 2 structures (371 lines)
-  test_aml.c           155 tests
+  ariannamethod.c      Reference implementation (2685 lines)
+  ariannamethod.h      Header with AM_State, Level 2 structures, Blood API (442 lines)
+  test_aml.c           179 tests
 spec/
   AML_SPEC.md          Full language specification with EBNF grammar
 examples/
@@ -398,8 +444,11 @@ Makefile
 
 | Project | What | AML subset |
 |---------|------|-----------|
+| [arianna.c](https://github.com/ariannamethod/arianna.c) | 550M organism, C/Go/Julia/Zig | Level 0 + Lua + Blood |
 | [yent](https://github.com/ariannamethod/yent) | Go inference engine, Delta Voice, REPL | Level 0 + LORA_ALPHA + CGO |
-| [arianna.c](https://github.com/ariannamethod/arianna.c) | 550M organism, C/Go/Julia/Zig | Level 0 + Lua bindings |
+| [stanley](https://github.com/ariannamethod/stanley) | First embodiment (pre-AML, same processes) | Level 0 equivalent |
+| [leo](https://github.com/ariannamethod/leo) | Non-transformer experiment | Level 0 field physics |
+| [pitomadom](https://github.com/ariannamethod/pitomadom) | Calendar conflict physics, temporal symmetry | Level 0 + calendar |
 | [ariannamethod.lang](https://github.com/ariannamethod/ariannamethod.lang) | Visual field, JS | Level 0 + macros |
 
 Each project copies what it needs. AML is the source of truth; implementations are subsets.

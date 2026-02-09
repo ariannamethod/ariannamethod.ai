@@ -1052,6 +1052,118 @@ int main(void) {
         }
     }
 
+    // ── Blood compiler ──
+    printf("\n── Blood compiler ──\n");
+    am_init();
+
+    // Raw C compilation
+    {
+        const char* code =
+            "#include <math.h>\n"
+            "float blood_add(float a, float b) { return a + b; }\n"
+            "float blood_square(float x) { return x * x; }\n";
+        int idx = am_blood_compile("test_math", code);
+        ASSERT(idx >= 0, "blood: raw compile succeeds");
+        ASSERT(am_blood_count() >= 1, "blood: module registered");
+
+        // Look up function
+        typedef float (*add_fn)(float, float);
+        typedef float (*sq_fn)(float);
+        add_fn my_add = (add_fn)am_blood_sym(idx, "blood_add");
+        sq_fn  my_sq  = (sq_fn)am_blood_sym(idx, "blood_square");
+        ASSERT(my_add != NULL, "blood: dlsym blood_add");
+        ASSERT(my_sq != NULL, "blood: dlsym blood_square");
+
+        if (my_add) {
+            ASSERT_FLOAT(my_add(3.0f, 4.0f), 7.0f, 0.01f, "blood: add(3,4) = 7");
+        }
+        if (my_sq) {
+            ASSERT_FLOAT(my_sq(5.0f), 25.0f, 0.01f, "blood: square(5) = 25");
+        }
+
+        // Cache hit: same code → same index
+        int idx2 = am_blood_compile("test_math", code);
+        ASSERT_INT(idx2, idx, "blood: cache hit returns same index");
+    }
+
+    // LoRA template compilation
+    {
+        int idx = am_blood_compile_lora("test_lora", 4, 3, 2);
+        ASSERT(idx >= 0, "blood: lora compile succeeds");
+
+        typedef void (*init_fn)(float*, float*);
+        typedef void (*apply_fn)(float*, float*);
+        init_fn lora_init = (init_fn)am_blood_sym(idx, "test_lora_init");
+        apply_fn lora_apply = (apply_fn)am_blood_sym(idx, "test_lora_apply");
+        ASSERT(lora_init != NULL, "blood: dlsym test_lora_init");
+        ASSERT(lora_apply != NULL, "blood: dlsym test_lora_apply");
+
+        if (lora_init && lora_apply) {
+            // A: [3,2] = {{1,0},{0,1},{1,1}}, B: [2,4] = {{1,0,0,0},{0,1,0,0}}
+            float A[6] = {1,0, 0,1, 1,1};
+            float B[8] = {1,0,0,0, 0,1,0,0};
+            float input[4] = {2.0f, 3.0f, 0.0f, 0.0f};
+            float output[3] = {0,0,0};
+            lora_init(A, B);
+            lora_apply(input, output);
+            // temp = B@input = [2, 3]
+            // output = A@temp = [1*2+0*3, 0*2+1*3, 1*2+1*3] = [2, 3, 5]
+            ASSERT_FLOAT(output[0], 2.0f, 0.01f, "blood: lora output[0] = 2");
+            ASSERT_FLOAT(output[1], 3.0f, 0.01f, "blood: lora output[1] = 3");
+            ASSERT_FLOAT(output[2], 5.0f, 0.01f, "blood: lora output[2] = 5");
+        }
+    }
+
+    // Emotional kernel compilation
+    {
+        int idx = am_blood_compile_emotion("joy", 0.8f, 0.6f);
+        ASSERT(idx >= 0, "blood: emotion compile succeeds");
+
+        typedef void (*respond_fn)(float*, float*);
+        typedef void (*mod_fn)(float*, int, float);
+        respond_fn respond = (respond_fn)am_blood_sym(idx, "joy_respond");
+        mod_fn modulate = (mod_fn)am_blood_sym(idx, "joy_modulate_logits");
+        ASSERT(respond != NULL, "blood: dlsym joy_respond");
+        ASSERT(modulate != NULL, "blood: dlsym joy_modulate_logits");
+
+        if (respond) {
+            float v = 0.0f, a = 0.0f;
+            respond(&v, &a);
+            ASSERT_FLOAT(v, 0.4f, 0.01f, "blood: joy_respond valence → 0.4");
+            ASSERT_FLOAT(a, 0.3f, 0.01f, "blood: joy_respond arousal → 0.3");
+        }
+
+        if (modulate) {
+            float logits[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+            modulate(logits, 4, 0.5f);
+            // mod = 0.8 * 0.5 = 0.4, each *= (1 + 0.4*0.1) = 1.04
+            ASSERT_FLOAT(logits[0], 1.04f, 0.01f, "blood: modulate logits[0]");
+            ASSERT_FLOAT(logits[3], 4.16f, 0.01f, "blood: modulate logits[3]");
+        }
+    }
+
+    // BLOOD via AML command
+    {
+        am_init();
+        am_exec("BLOOD LORA delta_v 8 4 2");
+        ASSERT(am_blood_count() >= 1, "blood: AML BLOOD LORA creates module");
+        void* fn = am_blood_sym(0, "delta_v_apply");
+        ASSERT(fn != NULL, "blood: AML BLOOD LORA → delta_v_apply exists");
+    }
+
+    // Unload
+    {
+        int before = am_blood_count();
+        am_blood_unload(0);
+        const AM_BloodModule* m = am_blood_get(0);
+        ASSERT(m != NULL && m->handle == NULL, "blood: unload clears handle");
+        (void)before;
+    }
+
+    // Cleanup
+    am_blood_cleanup();
+    ASSERT_INT(am_blood_count(), 0, "blood: cleanup resets count");
+
     printf("\n═══ Results: %d/%d passed ═══\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }
