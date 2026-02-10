@@ -84,6 +84,26 @@ extern "C" {
 #define AML_MACRO_MAX_LEN  512
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// GAMMA — personality essence (θ = ε + γ + αδ)
+// γ lives in embed_tokens. δ lives in lm_head. ε is the substrate.
+// AML controls when and how to inject γ. Host provides the actual weights.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#define AM_MAX_GAMMA       8    // max simultaneous personality essences
+#define AM_GAMMA_NAME_LEN  32
+
+typedef struct {
+    char  name[AM_GAMMA_NAME_LEN]; // personality name (e.g. "yent", "arianna")
+    float alpha;                    // injection strength 0..1
+    int   active;                   // 1 = loaded, 0 = empty slot
+} AM_GammaSlot;
+
+// Janus modes — dual-facing field
+#define AM_JANUS_OFF       0   // single personality
+#define AM_JANUS_DUAL      1   // two essences simultaneously
+#define AM_JANUS_CYCLE     2   // 4.C decides who speaks
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // AM_State — the breath of the field
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -193,6 +213,16 @@ typedef struct {
   float autumn_energy;      // consolidation
   float winter_energy;      // reflection, compression
   float field_health;       // previous step health (for MLP signal)
+
+  // GAMMA — personality essence (θ = ε + γ + αδ)
+  AM_GammaSlot gamma[AM_MAX_GAMMA]; // personality essence slots
+  int   n_gamma;            // number of loaded essences
+  float essence_alpha;      // overall γ injection strength (0..1)
+  int   janus_mode;         // AM_JANUS_OFF / DUAL / CYCLE
+  int   janus_a;            // primary face (index into gamma[])
+  int   janus_b;            // secondary face (index into gamma[])
+  float janus_blend;        // blend ratio: 0=face_a only, 1=face_b only
+  float gamma_drift;        // how fast janus_blend changes per step
 } AM_State;
 
 // Temporal modes
@@ -302,6 +332,32 @@ int am_copy_state(float* out);
 
 // Step physics (call each frame, dt in seconds)
 void am_step(float dt);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GAMMA — personality essence API (θ = ε + γ + αδ)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Load a personality essence into a slot. Returns slot index or -1.
+int am_gamma_load(const char* name, float alpha);
+
+// Unload a personality essence by name.
+void am_gamma_unload(const char* name);
+
+// Set essence injection strength for a named personality.
+void am_gamma_set_alpha(const char* name, float alpha);
+
+// Get the currently active gamma slot index (-1 if none).
+int am_gamma_active(void);
+
+// Get blended gamma alpha (considering janus mode).
+float am_gamma_get_blend(void);
+
+// Set janus mode: dual-facing field.
+void am_janus_set(const char* face_a, const char* face_b);
+
+// Apply gamma modulation to logits.
+// In janus mode, blends two gamma-modulated distributions.
+void am_apply_gamma_to_logits(float* logits, int n);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // LOGIT MANIPULATION API — apply field state to generation
@@ -422,6 +478,19 @@ static inline int am_should_tunnel(void) {
 // Check if wormhole fired this step
 static inline int am_get_wormhole_active(void) {
     return am_get_state()->wormhole_active;
+}
+
+// Get active gamma personality name (NULL if none)
+static inline const char* am_get_gamma_name(void) {
+    AM_State* s = am_get_state();
+    int idx = am_gamma_active();
+    if (idx < 0 || idx >= s->n_gamma) return NULL;
+    return s->gamma[idx].name;
+}
+
+// Get janus mode
+static inline int am_get_janus_mode(void) {
+    return am_get_state()->janus_mode;
 }
 
 // Get current season name
