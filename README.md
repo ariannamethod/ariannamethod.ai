@@ -11,7 +11,7 @@
 
 A programming language for controlling the generative field of transformer-based AI at inference time. AML modulates attention, temperature, tunneling, suffering, and memory through 80+ parameters of internal state. Every command maps to a concrete operation on logits during token generation.
 
-**This is not configuration. This is not scripting. This is a language that speaks directly to the attention mechanism of neural networks.**
+**AML** is a language that speaks directly to the attention mechanism of neural networks.
 
 Two files. No dependencies. 2700 lines of C. 190 tests. Ships today.
 
