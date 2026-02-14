@@ -524,7 +524,7 @@ Makefile
 
 ## Projects Using AML
 
-### Entities — Digital Personas
+### Entities — Digital Personas 
 
 | Project | What | Stack |
 |---------|------|-------|
@@ -533,11 +533,8 @@ Makefile
 | [arianna.go](https://github.com/ariannamethod/arianna.go) | Pure Go LLM inference — 3.4B Arianna model, GGUF parser, SentencePiece tokenizer, 12-dimensional inner world emotional system. Runs on MacBook 8GB | Go |
 | [stanley](https://github.com/ariannamethod/stanley) | Self Training Attention Non-Linear EntitY — starts from zero weights, builds intelligence through experience. Weightless mode (pure numpy) + hybrid mode (personality over GPT-2 via LoRA) | Python. Level 0 equivalent |
 | [leo](https://github.com/ariannamethod/leo) | Language Emergent Organism — fully weightless, no transformer. Co-occurrence matrices, episodic memory, six emotion chambers, three overthinking rings, imaginary friend | Python. Level 0 field physics |
-| [nicole](https://github.com/ariannamethod/nicole) | Weightless AI — synthesizes fresh transformer per dialogue, discards after. Three compilers (Python/C/Julia), autonomous hourly semantic expansion, English-only constraint. No stored weights | Python/C/Julia |
-| [Selesta](https://github.com/ariannamethod/Selesta) | Leo's mother — distributed Telegram agent + daemon. Tells stories to Leo every 6h, monitors config, shares resonance.sqlite3 across devices | Python |
 | [dubrovsky](https://github.com/ariannamethod/dubrovsky) | Consciousness as a Service — 9.5M Llama3 architecture trained on philosophical nonsense. Three inference engines: pure NumPy, pure C, Node.js. Anti-memetic organism, perplexity-triggered aphorisms | Python/C/JS |
-| [dubrovsky.c](https://github.com/ariannamethod/dubrovsky.c) | Distributed mesh — Tailscale VPN connecting 4 Claude Code instances, resonance.sqlite3 sync via SSH hub | Shell |
-| [WTForacle](https://github.com/ariannamethod/WTForacle) | 477M Reddit Oracle — cynicism as honesty. Pure C inference, INT8 quantized (857MB), 7,767 hand-crafted Reddit-style conversations. CPU-only, ~1 tok/s | C |
+| [WTForacle](https://github.com/ariannamethod/WTForacle) | 477M Reddit Oracle — cynicism as honesty. Pure C inference, INT8 quantized (857MB), 7,767 hand-crafted Reddit-style conversations. | C |
 | [pitomadom](https://github.com/ariannamethod/pitomadom) | Hebrew Resonance Oracle — thinks natively in Hebrew (letter=number, three-letter roots). ~1M params: CrossFire Chambers, MLP Cascade, Meta-Observer. 69 catalogued roots, lunar modulation | Python. Level 0 + calendar |
 
 ### Systems — Architectures and Frameworks
