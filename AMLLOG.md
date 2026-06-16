@@ -14,6 +14,33 @@ Newest entries on top.
 
 ---
 
+## 2026-06-16 — Positive Soma: `warmth` / `flow` / `weave` (the expansive axis)
+
+A language-level addition, the mirror of suffering. Leo's reverse AML bridge (neoleo E-9) writes the
+child's felt body into `AM_State` each turn; the suffering axis (pain/tension/dissonance) was already
+readable, the expansive one was not. Three read-only sensor fields land in the field-map so any `.aml`
+expression can read an attached organism's positive body:
+
+- **`warmth`** — affiliation / comfort / safe-bonding (the opposite pole of `pain`).
+- **`flow`** — effortless resonance with the moment (the opposite pole of `tension`).
+- **`weave`** — pattern-binding, threads cohering into a whole. Named `weave`, not `emergence` —
+  `emergence` is already an `AM_State` field (the 4C network's low-entropy × high-resonance signal).
+
+Read-only by design: an organism writes them from C via `am_get_state()`, scripts perceive them
+(`if warmth > 0.5:` → `VELOCITY WALK`). No new keyword, no transpiler change — reads resolve through
+`ctx_float` → `read_field`.
+
+Soma format `AM_SOMA_VERSION 2 → 3`. The fields are APPENDED at the end of `AM_State`, so
+`am_field_load` migrates old v2 `.soma` files as a clean prefix (new fields default to `0`); a file
+larger than the current struct is refused as an unknown future ABI.
+
+Touched `core/ariannamethod.{c,h}` (3 fields + field-map + version + load migration),
+`spec/AML_SPEC.md` (§2.4b), this log. `make test` **517/517** (+5: warmth/flow/weave readable in
+expressions; warmth + weave survive `.soma` save/load). Branch `claude-positive-soma` off `main`,
+not yet merged.
+
+---
+
 ## 2026-06-13 — VELOCITY: somatic operators `STOP` + `BREATHE` (the reverse flow from Leo)
 
 A language-level addition. Leo (neoleo) grew a body — its chambers quantize into a

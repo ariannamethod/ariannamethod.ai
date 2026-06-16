@@ -254,6 +254,13 @@ typedef struct {
   int   cooc_total;              // total ingested tokens (for normalization)
   int   ctx_ring[AM_COOC_CTX];   // last-N emitted tokens (H-term context)
   int   ctx_ring_n;              // tokens in the ring so far
+
+  // POSITIVE SOMA (v3) — the expansive axis, mirror of pain/tension/dissonance. An organism
+  // (e.g. Leo via the reverse bridge) writes its felt body here; any .aml expression reads
+  // them by name. APPEND-ONLY: new fields stay at the end so .soma prefix-migration holds.
+  float warmth;      // affiliation / comfort / safe-bonding (LOVE) — the opposite pole of pain
+  float flow;        // effortless resonance with the moment (FLOW) — the opposite pole of tension
+  float weave;       // pattern-binding, threads cohering into a whole (COMPLEX)
 } AM_State;
 
 // Temporal modes

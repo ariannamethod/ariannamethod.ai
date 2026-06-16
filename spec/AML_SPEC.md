@@ -119,6 +119,28 @@ void am_apply_suffering_to_logits(float* logits, int n) {
 }
 ```
 
+### 2.4b Positive Soma (read-only)
+
+The expansive axis — the mirror of suffering. Where pain/tension/dissonance are the contractive
+felt-state, these three are the opening one. They are **read-only sensor fields**, not commands: an
+attached organism (e.g. Leo / neoleo via the reverse bridge) writes its felt body into `AM_State`
+from C, and any `.aml` expression reads them by name — the language *perceives* the body it hosts.
+
+| Field | Range | Description |
+|-------|-------|-------------|
+| `warmth` | 0–1 | affiliation, comfort, safe-bonding — the opposite pole of `pain` |
+| `flow` | 0–1 | effortless resonance with the moment — the opposite pole of `tension` |
+| `weave` | 0–1 | pattern-binding, threads cohering into a whole |
+
+Example — a script that opens the breath to a walk when the body it hosts feels warm:
+```
+if warmth > 0.5:
+    VELOCITY WALK
+```
+
+Persisted in `.soma` (field version `3`; older `v2` files load as a clean prefix with these
+fields defaulting to `0`).
+
 ### 2.5 Movement
 
 Movement is language. Velocity determines the temperature of thought.

@@ -870,6 +870,48 @@ static void test_field_map(void) {
     am_step(1.0f);  // compute entropy
     am_exec("if entropy >= 0:\n    PROPHECY 44");
     ASSERT_INT(am_get_state()->prophecy, 44, "entropy readable in expression");
+
+    // Positive soma (v3) — set from C (an organism's felt body), read by name in expressions
+    am_init();
+    am_get_state()->warmth = 0.6f;
+    am_exec("if warmth > 0.5:\n    PROPHECY 51");
+    ASSERT_INT(am_get_state()->prophecy, 51, "warmth (positive soma) readable in expression");
+
+    am_init();
+    am_get_state()->flow = 0.7f;
+    am_exec("if flow > 0.5:\n    PROPHECY 52");
+    ASSERT_INT(am_get_state()->prophecy, 52, "flow readable in expression");
+
+    am_init();
+    am_get_state()->weave = 0.8f;
+    am_exec("if weave > 0.5:\n    PROPHECY 53");
+    ASSERT_INT(am_get_state()->prophecy, 53, "weave readable in expression");
+
+    // v3 soma round-trips through save/load (the positive body persists — klaus-style memory)
+    am_init();
+    am_get_state()->warmth = 0.42f;
+    am_get_state()->weave  = 0.91f;
+    am_field_save("/tmp/aml_soma_v3_test.soma");
+    am_init();  // wipe the field
+    am_field_load("/tmp/aml_soma_v3_test.soma");
+    ASSERT_FLOAT(am_get_state()->warmth, 0.42f, 0.001f, "warmth survives soma save/load (v3)");
+    ASSERT_FLOAT(am_get_state()->weave,  0.91f, 0.001f, "weave survives soma save/load (v3)");
+
+    // A malformed .soma (valid header, bogus state_sz) is refused, not silently zero-loaded
+    {
+        FILE *bad = fopen("/tmp/aml_bad_soma_test.soma", "wb");
+        unsigned int magic  = 0x4F534D41u;  /* AM_SOMA_MAGIC */
+        unsigned int ver    = 3u;           /* a supported AM_SOMA_VERSION */
+        unsigned int bad_sz = 4u;           /* 4 != sizeof(AM_State) and != the v2 prefix size */
+        char ts8[8] = {0};                  /* timestamp */
+        fwrite(&magic,  sizeof magic,  1, bad);
+        fwrite(&ver,    sizeof ver,    1, bad);
+        fwrite(&bad_sz, sizeof bad_sz, 1, bad);
+        fwrite(ts8, 1, 8, bad);
+        fclose(bad);
+        ASSERT(am_field_load("/tmp/aml_bad_soma_test.soma") != 0,
+               "malformed .soma (bad state_sz) is refused, not zero-loaded");
+    }
 }
 
 // ── TEST 34: am_apply_attention_to_logits ─────────────────────────────────
