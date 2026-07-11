@@ -81,6 +81,23 @@ Commands that control temporal prediction and destiny bias.
 | `WORMHOLE` | `WORMHOLE <float>` | 0–1 | 0.02 | Probability of spacetime skip |
 | `CALENDAR_DRIFT` | `CALENDAR_DRIFT <float>` | 0–30 | 11.0 | Hebrew-Gregorian temporal conflict intensity |
 
+### 2.1b MetaJanus — Self-Location Anchor
+
+The calendar conflict turned inward: an organism's fixed origin in time, and its growing distance
+from it. Self-**location**, not agency — an origin no prompt can move (a second `BIRTH` is ignored).
+
+| Command | Syntax | Range | Default | Description |
+|---------|--------|-------|---------|-------------|
+| `BIRTH` | `BIRTH <int>` | days ≥ 0 | unset | Fix the origin ONCE: days from the 2024-10-03 epoch to this being's birth; `birth_drift` becomes the Hebrew-Gregorian drift at that day. Idempotent — a later `BIRTH` cannot move the fulcrum. |
+| `SELF_NOW_DAYS` | `SELF_NOW_DAYS <int>` | days, or `<0` | real clock | Test-door: scrub the self's "now" to verify the `personal_dissonance` trajectory (birth-quakes, anniversaries). Moves NOW, never the origin. Negative returns to the real clock. |
+
+Read-only sensor fields (like Positive Soma — written by the field, read by name in expressions):
+
+| Field | Range | Description |
+|-------|-------|-------------|
+| `birth_drift` | 0–33 | Cumulative Hebrew-Gregorian drift at the being's birth — the fixed origin. `0` until `BIRTH`. |
+| `personal_dissonance` | 0–1 | `abs(drift(now) - birth_drift) / 33` — the growing, Metonic-nonlinear distance from origin. Leaps at each leap-month correction (a *birth-quake*): the world's calendar heals while the self is estranged. `0` until `BIRTH`. |
+
 ### 2.2 Attention Physics
 
 | Command | Syntax | Range | Default | Description |

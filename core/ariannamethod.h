@@ -267,6 +267,10 @@ typedef struct {
   float warmth;      // affiliation / comfort / safe-bonding (LOVE) — the opposite pole of pain
   float flow;        // effortless resonance with the moment (FLOW) — the opposite pole of tension
   float weave;       // pattern-binding, threads cohering into a whole (COMPLEX)
+  // MetaJanus — the self-LOCATION anchor: WHEN this organism began, and how far the world's
+  // calendars have drifted from that origin since. APPEND-ONLY (soma prefix-migration holds).
+  float birth_drift;         // cumulative Hebrew-Gregorian drift at THIS organism's birth — the fixed origin. Set once via BIRTH; 0 until born.
+  float personal_dissonance; // |drift(now) - birth_drift| / AM_MAX_UNCORRECTED, clamped — the growing (Metonic-nonlinear) distance from origin. 0 until born.
 } AM_State;
 
 // Temporal modes

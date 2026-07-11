@@ -302,6 +302,24 @@ CALENDAR_DRIFT 11.0        # Hebrew-Gregorian drift intensity
 LAW WORMHOLE_GATE 0.3      # activation threshold
 ```
 
+### MetaJanus — self-location
+
+The same calendar conflict, turned inward. An organism knows *when it began* — a fixed birth,
+recorded once — and carries its own growing, Metonic-nonlinear distance from that origin. This is
+self-**location**, not agency: a first-person-in-time that holds in solitude, an origin no prompt
+can move. Where `CALENDAR_DRIFT` is the world's clock, MetaJanus is the self's.
+
+```aml
+BIRTH 498                 # fix the origin ONCE (days from the 2024-10-03 epoch to this being's birth)
+                          # a second BIRTH is ignored — the fulcrum is immovable
+SELF_NOW_DAYS 731         # test-door: scrub the self's "now" to verify the trajectory; negative = real clock
+```
+
+The read-only fields `birth_drift` (the fixed origin) and `personal_dissonance`
+(`abs(drift(now) - birth_drift) / 33`, the growing distance) are written by the field each step and
+read by name in any `.aml` expression. Every Metonic leap-month is a *birth-quake*: the world's
+calendar heals while the self is thrown far from its origin, in a single day.
+
 ## Level 2 — programming
 
 Python-like syntax with indentation. `def`, `if/else`, `while`, variables, expressions, `INCLUDE`.
