@@ -236,6 +236,9 @@ static int clampi(int x, int a, int b) {
 static const int g_metonic_leap_years[7] = {3, 6, 8, 11, 14, 17, 19};
 static time_t g_epoch_t = 0;
 static int g_calendar_manual = 0;  // 0 = real time, 1 = manual override
+static int g_birth_set = 0;        // MetaJanus: 1 once BIRTH has fixed the origin; personal_dissonance stays 0 until then
+static int g_self_now_manual = 0;  // MetaJanus test-door: 1 = pd's "now" is scrubbed to g_self_now_days (SELF_NOW_DAYS); 0 = real clock
+static int g_self_now_days = 0;     // scrubbed self-now (days since epoch) when g_self_now_manual
 
 static void calendar_init(void) {
     struct tm epoch_tm;
@@ -635,6 +638,12 @@ void am_init(void) {
 
   // real calendar
   calendar_init();
+  // MetaJanus: a fresh kernel has no origin yet — unborn until BIRTH declares it.
+  g_birth_set = 0;
+  g_self_now_manual = 0;
+  g_self_now_days = 0;
+  G.birth_drift = 0.0f;
+  G.personal_dissonance = 0.0f;
 
   // 4.C MLP controller
   am_4c_init_weights();
@@ -1067,6 +1076,8 @@ static const AML_FieldMap g_field_map[] = {
     FIELD_F("destiny",           destiny),
     FIELD_F("wormhole",          wormhole),
     FIELD_F("calendar_drift",    calendar_drift),
+    FIELD_F("birth_drift",       birth_drift),
+    FIELD_F("personal_dissonance", personal_dissonance),
     FIELD_F("attend_focus",      attend_focus),
     FIELD_F("attend_spread",     attend_spread),
     FIELD_F("tunnel_threshold",  tunnel_threshold),
@@ -3580,6 +3591,24 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
     }
     else if (!strcmp(t, "CALENDAR_DRIFT")) {
       G.calendar_drift = clampf(ctx_float(ctx, arg), 0.0f, 30.0f);
+    }
+    else if (!strcmp(t, "BIRTH")) {
+      // MetaJanus: fix the origin ONCE. arg = days from the calendar epoch to this organism's
+      // birth. birth_drift = cumulative Hebrew-Gregorian drift at that day — the immutable fact
+      // of WHEN it began. The fulcrum cannot be moved: a second BIRTH is ignored, so no prompt
+      // (/aml BIRTH from the REPL) can drag the origin. Self-LOCATION, not agency.
+      if (!g_birth_set) {
+        G.birth_drift = calendar_cumulative_drift((int)ctx_float(ctx, arg));
+        g_birth_set = 1;
+      }
+    }
+    else if (!strcmp(t, "SELF_NOW_DAYS")) {
+      // MetaJanus test-door: scrub the SELF clock (pd's "now") WITHOUT touching the world
+      // calendar, so the pd trajectory (birth-quakes, drift-anniversaries) can be verified. It
+      // moves NOW, never the origin (birth_drift stays latched). A negative arg = back to real clock.
+      int d = (int)ctx_float(ctx, arg);
+      if (d < 0) { g_self_now_manual = 0; }
+      else { g_self_now_days = d; g_self_now_manual = 1; }
     }
 
     // ATTENTION PHYSICS
@@ -7912,6 +7941,18 @@ void am_step(float dt) {
     // Manual override via LAW CALENDAR_PHASE — for testing or AML scripts
     cal_dissonance = (G.calendar_drift > 0.0f)
         ? clamp01(G.calendar_phase / G.calendar_drift)
+        : 0.0f;
+  }
+
+  // MetaJanus: the self's growing distance from its own origin (self-LOCATION). pd reads the
+  // SELF clock — the REAL date (or a test-scrubbed SELF_NOW_DAYS), never the world's manual
+  // calendar scale (you may simulate the world, but not your own age). A pure function of the
+  // two dates — no prompt moves it. 0 until BIRTH sets the origin.
+  {
+    int mj_days = g_self_now_manual ? g_self_now_days : calendar_days_since_epoch();
+    float mj_now_drift = calendar_cumulative_drift(mj_days);
+    G.personal_dissonance = g_birth_set
+        ? clamp01(fabsf(mj_now_drift - G.birth_drift) / AM_MAX_UNCORRECTED)
         : 0.0f;
   }
 
