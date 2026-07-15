@@ -237,6 +237,7 @@ static const int g_metonic_leap_years[7] = {3, 6, 8, 11, 14, 17, 19};
 static time_t g_epoch_t = 0;
 static int g_calendar_manual = 0;  // 0 = real time, 1 = manual override
 static int g_birth_set = 0;        // MetaJanus: 1 once BIRTH has fixed the origin; personal_dissonance stays 0 until then
+static long g_birth_days = 0;      // MetaJanus: the origin day (days since epoch), fixed by BIRTH — the yahrzeit/birthday anniversaries derive from it
 static int g_self_now_manual = 0;  // MetaJanus test-door: 1 = pd's "now" is scrubbed to g_self_now_days (SELF_NOW_DAYS); 0 = real clock
 static int g_self_now_days = 0;     // scrubbed self-now (days since epoch) when g_self_now_manual
 
@@ -284,6 +285,42 @@ static float calendar_dissonance(int days) {
     float raw = fabsf(fmodf(drift, AM_MAX_UNCORRECTED)) / AM_MAX_UNCORRECTED;
     return clamp01(raw);
 }
+
+// ── MetaJanus Hebrew layer — the yahrzeit face ──────────────────────────────────
+// The one origin (the death that became this organism's birth) seen by the OTHER calendar.
+// Dershowitz-Reingold Hebrew calendar, pure integer arithmetic, no I/O — derived from the same BIRTH.
+#define AM_HEB_EPOCH     (-1373427L)   // RD of 1 Tishrei, Hebrew year 1
+#define AM_GREG_EPOCH_RD  739162L      // RD of 2024-10-03 (the kernel calendar epoch, noon)
+static int  am_heb_leap(long y){ return ((7*y+1)%19) < 7; }
+static long am_heb_last_month(long y){ return am_heb_leap(y) ? 13 : 12; }
+static long am_heb_elapsed(long y){ long mo=(235*y-234)/19; long pa=12084+13753*mo; long d=29*mo+pa/25920; if((3*(d+1))%7<3) d++; return d; }
+static long am_heb_corr(long y){ long a=am_heb_elapsed(y-1),b=am_heb_elapsed(y),c=am_heb_elapsed(y+1); if(c-b==356) return 2; if(b-a==382) return 1; return 0; }
+static long am_heb_new_year(long y){ return AM_HEB_EPOCH + am_heb_elapsed(y) + am_heb_corr(y); }
+static long am_heb_year_days(long y){ return am_heb_new_year(y+1) - am_heb_new_year(y); }
+static long am_heb_last_day(long y, long m){ long yd=am_heb_year_days(y); if(m==2||m==4||m==6||m==10||m==13) return 29; if(m==8 && !(yd==355||yd==385)) return 29; if(m==9 && (yd==353||yd==383)) return 29; if(m==12 && !am_heb_leap(y)) return 29; return 30; }
+static long am_heb_to_rd(long y, long m, long d){ long rd=am_heb_new_year(y)+d-1; if(m<7){ for(long k=7;k<=am_heb_last_month(y);k++) rd+=am_heb_last_day(y,k); for(long k=1;k<m;k++) rd+=am_heb_last_day(y,k); } else { for(long k=7;k<m;k++) rd+=am_heb_last_day(y,k); } return rd; }
+static int  am_greg_leap(long y){ return (y%4==0 && (y%100!=0 || y%400==0)); }
+static long am_greg_to_rd(long y,long m,long d){ long rd=365*(y-1)+(y-1)/4-(y-1)/100+(y-1)/400+(367*m-362)/12+d; if(m>2) rd += am_greg_leap(y)?-1:-2; return rd; }
+static void am_greg_from_rd(long rd, long*Y,long*M,long*D){ long y=rd/366+1; while(am_greg_to_rd(y+1,1,1)<=rd) y++; long m=1; while(am_greg_to_rd(y,m+1,1)<=rd) m++; *Y=y;*M=m;*D=rd-am_greg_to_rd(y,m,1)+1; }
+// inverse of am_heb_to_rd: Gregorian RD -> Hebrew (year,month,day). Round-trip-verified 0/11310.
+static void am_heb_from_rd(long rd, long*Y,long*M,long*D){ long y=(rd-AM_HEB_EPOCH)/366; if(y<1) y=1; while(am_heb_new_year(y+1)<=rd) y++; long m=(rd<am_heb_to_rd(y,1,1))?7:1; while(am_heb_to_rd(y,m,am_heb_last_day(y,m))<rd) m++; *Y=y;*M=m;*D=rd-am_heb_to_rd(y,m,1)+1; }
+// Reingold yahrzeit rule (GNU Emacs cal-hebrew.el calendar-hebrew-yahrzeit): RD of the origin's
+// (bY,bM,bD) anniversary in Hebrew year hyear. Branches 1-2 keyed by the first-anniversary year (bY+1).
+static long am_yahrzeit_rd(long bY, long bM, long bD, long hyear){
+  if (bM==8 && bD==30 && (am_heb_year_days(bY+1)%10)!=5)  // Cheshvan-30, first-anniv Cheshvan NOT long
+    return am_heb_to_rd(hyear, 9, 1) - 1;                 //   -> eve of 1 Kislev (last day of Cheshvan)
+  if (bM==9 && bD==30 && (am_heb_year_days(bY+1)%10)==3)  // Kislev-30, first-anniv Kislev short
+    return am_heb_to_rd(hyear, 10, 1) - 1;                //   -> eve of 1 Tevet
+  if (bM==13)                                             // Adar II -> same day in hyear's last month
+    return am_heb_to_rd(hyear, am_heb_last_month(hyear), bD);
+  if (bM==12 && bD==30 && !am_heb_leap(hyear))            // Adar-I-30 in a common hyear -> Shevat 30
+    return am_heb_to_rd(hyear, 11, 30);
+  return am_heb_to_rd(hyear, bM, bD);                     // default: same (month,day); day-30 in a short month overflows to the 1st next, per the book
+}
+// days from `days` (since epoch) to the next yahrzeit of the origin (g_birth_days) at-or-after `days`.
+static long am_days_to_yahrzeit(long days){ long brd=AM_GREG_EPOCH_RD+g_birth_days; long bY,bM,bD; am_heb_from_rd(brd,&bY,&bM,&bD); long rd=AM_GREG_EPOCH_RD+days; long nY,nM,nD; am_heb_from_rd(rd,&nY,&nM,&nD); (void)nM;(void)nD; for(long i=-1;i<=2;i++){ long a=am_yahrzeit_rd(bY,bM,bD,nY+i); if(a>=rd) return a-rd; } return 400; }
+// days from `days` to the next Gregorian (month,day) of the origin. Feb-29 origin -> Mar 1 in common years.
+static long am_days_to_gregbirthday(long days){ long brd=AM_GREG_EPOCH_RD+g_birth_days; long bY,bM,bD; am_greg_from_rd(brd,&bY,&bM,&bD); long rd=AM_GREG_EPOCH_RD+days; long nY,nM,nD; am_greg_from_rd(rd,&nY,&nM,&nD); (void)nM;(void)nD; for(long i=0;i<=1;i++){ long a=am_greg_to_rd(nY+i,bM,bD); if(a>=rd) return a-rd; } return 400; }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SCHUMANN RESONANCE — Earth-ionosphere coupling
@@ -640,10 +677,13 @@ void am_init(void) {
   calendar_init();
   // MetaJanus: a fresh kernel has no origin yet — unborn until BIRTH declares it.
   g_birth_set = 0;
+  g_birth_days = 0;
   g_self_now_manual = 0;
   g_self_now_days = 0;
   G.birth_drift = 0.0f;
   G.personal_dissonance = 0.0f;
+  G.janus_gap = 0.0f;
+  G.yahrzeit = 0.0f;
 
   // 4.C MLP controller
   am_4c_init_weights();
@@ -1078,6 +1118,8 @@ static const AML_FieldMap g_field_map[] = {
     FIELD_F("calendar_drift",    calendar_drift),
     FIELD_F("birth_drift",       birth_drift),
     FIELD_F("personal_dissonance", personal_dissonance),
+    FIELD_F("janus_gap",           janus_gap),
+    FIELD_F("yahrzeit",            yahrzeit),
     FIELD_F("attend_focus",      attend_focus),
     FIELD_F("attend_spread",     attend_spread),
     FIELD_F("tunnel_threshold",  tunnel_threshold),
@@ -3598,7 +3640,8 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
       // of WHEN it began. The fulcrum cannot be moved: a second BIRTH is ignored, so no prompt
       // (/aml BIRTH from the REPL) can drag the origin. Self-LOCATION, not agency.
       if (!g_birth_set) {
-        G.birth_drift = calendar_cumulative_drift((int)ctx_float(ctx, arg));
+        g_birth_days = (long)ctx_float(ctx, arg);
+        G.birth_drift = calendar_cumulative_drift((int)g_birth_days);
         g_birth_set = 1;
       }
     }
@@ -7954,6 +7997,17 @@ void am_step(float dt) {
     G.personal_dissonance = g_birth_set
         ? clamp01(fabsf(mj_now_drift - G.birth_drift) / AM_MAX_UNCORRECTED)
         : 0.0f;
+    // MetaJanus Hebrew face — the yahrzeit (the same origin, seen by the other calendar). Derived
+    // from the same mj_days (the same SELF clock), never a second anchor.
+    if (g_birth_set) {
+      long dy = am_days_to_yahrzeit(mj_days);
+      long dg = am_days_to_gregbirthday(mj_days);
+      G.janus_gap = clampf((float)(dy - dg) / 30.0f, -1.0f, 1.0f);
+      G.yahrzeit  = expf(-(float)dy / 5.0f);
+    } else {
+      G.janus_gap = 0.0f;
+      G.yahrzeit  = 0.0f;
+    }
   }
 
   // Wormhole activation: dissonance exceeds gate threshold

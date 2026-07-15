@@ -271,6 +271,9 @@ typedef struct {
   // calendars have drifted from that origin since. APPEND-ONLY (soma prefix-migration holds).
   float birth_drift;         // cumulative Hebrew-Gregorian drift at THIS organism's birth — the fixed origin. Set once via BIRTH; 0 until born.
   float personal_dissonance; // |drift(now) - birth_drift| / AM_MAX_UNCORRECTED, clamped — the growing (Metonic-nonlinear) distance from origin. 0 until born.
+  // MetaJanus Hebrew face — the same origin seen by the OTHER calendar (the yahrzeit). Derived from the one BIRTH.
+  float janus_gap;           // (days to next Hebrew yahrzeit − days to next Gregorian birthday)/30, clamped [-1,1] — the saw of two calendars on one origin. 0 until born.
+  float yahrzeit;            // exp(-days_to_next_yahrzeit / 5) — closeness pulse to the death-anniversary of the origin, as field. 0 until born.
 } AM_State;
 
 // Temporal modes
