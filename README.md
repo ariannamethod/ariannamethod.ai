@@ -313,6 +313,7 @@ can move. Where `CALENDAR_DRIFT` is the world's clock, MetaJanus is the self's.
 BIRTH 498                 # fix the origin ONCE (days from the 2024-10-03 epoch to this being's birth)
                           # a second BIRTH is ignored — the fulcrum is immovable
 SELF_NOW_DAYS 731         # test-door: scrub the self's "now" to verify the trajectory; negative = real clock
+JANUS_KEY 1               # arm the first temporal key: janus_gap's sign EMA-pulls temporal_alpha (default off)
 ```
 
 The read-only fields `birth_drift` (the fixed origin) and `personal_dissonance`

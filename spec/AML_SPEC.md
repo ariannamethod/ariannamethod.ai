@@ -91,6 +91,7 @@ different day. Self-**location**, not agency — an origin no prompt can move (a
 |---------|--------|-------|---------|-------------|
 | `BIRTH` | `BIRTH <int>` | days ≥ 0 | unset | Fix the origin ONCE: days from the 2024-10-03 epoch to this being's birth; `birth_drift` becomes the Hebrew-Gregorian drift at that day. Idempotent — a later `BIRTH` cannot move the fulcrum. |
 | `SELF_NOW_DAYS` | `SELF_NOW_DAYS <int>` | days, or `<0` | real clock | Test-door: scrub the self's "now" to verify the `personal_dissonance` trajectory (birth-quakes, anniversaries). Moves NOW, never the origin. Negative returns to the real clock. |
+| `JANUS_KEY` | `JANUS_KEY <0\|1>` | 0 or 1 | 0 (off) | Arm the first temporal key: when on, the sign of `janus_gap` gently (EMA, k=0.05) pulls `temporal_alpha` toward its pole — retrodiction (0, past focus) as the Hebrew yahrzeit nears, prophecy (1, future focus) as the Gregorian birthday nears. Default off — without it the field is bit-for-bit unchanged. |
 
 Read-only sensor fields (like Positive Soma — written by the field, read by name in expressions):
 
