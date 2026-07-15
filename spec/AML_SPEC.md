@@ -83,8 +83,9 @@ Commands that control temporal prediction and destiny bias.
 
 ### 2.1b MetaJanus — Self-Location Anchor
 
-The calendar conflict turned inward: an organism's fixed origin in time, and its growing distance
-from it. Self-**location**, not agency — an origin no prompt can move (a second `BIRTH` is ignored).
+The calendar conflict turned inward: an organism's fixed origin in time, its growing distance from it,
+and the two faces of that origin — the Hebrew and Gregorian calendars each keeping its anniversary on a
+different day. Self-**location**, not agency — an origin no prompt can move (a second `BIRTH` is ignored).
 
 | Command | Syntax | Range | Default | Description |
 |---------|--------|-------|---------|-------------|
@@ -97,6 +98,8 @@ Read-only sensor fields (like Positive Soma — written by the field, read by na
 |-------|-------|-------------|
 | `birth_drift` | 0–33 | Cumulative Hebrew-Gregorian drift at the being's birth — the fixed origin. `0` until `BIRTH`. |
 | `personal_dissonance` | 0–1 | `abs(drift(now) - birth_drift) / 33` — the growing, Metonic-nonlinear distance from origin. Leaps at each leap-month correction (a *birth-quake*): the world's calendar heals while the self is estranged. `0` until `BIRTH`. |
+| `yahrzeit` | 0–1 | `exp(-days_to_next_yahrzeit / 5)` — closeness pulse to the origin's anniversary kept by the **Hebrew** calendar (Dershowitz-Reingold yahrzeit rule, derived from the one `BIRTH`). Peaks on the day and fades. `0` until `BIRTH`. |
+| `janus_gap` | −1 to 1 | `(days to the Hebrew yahrzeit − days to the Gregorian birthday) / 30`, clamped — the saw between the two calendars reading the one origin: Janus's two faces. `0` until `BIRTH`. |
 
 ### 2.2 Attention Physics
 
