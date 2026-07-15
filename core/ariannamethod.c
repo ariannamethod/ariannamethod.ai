@@ -240,16 +240,14 @@ static int g_birth_set = 0;        // MetaJanus: 1 once BIRTH has fixed the orig
 static long g_birth_days = 0;      // MetaJanus: the origin day (days since epoch), fixed by BIRTH — the yahrzeit/birthday anniversaries derive from it
 static int g_self_now_manual = 0;  // MetaJanus test-door: 1 = pd's "now" is scrubbed to g_self_now_days (SELF_NOW_DAYS); 0 = real clock
 static int g_self_now_days = 0;     // scrubbed self-now (days since epoch) when g_self_now_manual
-static int g_temporal_key_on = 0;   // MetaJanus D-1: 1 = janus_gap EMA-pulls temporal_alpha (JANUS_KEY); 0 = knob untouched (default)
+static int g_temporal_key_on = 0;   // MetaJanus: 1 = JANUS_KEY armed → D-2 acts on janus_temporal_alpha (HIGH-1 consumer gate); 0 = disarmed → D-2 reads neutral 0.5 (default)
 
 static void calendar_init(void) {
-    struct tm epoch_tm;
-    memset(&epoch_tm, 0, sizeof(epoch_tm));
-    epoch_tm.tm_year = 2024 - 1900;
-    epoch_tm.tm_mon  = 10 - 1;       // October
-    epoch_tm.tm_mday = 3;
-    epoch_tm.tm_hour = 12;           // noon — avoids DST edge cases
-    g_epoch_t = mktime(&epoch_tm);
+    // MED-1 (Sol fix): the calendar epoch is a FIXED UTC instant — 2024-10-03 12:00:00 UTC = 1727956800
+    // seconds since the Unix epoch — set as a constant, without local mktime/timegm, so it is independent
+    // of the host timezone/DST. (mktime read "2024-10-03 12:00" in LOCAL time, so different hosts computed
+    // a different epoch and could disagree on the self-day at a day boundary.) Noon avoids DST edge cases.
+    g_epoch_t = (time_t)1727956800L;
     g_calendar_manual = 0;
 }
 
@@ -686,6 +684,7 @@ void am_init(void) {
   G.personal_dissonance = 0.0f;
   G.janus_gap = 0.0f;
   G.yahrzeit = 0.0f;
+  G.janus_temporal_alpha = 0.5f;
 
   // 4.C MLP controller
   am_4c_init_weights();
@@ -990,13 +989,19 @@ int am_field_load(const char* path) {
   if (fread(&timestamp, 8, 1, f) != 1) {
     fclose(f); return -5;
   }
-  memset(&G, 0, AM_SOMA_PERSIST_SZ);   /* zero only field weather; the MetaJanus identity tail (the origin) is left intact, so LOAD never drags it */
-  if (fread(&G, state_sz, 1, f) != 1) {
-    fprintf(stderr, "[am_field_load] '%s': short read of state\n", path);
+  /* MED-2 (Sol fix): read the payload into a temp buffer and validate it is COMPLETE before touching the
+   * live field. A truncated / short read must not zero the live weather — the load is transactional: commit
+   * to G only after a full read succeeds. The buffer is zeroed first, so an unread trailing prefix is
+   * honestly zero (prefix-load, A-1); the MetaJanus identity tail beyond PERSIST_SZ is never touched. */
+  unsigned char buf[AM_SOMA_PERSIST_SZ];
+  memset(buf, 0, AM_SOMA_PERSIST_SZ);
+  if (fread(buf, state_sz, 1, f) != 1) {
+    fprintf(stderr, "[am_field_load] '%s': short read of state (truncated soma) — refusing, live field intact\n", path);
     fclose(f);
     return -5;
   }
   fclose(f);
+  memcpy(&G, buf, AM_SOMA_PERSIST_SZ);   /* atomic commit of the validated field-weather prefix */
   return 0;
 }
 
@@ -1126,6 +1131,7 @@ static const AML_FieldMap g_field_map[] = {
     FIELD_F("personal_dissonance", personal_dissonance),
     FIELD_F("janus_gap",           janus_gap),
     FIELD_F("yahrzeit",            yahrzeit),
+    FIELD_F("janus_temporal_alpha", janus_temporal_alpha),
     FIELD_F("attend_focus",      attend_focus),
     FIELD_F("attend_spread",     attend_spread),
     FIELD_F("tunnel_threshold",  tunnel_threshold),
@@ -3660,9 +3666,10 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
       else { g_self_now_days = d; g_self_now_manual = 1; }
     }
     else if (!strcmp(t, "JANUS_KEY")) {
-      // MetaJanus D-1: switch the janus_gap -> temporal_alpha EMA pull ON/OFF. Default OFF, so
-      // without this line behavior is bit-for-bit current. temporal_alpha is write-only across the
-      // repo (no readers), so arming this is inert until a later stage wires temporal_alpha to a process.
+      // MetaJanus: arm/disarm the Janus temporal key. Armed, D-2 acts on the calendar-derived
+      // janus_temporal_alpha (HIGH-2), leaning the inner seed harvest — a first INDIRECT speech influence
+      // via limpha recall (HIGH-3), receipted, not inert. Default OFF is bit-for-bit current (D-2 reads the
+      // neutral 0.5, HIGH-1); the generic temporal_alpha is never touched by Janus.
       g_temporal_key_on = (ctx_float(ctx, arg) != 0.0f) ? 1 : 0;
     }
 
@@ -6848,6 +6855,29 @@ AM_State* am_get_state(void) {
   return &G;
 }
 
+// MetaJanus HIGH-1: expose whether the Janus temporal key is armed, so a consumer (D-2) can gate on
+// arming rather than trusting the shared temporal_alpha — which JANUS_KEY 0 freezes off-center and
+// which legacy TEMPORAL_* directives also write. Read-only signal; it does not reset temporal_alpha.
+int am_janus_key_armed(void) {
+  return g_temporal_key_on;
+}
+
+// MED-1: expose the calendar epoch as absolute UTC seconds, so a host can attest its clock domain
+// (the fixed 2024-10-03 12:00 UTC = 1727956800, independent of local timezone/DST).
+long am_calendar_epoch_seconds(void) {
+  return (long)g_epoch_t;
+}
+
+// MED-3: attest the origin — whether BIRTH has fixed it (g_birth_set is the born-flag, not birth_drift,
+// which is not injective — BIRTH 0 is a legit origin with drift 0) and the exact origin day. So a running
+// host can prove "born at day N", and the dock can require a real BIRTH rather than trusting a mere load.
+int am_birth_set(void) {
+  return g_birth_set;
+}
+long am_birth_epoch_days(void) {
+  return g_birth_days;
+}
+
 int am_take_jump(void) {
   int j = G.pending_jump;
   G.pending_jump = 0;
@@ -7984,10 +8014,14 @@ void am_step(float dt) {
   // From pitomadom: TE(Calendar → N) = 0.31 bits — strongest causal effect.
   // ─────────────────────────────────────────────────────────────────────────────
 
+  // MED-1 (Sol fix): sample the civil day ONCE per step, so the world calendar and the MetaJanus
+  // self-clock cannot straddle a day boundary within one am_step (each previously read time(NULL) apart).
+  int now_days = calendar_days_since_epoch();
+
   float cal_dissonance;
   if (!g_calendar_manual) {
     // Real date: seconds since epoch → days → drift → dissonance
-    int days = calendar_days_since_epoch();
+    int days = now_days;
     float drift = calendar_cumulative_drift(days);
     cal_dissonance = calendar_dissonance(days);
     // Store phase for state access: uncorrected position within cycle
@@ -8004,7 +8038,7 @@ void am_step(float dt) {
   // calendar scale (you may simulate the world, but not your own age). A pure function of the
   // two dates — no prompt moves it. 0 until BIRTH sets the origin.
   {
-    int mj_days = g_self_now_manual ? g_self_now_days : calendar_days_since_epoch();
+    int mj_days = g_self_now_manual ? g_self_now_days : now_days;
     float mj_now_drift = calendar_cumulative_drift(mj_days);
     G.personal_dissonance = g_birth_set
         ? clamp01(fabsf(mj_now_drift - G.birth_drift) / AM_MAX_UNCORRECTED)
@@ -8016,18 +8050,16 @@ void am_step(float dt) {
       long dg = am_days_to_gregbirthday(mj_days);
       G.janus_gap = clampf((float)(dy - dg) / 30.0f, -1.0f, 1.0f);
       G.yahrzeit  = expf(-(float)dy / 5.0f);
-      // MetaJanus D-1: the first key, OFF by default (JANUS_KEY 1 to arm). Armed, the janus_gap sign
-      // EMA-pulls temporal_alpha toward its pole — gap<0 (yahrzeit nearer) -> 0 retrodiction, gap>0
-      // (Gregorian nearer) -> 1 prophecy, gap==0 (origin day) -> 0.5 equilibrium. A gentle pull
-      // (k=0.05), not a hard write, so it rides alongside the TEMPORAL_* directive-setters instead of
-      // trampling them. temporal_alpha has no readers yet (D-0), so this stays inert until a wire.
-      if (g_temporal_key_on) {
-        float target = (G.janus_gap < 0.0f) ? 0.0f : ((G.janus_gap > 0.0f) ? 1.0f : 0.5f);
-        G.temporal_alpha += 0.05f * (target - G.temporal_alpha);
-      }
+      // MetaJanus HIGH-2 (Sol fix): the Janus temporal signal is a PURE function of the calendar gap,
+      // not a per-tick EMA — model-external and deterministic per date, independent of am_step count,
+      // traffic and replay. gap<0 (yahrzeit nearer) -> retrodiction (<0.5); gap>0 (Gregorian nearer) ->
+      // prophecy (>0.5); gap==0 -> 0.5. D-2 gates on JANUS_KEY at the consumer (am_janus_key_armed);
+      // the generic temporal_alpha is left entirely to its own TEMPORAL_* directives.
+      G.janus_temporal_alpha = clamp01(0.5f + 0.5f * G.janus_gap);
     } else {
       G.janus_gap = 0.0f;
       G.yahrzeit  = 0.0f;
+      G.janus_temporal_alpha = 0.5f;
     }
   }
 

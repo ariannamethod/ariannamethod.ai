@@ -274,6 +274,7 @@ typedef struct {
   // MetaJanus Hebrew face — the same origin seen by the OTHER calendar (the yahrzeit). Derived from the one BIRTH.
   float janus_gap;           // (days to next Hebrew yahrzeit − days to next Gregorian birthday)/30, clamped [-1,1] — the saw of two calendars on one origin. 0 until born.
   float yahrzeit;            // exp(-days_to_next_yahrzeit / 5) — closeness pulse to the death-anniversary of the origin, as field. 0 until born.
+  float janus_temporal_alpha; // HIGH-2: clamp01(0.5 + 0.5*janus_gap) — a PURE calendar function, model-external and deterministic per date (NOT a per-tick EMA). D-2 reads this (gated on JANUS_KEY); the generic temporal_alpha keeps its own directives. 0.5 until born.
 } AM_State;
 
 // Temporal modes
@@ -406,6 +407,10 @@ const char* am_get_error(void);
 
 // State access
 AM_State* am_get_state(void);
+int am_janus_key_armed(void);   // MetaJanus HIGH-1: 1 if JANUS_KEY is armed (D-2 gates on this, not raw temporal_alpha)
+long am_calendar_epoch_seconds(void); // MED-1: calendar epoch as absolute UTC seconds (fixed 1727956800, host-TZ-independent)
+int am_birth_set(void);          // MED-3: 1 if BIRTH has fixed the origin (the born-flag; birth_drift is not injective)
+long am_birth_epoch_days(void);  // MED-3: the exact origin day set by BIRTH (attests "born at day N")
 int am_take_jump(void);
 
 // Copy state to float array (32 floats)
