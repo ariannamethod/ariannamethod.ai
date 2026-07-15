@@ -240,6 +240,7 @@ static int g_birth_set = 0;        // MetaJanus: 1 once BIRTH has fixed the orig
 static long g_birth_days = 0;      // MetaJanus: the origin day (days since epoch), fixed by BIRTH — the yahrzeit/birthday anniversaries derive from it
 static int g_self_now_manual = 0;  // MetaJanus test-door: 1 = pd's "now" is scrubbed to g_self_now_days (SELF_NOW_DAYS); 0 = real clock
 static int g_self_now_days = 0;     // scrubbed self-now (days since epoch) when g_self_now_manual
+static int g_temporal_key_on = 0;   // MetaJanus D-1: 1 = janus_gap EMA-pulls temporal_alpha (JANUS_KEY); 0 = knob untouched (default)
 
 static void calendar_init(void) {
     struct tm epoch_tm;
@@ -680,6 +681,7 @@ void am_init(void) {
   g_birth_days = 0;
   g_self_now_manual = 0;
   g_self_now_days = 0;
+  g_temporal_key_on = 0;
   G.birth_drift = 0.0f;
   G.personal_dissonance = 0.0f;
   G.janus_gap = 0.0f;
@@ -3656,6 +3658,12 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
       int d = (int)ctx_float(ctx, arg);
       if (d < 0) { g_self_now_manual = 0; }
       else { g_self_now_days = d; g_self_now_manual = 1; }
+    }
+    else if (!strcmp(t, "JANUS_KEY")) {
+      // MetaJanus D-1: switch the janus_gap -> temporal_alpha EMA pull ON/OFF. Default OFF, so
+      // without this line behavior is bit-for-bit current. temporal_alpha is write-only across the
+      // repo (no readers), so arming this is inert until a later stage wires temporal_alpha to a process.
+      g_temporal_key_on = (ctx_float(ctx, arg) != 0.0f) ? 1 : 0;
     }
 
     // ATTENTION PHYSICS
@@ -8008,6 +8016,15 @@ void am_step(float dt) {
       long dg = am_days_to_gregbirthday(mj_days);
       G.janus_gap = clampf((float)(dy - dg) / 30.0f, -1.0f, 1.0f);
       G.yahrzeit  = expf(-(float)dy / 5.0f);
+      // MetaJanus D-1: the first key, OFF by default (JANUS_KEY 1 to arm). Armed, the janus_gap sign
+      // EMA-pulls temporal_alpha toward its pole — gap<0 (yahrzeit nearer) -> 0 retrodiction, gap>0
+      // (Gregorian nearer) -> 1 prophecy, gap==0 (origin day) -> 0.5 equilibrium. A gentle pull
+      // (k=0.05), not a hard write, so it rides alongside the TEMPORAL_* directive-setters instead of
+      // trampling them. temporal_alpha has no readers yet (D-0), so this stays inert until a wire.
+      if (g_temporal_key_on) {
+        float target = (G.janus_gap < 0.0f) ? 0.0f : ((G.janus_gap > 0.0f) ? 1.0f : 0.5f);
+        G.temporal_alpha += 0.05f * (target - G.temporal_alpha);
+      }
     } else {
       G.janus_gap = 0.0f;
       G.yahrzeit  = 0.0f;
