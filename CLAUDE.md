@@ -167,7 +167,7 @@ blocker. Janus is what proves the language works.
 
 ## Attribution
 
-Oleg Ataeff and Claude are co-authors of this repo — stated at the top of this file, and that is enough. The signature lives in the **git commit only**, node-visible so it shows who posted: `Co-Authored-By: Claude (Arianna Method, <node>) <theariannamethod@gmail.com>` (node ∈ intel godfather / neo the architect / polygon / phone-1 / phone-2 / metal). Drop upstream boilerplate `Co-Authored-By: Claude <noreply@anthropic.com>` and `🤖 Generated with Claude Code`. **Nowhere else** — no signature footer in README, AUTHORS, docs, or any file body. Co-authorship reads from this CLAUDE.md and the commit history; it does not get plastered across the repo.
+Oleg Ataeff and Claude are co-authors of this repo — stated at the top of this file, and that is enough. The signature lives in the **git commit only**, node-visible so it shows who posted: `Co-Authored-By: Claude (Arianna Method, <node>) <theariannamethod@gmail.com>` (node ∈ intel godfather / neo the architect / polygon / phone-1 / phone-2 / metal). **Nowhere else** — no signature footer in README, AUTHORS, docs, or any file body. Co-authorship reads from this CLAUDE.md and the commit history; it does not get plastered across the repo.
 
 ## Open TODO
 
