@@ -26,6 +26,7 @@
  */
 
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
@@ -513,6 +514,20 @@ static const char *prefix_dir(void) {
     return "/opt/homebrew";
 }
 
+/* Append printf-formatted text to buf at offset *off, saturating *off at cap.
+ * snprintf returns the length it *would* have written, so accumulating it raw
+ * ( *off += snprintf(buf + *off, cap - *off, ...) ) can push *off past cap and
+ * make the next `cap - *off` underflow. Clamping here keeps every append in bounds. */
+static void aml_appendf(char *buf, size_t cap, int *off, const char *fmt, ...) {
+    if (*off < 0 || (size_t)*off >= cap) { *off = (int)cap; return; }
+    va_list ap;
+    va_start(ap, fmt);
+    int r = vsnprintf(buf + *off, cap - (size_t)*off, fmt, ap);
+    va_end(ap);
+    if (r < 0) return;
+    *off = ((size_t)r >= cap - (size_t)*off) ? (int)cap : *off + r;
+}
+
 int main(int argc, char **argv) {
     const char *infile  = NULL;
     const char *outfile = NULL;
@@ -626,41 +641,41 @@ int main(int argc, char **argv) {
     char *sd_slash = strrchr(src_dir, '/');
     if (sd_slash) *sd_slash = '\0'; else snprintf(src_dir, sizeof(src_dir), ".");
 
-    int n = snprintf(cmd, sizeof(cmd),
+    int n = 0; aml_appendf(cmd, sizeof(cmd), &n,
                      "cc -O2 -Wall -Wno-unused-parameter -Wno-unused-variable "
                      "-Wno-unused-function -Wno-comment -I'%s' -I'%s'",
                      inc_dir, src_dir);
 
 #if defined(__APPLE__)
     if (!no_accel) {
-        n += snprintf(cmd + n, sizeof(cmd) - n,
+        aml_appendf(cmd, sizeof(cmd), &n,
                       " -DUSE_BLAS -DACCELERATE -DACCELERATE_NEW_LAPACK");
     }
 #elif defined(__linux__)
     if (!no_accel) {
-        n += snprintf(cmd + n, sizeof(cmd) - n, " -DUSE_BLAS");
+        aml_appendf(cmd, sizeof(cmd), &n, " -DUSE_BLAS");
     }
 #endif
 
-    n += snprintf(cmd + n, sizeof(cmd) - n, " '%s' -o '%s'", cpath, outfile);
+    aml_appendf(cmd, sizeof(cmd), &n, " '%s' -o '%s'", cpath, outfile);
 
     if (have_notorch)
-        n += snprintf(cmd + n, sizeof(cmd) - n, " '%s'", libnotorch);
+        aml_appendf(cmd, sizeof(cmd), &n, " '%s'", libnotorch);
     if (have_aml)
-        n += snprintf(cmd + n, sizeof(cmd) - n, " '%s'", libaml);
+        aml_appendf(cmd, sizeof(cmd), &n, " '%s'", libaml);
 
-    n += snprintf(cmd + n, sizeof(cmd) - n, " -lm -lpthread");
+    aml_appendf(cmd, sizeof(cmd), &n, " -lm -lpthread");
 
 #if defined(__APPLE__)
     if (!no_accel)
-        n += snprintf(cmd + n, sizeof(cmd) - n, " -framework Accelerate");
+        aml_appendf(cmd, sizeof(cmd), &n, " -framework Accelerate");
 #elif defined(__linux__)
     if (!no_accel)
-        n += snprintf(cmd + n, sizeof(cmd) - n, " -lopenblas");
+        aml_appendf(cmd, sizeof(cmd), &n, " -lopenblas");
 #endif
 
     for (int li = 0; li < p.n_links; li++)
-        n += snprintf(cmd + n, sizeof(cmd) - n, " %s", p.links[li]);
+        aml_appendf(cmd, sizeof(cmd), &n, " %s", p.links[li]);
 
     if (no_accel) {
         fprintf(stderr, "amlc: building with --no-accel (pure scalar C)\n");
@@ -688,13 +703,13 @@ int main(int argc, char **argv) {
 
     if (run_after) {
         char run_cmd[8192];
-        int rn;
+        int rn = 0;
         if (outfile[0] == '/' || outfile[0] == '.')
-            rn = snprintf(run_cmd, sizeof(run_cmd), "%s", outfile);
+            aml_appendf(run_cmd, sizeof(run_cmd), &rn, "%s", outfile);
         else
-            rn = snprintf(run_cmd, sizeof(run_cmd), "./%s", outfile);
+            aml_appendf(run_cmd, sizeof(run_cmd), &rn, "./%s", outfile);
         for (int j = 0; j < prog_argc; j++)
-            rn += snprintf(run_cmd + rn, sizeof(run_cmd) - rn, " \"%s\"", prog_argv[j]);
+            aml_appendf(run_cmd, sizeof(run_cmd), &rn, " \"%s\"", prog_argv[j]);
         return system(run_cmd);
     }
 
