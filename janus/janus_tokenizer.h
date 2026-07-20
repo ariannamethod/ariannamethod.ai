@@ -288,9 +288,9 @@ static int tok_expand_embeddings(int old_vocab, int new_vocab, int n_embd) {
         int len = 0;
         const float* old = am_get_var_array(names[n], &len);
         if (!old || len != old_vocab * n_embd) continue;
-        float* buf = (float*)calloc(new_vocab * n_embd, sizeof(float));
+        float* buf = (float*)calloc((size_t)new_vocab * n_embd, sizeof(float));
         if (!buf) return -1;
-        memcpy(buf, old, old_vocab * n_embd * sizeof(float));
+        memcpy(buf, old, (size_t)old_vocab * n_embd * sizeof(float));
         for (int i = old_vocab * n_embd; i < new_vocab * n_embd; i++)
             buf[i] = ((float)rand() / RAND_MAX - 0.5f) * 0.04f;
         am_set_var_matrix(names[n], buf, new_vocab, n_embd);

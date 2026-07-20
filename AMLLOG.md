@@ -12,6 +12,34 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-07-20 — CodeQL hardening: int-overflow casts, snprintf clamp, TOCTOU fix
+
+CodeQL (default setup, threat model `remote`) flagged 16 alerts across three classes; all closed.
+
+**Integer multiplication overflow** (12, `cpp/integer-multiplication-cast-to-long`) — `int * int`
+products used as allocation / copy sizes that overflow before the implicit widen to `size_t`.
+Leading operand cast to `(size_t)`:
+- `core/ariannamethod.c` (10) — tape-backward `calloc`: `rows*cols`, `T*D`, `T*V`.
+- `janus/janus_tokenizer.h` (2) — `tok_expand_embeddings` `new_vocab*n_embd` (calloc) and
+  `old_vocab*n_embd` (memcpy).
+
+**Overflowing snprintf** (3, `cpp/overflowing-snprintf`) — the accumulate idiom
+`n += snprintf(buf + n, cap - n, …)` lets `n` exceed `cap` (snprintf returns the length it
+*would* have written), pushing the next offset past the buffer and underflowing `cap - n`.
+Replaced with a clamping `aml_appendf(buf, cap, &off, …)` helper that saturates the offset at
+`cap`, converting every accumulate site in `tools/amlc.c` (compile + run command builders) and
+`janus/janus_train.c` (weight-init and tape-script builders).
+
+**TOCTOU** (1, `cpp/toctou-race-condition`) — `janus/janus_train.c` checked the downloaded chunk
+with `stat(path)` then reopened it by name. Now it `fopen`s once and `fstat`s the descriptor, so
+check and use are the same file.
+
+Proof (neo): `make test` → **524/524**; `make amlc` builds and compiles an example end-to-end
+(`blood_include.aml` → runs); `janus_train.c` / `janus_tokenizer.h` compile clean under
+`-Wall -Wextra` (`cc -fsyntax-only`; the Go `libjanus` dylib build is blocked in this environment
+by a missing upstream `libamk.a`, unrelated). Cast / clamp changes are numerically inert for
+in-range sizes.
+
 ## 2026-07-06 — `am_cooc_learn_delta` gains surprise-gated plasticity (branch `claude-surprise-gated-delta`)
 
 RPE-gated Hebbian in the co-occurrence δ fold. `am_compute_prophecy_debt` is the field's free-energy — how far

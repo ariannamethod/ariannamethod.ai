@@ -192,14 +192,16 @@ static int data_auto_download(const char* out_path) {
             break;
         }
         
+        /* Open first, then fstat the descriptor — checking the path with stat()
+         * and reopening by name is a TOCTOU window (the file may change between). */
+        FILE* fj = fopen(tmp_json, "rb");
+        if (!fj) { printf("x"); fflush(stdout); continue; }
         struct stat jst;
-        if (stat(tmp_json, &jst) != 0 || jst.st_size < 100) {
+        if (fstat(fileno(fj), &jst) != 0 || jst.st_size < 100) {
+            fclose(fj);
             printf("x"); fflush(stdout);
             continue;
         }
-        
-        FILE* fj = fopen(tmp_json, "rb");
-        if (!fj) continue;
         char* json = (char*)malloc(jst.st_size + 1);
         if (!json) { fclose(fj); continue; }
         long jlen = fread(json, 1, jst.st_size, fj);
@@ -297,13 +299,27 @@ static long count_params(TrainConfig* cfg) {
            (long)cfg->vocab_size * cfg->n_embd;                           // lm_head
 }
 
+/* Append printf-formatted text to buf at offset *off, saturating *off at cap.
+ * snprintf returns the length it *would* have written, so accumulating it raw can
+ * push *off past cap and make the next `cap - *off` underflow. Clamping keeps every
+ * append in bounds. */
+static void aml_appendf(char *buf, size_t cap, int *off, const char *fmt, ...) {
+    if (*off < 0 || (size_t)*off >= cap) { *off = (int)cap; return; }
+    va_list ap;
+    va_start(ap, fmt);
+    int r = vsnprintf(buf + *off, cap - (size_t)*off, fmt, ap);
+    va_end(ap);
+    if (r < 0) return;
+    *off = ((size_t)r >= cap - (size_t)*off) ? (int)cap : *off + r;
+}
+
 static void init_weights(TrainConfig* cfg) {
     char script[32768];
-    int n = snprintf(script, sizeof(script),
+    int n = 0; aml_appendf(script, sizeof(script), &n,
         "wte = matrix(%d, %d, 0.02)\nwpe = matrix(%d, %d, 0.02)\n",
         cfg->vocab_size, cfg->n_embd, cfg->seq_len, cfg->n_embd);
     for (int l = 0; l < cfg->n_layers; l++) {
-        n += snprintf(script + n, sizeof(script) - n,
+        aml_appendf(script, sizeof(script), &n,
             "wq%d = matrix(%d, %d, 0.02)\nwk%d = matrix(%d, %d, 0.02)\n"
             "wv%d = matrix(%d, %d, 0.02)\nwo%d = matrix(%d, %d, 0.02)\n"
             "w1_%d = matrix(%d, %d, 0.02)\nw3_%d = matrix(%d, %d, 0.02)\n"
@@ -313,7 +329,7 @@ static void init_weights(TrainConfig* cfg) {
             l, cfg->hidden_dim, cfg->n_embd, l, cfg->hidden_dim, cfg->n_embd,
             l, cfg->n_embd, cfg->hidden_dim);
     }
-    n += snprintf(script + n, sizeof(script) - n,
+    aml_appendf(script, sizeof(script), &n,
         "lm_head = matrix(%d, %d, 0.02)\n", cfg->vocab_size, cfg->n_embd);
     if (am_exec(script) != 0) {
         fprintf(stderr, "ERROR: weight init: %s\n", am_get_error()); exit(1);
@@ -332,20 +348,20 @@ static void init_weights(TrainConfig* cfg) {
 // ═══════════════════════════════════════════════════════════════════
 
 static void build_tape_header(char* s, int* n, int bufsize, TrainConfig* cfg) {
-    *n += snprintf(s + *n, bufsize - *n, "TAPE START\nTAPE PARAM_NO_DECAY wte\nTAPE PARAM_NO_DECAY wpe\n");
+    aml_appendf(s, bufsize, n, "TAPE START\nTAPE PARAM_NO_DECAY wte\nTAPE PARAM_NO_DECAY wpe\n");
     for (int l = 0; l < cfg->n_layers; l++) {
-        *n += snprintf(s + *n, bufsize - *n,
+        aml_appendf(s, bufsize, n,
             "TAPE PARAM wq%d\nTAPE PARAM wk%d\nTAPE PARAM wv%d\nTAPE PARAM wo%d\n"
             "TAPE PARAM w1_%d\nTAPE PARAM w3_%d\nTAPE PARAM w2_%d\n",
             l, l, l, l, l, l, l);
     }
-    *n += snprintf(s + *n, bufsize - *n, "TAPE PARAM lm_head\n");
+    aml_appendf(s, bufsize, n, "TAPE PARAM lm_head\n");
 }
 
 static void build_forward_body(char* s, int* n, int bufsize, TrainConfig* cfg) {
-    *n += snprintf(s + *n, bufsize - *n, "h = seq_embed(wte, wpe, tokens, seq_len)\n");
+    aml_appendf(s, bufsize, n, "h = seq_embed(wte, wpe, tokens, seq_len)\n");
     for (int l = 0; l < cfg->n_layers; l++) {
-        *n += snprintf(s + *n, bufsize - *n,
+        aml_appendf(s, bufsize, n,
             "h_norm = seq_rmsnorm(h, seq_len, n_embd)\n"
             "q = seq_matvec(wq%d, h_norm, seq_len)\n"
             "k = seq_matvec(wk%d, h_norm, seq_len)\n"
@@ -362,7 +378,7 @@ static void build_forward_body(char* s, int* n, int bufsize, TrainConfig* cfg) {
             "h = add(h, mlp_proj)\n",
             l, l, l, l, l, l, l);
     }
-    *n += snprintf(s + *n, bufsize - *n,
+    aml_appendf(s, bufsize, n,
         "h_norm = seq_rmsnorm(h, seq_len, n_embd)\n"
         "logits = seq_matvec(lm_head, h_norm, seq_len)\n"
         "loss = seq_cross_entropy(logits, targets, seq_len, vocab_size)\n"
@@ -377,7 +393,7 @@ static char* generate_forward_script(TrainConfig* cfg) {
     int n = 0;
     build_tape_header(s, &n, bufsize, cfg);
     build_forward_body(s, &n, bufsize, cfg);
-    n += snprintf(s + n, bufsize - n,
+    aml_appendf(s, bufsize, &n,
         "TAPE ACCUM_GRADS\n"
         "TAPE CLEAR\n");
     return s;
@@ -391,7 +407,7 @@ static char* generate_step_script(TrainConfig* cfg) {
     int n = 0;
     build_tape_header(s, &n, bufsize, cfg);
     build_forward_body(s, &n, bufsize, cfg);
-    n += snprintf(s + n, bufsize - n,
+    aml_appendf(s, bufsize, &n,
         "TAPE ACCUM_GRADS\n"
         "TAPE APPLY_ACCUM grad_accum\n"
         "TAPE CLIP_GRADS grad_clip\n"
