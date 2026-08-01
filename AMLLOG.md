@@ -12,6 +12,45 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-08-01 — Resumable execution: `am_program_open` / `step` / `close`
+
+`am_exec` runs a script to completion in one call. A host that *schedules* cannot use that: an OS
+handing a program a quantum, or a runtime interleaving voices, needs the program to stop and be
+resumed. Four additive calls give it that, without touching a single existing signature.
+
+The interpreter already kept a program counter — it was just a local. `aml_exec_block` is
+`while (i < end) i = aml_exec_line(ctx, i)`, each statement returning the next index. So the new
+API is `am_exec` cut along its own seams: `am_program_open` does everything before the block loop
+(preprocess, context, `persistent_restore`, builtins, function registration), `am_program_step`
+runs a bounded slice of that same loop and keeps `pc` in a heap handle, `am_program_close` does
+the teardown (`persistent_save`, array clear, free) and returns the result `am_exec` would have.
+`am_program_remaining` reports the top-level statements left. The handle is an opaque `void*`,
+matching the existing `am_compile` / `am_exec_compiled` / `am_free_compiled` idiom.
+
+**The yield point is a top-level statement boundary — measured, not assumed.** Control flow is
+`if` / `while` / `def` (lowercase; `core/ariannamethod.c:5919, 5976, 6007`), and `while` runs its
+body via a nested `aml_exec_block` inside a C-level loop capped at 10000 iterations — all of it
+within one `aml_exec_line`. So a `while` completes every iteration inside a single step:
+instrumented, one step consumed the loop header *and* its body (`remaining` dropped by 2 for a
+two-line block whose body ran 5 times). Suspending mid-loop would need the block state off the C
+stack; that is a separate change and is not claimed here.
+
+### Verification
+- `make test` **524 → 535**, 0 fail. The baseline 524 was measured on this machine *before* the
+  change, not taken from this log.
+- **Equivalence is the load-bearing test:** the same program run by `am_exec` and then stepped one
+  statement at a time from the same starting state leaves `AM_State` identical under `memcmp` over
+  the whole struct — not a spot-check of two fields.
+- Edge cases asserted: `max_lines <= 0` runs to completion; stepping a finished program stays done;
+  `remaining` is 0 when finished; an empty script opens no program; `step(NULL)`/`close(NULL)` are
+  safe no-ops rather than crashes.
+- ASan + UBSan over the whole suite: **535/535**, 0 AddressSanitizer errors, 0 UBSan runtime errors.
+  Leak detection is unavailable on this host (`detect_leaks is not supported on this platform`),
+  so leaks are **not** claimed clean by tool; each `open` in the tests is paired with a `close`,
+  and `close` frees both the line buffer and the handle.
+- Public header grew by four documented entries; `spec/AML_SPEC.md` §8.1 and the execution-paths
+  table updated in the same commit, per the repo rule that API is spec.
+
 ## 2026-07-20 — CodeQL hardening: int-overflow casts, snprintf clamp, TOCTOU fix
 
 CodeQL (default setup, threat model `remote`) flagged 16 alerts across three classes; all closed.

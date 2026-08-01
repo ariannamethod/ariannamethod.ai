@@ -6378,6 +6378,96 @@ int am_exec(const char* script) {
 
 
 // ═══════════════════════════════════════════════════════════════════
+// RESUMABLE EXECUTION — a program that yields
+//
+// am_exec() runs a script to completion in one call. A host that schedules —
+// an OS handing a program a quantum, a runtime interleaving voices — needs the
+// program to stop and be resumed instead. These calls are am_exec split at its
+// own seams: open does everything before the block loop, step runs a bounded
+// slice of that loop and keeps the program counter, close does the teardown
+// and yields the final result.
+//
+// The yield point is a top-level statement boundary. Control flow (`if`,
+// `while`, `def`) runs its body through a nested aml_exec_block() inside a
+// single aml_exec_line(), so that state lives on the C stack and cannot be
+// suspended: a `while` runs all of its iterations within one step.
+// ═══════════════════════════════════════════════════════════════════
+
+typedef struct {
+    AML_Line*   lines;
+    AML_ExecCtx ctx;
+    int         pc;
+    int         done;
+} AM_Program;
+
+void* am_program_open(const char* script) {
+    if (!script || !*script) return NULL;
+    if (!g_am_initialized) am_init();
+    g_error[0] = 0;
+
+    AM_Program* p = (AM_Program*)calloc(1, sizeof(AM_Program));
+    if (!p) return NULL;
+
+    p->lines = (AML_Line*)malloc(AML_MAX_LINES * sizeof(AML_Line));
+    if (!p->lines) { free(p); return NULL; }
+
+    p->ctx.nlines = aml_preprocess(script, p->lines, AML_MAX_LINES);
+    if (p->ctx.nlines == 0) { free(p->lines); free(p); return NULL; }
+
+    snprintf(p->ctx.base_dir, sizeof(p->ctx.base_dir), "%s", g_base_dir);
+    p->ctx.lines = p->lines;
+    persistent_restore(&p->ctx.globals);
+    aml_register_builtins(&p->ctx);
+    aml_register_funcs(&p->ctx);
+    return p;
+}
+
+// Run at most max_lines top-level statements. Returns 1 when the program has
+// finished (further steps are no-ops), 0 when more remains. max_lines <= 0 runs
+// to completion, which is exactly am_exec's block loop.
+int am_program_step(void* handle, int max_lines) {
+    if (!handle) return 1;
+    AM_Program* p = (AM_Program*)handle;
+    if (p->done) return 1;
+
+    int executed = 0;
+    while (p->pc < p->ctx.nlines && !p->ctx.has_return
+           && (max_lines <= 0 || executed < max_lines)) {
+        p->pc = aml_exec_line(&p->ctx, p->pc);
+        executed++;
+    }
+    if (p->pc >= p->ctx.nlines || p->ctx.has_return) p->done = 1;
+    return p->done;
+}
+
+// Teardown; returns the program's result the way am_exec would: 1 on error, 0 ok.
+int am_program_close(void* handle) {
+    if (!handle) return 0;
+    AM_Program* p = (AM_Program*)handle;
+
+    persistent_save(&p->ctx.globals);
+    symtab_clear_arrays(&p->ctx.globals);
+
+    int rc = 0;
+    if (p->ctx.error[0]) {
+        snprintf(g_error, sizeof(g_error), "%s", p->ctx.error);
+        rc = 1;
+    }
+    free(p->lines);
+    free(p);
+    return rc;
+}
+
+// How many top-level statements remain — telemetry for a host sizing a quantum.
+// Not a progress guarantee: one statement may be a loop.
+int am_program_remaining(void* handle) {
+    if (!handle) return 0;
+    AM_Program* p = (AM_Program*)handle;
+    if (p->done) return 0;
+    return p->ctx.nlines - p->pc;
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════
 // BYTECODE COMPILATION — eliminate interpreter overhead
 // ═══════════════════════════════════════════════════════════════════

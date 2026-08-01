@@ -402,6 +402,18 @@ int am_exec(const char* script);
 // Execute AML file (convenience: reads file, executes)
 int am_exec_file(const char* path);
 
+// ── Resumable execution — a program that yields ──
+// am_exec runs a script to completion. A host that schedules (an OS giving a
+// program a quantum, a runtime interleaving voices) opens the program once,
+// steps it a bounded number of top-level statements at a time, and closes it.
+// The yield point is a top-level statement boundary: an `if` / `while` / `def`
+// body runs through a nested block, so a `while` completes all of its
+// iterations inside a single step.
+void* am_program_open(const char* script);      // NULL on empty script / OOM
+int   am_program_step(void* prog, int max_lines); // 1 = finished, 0 = more; <=0 lines runs to end
+int   am_program_close(void* prog);             // teardown; 1 if the program errored, else 0
+int   am_program_remaining(void* prog);         // top-level statements left (telemetry, not a guarantee)
+
 // Get last error from am_exec (empty string = no error)
 const char* am_get_error(void);
 

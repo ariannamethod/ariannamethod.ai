@@ -3776,6 +3776,56 @@ int main(void) {
     }
 #endif // AM_IO_DISABLED
 
+    // ═══ Resumable execution — am_program_open / step / close ═══
+    printf("\n── Resumable execution ──\n");
+    {
+        const char* prog =
+            "DISSONANCE 0.7\n"
+            "TENSION 0.4\n"
+            "PAIN 0.2\n"
+            "PROPHECY 5\n"
+            "DESTINY 0.6\n";
+
+        AM_State base = *am_get_state();
+        am_exec(prog);
+        AM_State oneshot = *am_get_state();
+
+        // same program, stepped one top-level statement at a time, same start
+        *am_get_state() = base;
+        void* p = am_program_open(prog);
+        ASSERT(p != NULL, "am_program_open returns a handle");
+        int steps = 0;
+        while (!am_program_step(p, 1)) steps++;
+        steps++;  // the step that reported completion
+        int rc = am_program_close(p);
+        AM_State stepped = *am_get_state();
+
+        ASSERT_INT(steps, 5, "5 statements take 5 steps at max_lines=1");
+        ASSERT(rc == 0, "am_program_close reports no error");
+        ASSERT(memcmp(&oneshot, &stepped, sizeof(AM_State)) == 0,
+               "stepped execution leaves the field identical to am_exec");
+
+        // a step past the end is a no-op that keeps reporting done
+        void* q = am_program_open("TENSION 0.1\n");
+        ASSERT(am_program_step(q, 0) == 1, "max_lines<=0 runs to completion");
+        ASSERT(am_program_step(q, 1) == 1, "stepping a finished program stays done");
+        ASSERT_INT(am_program_remaining(q), 0, "a finished program has 0 remaining");
+        am_program_close(q);
+
+        // control flow is atomic to a step: a `while` runs all iterations at once
+        void* w = am_program_open("n = 0\nwhile n < 5:\n    n = n + 1\nTENSION 0.3\n");
+        am_program_step(w, 1);                        // consumes `n = 0`
+        int before = am_program_remaining(w);
+        am_program_step(w, 1);                        // consumes the whole loop
+        int consumed = before - am_program_remaining(w);
+        ASSERT_INT(consumed, 2, "one step consumes the whole `while` block (header + body)");
+        am_program_close(w);
+
+        ASSERT(am_program_open("") == NULL, "an empty script opens no program");
+        ASSERT(am_program_step(NULL, 1) == 1, "stepping NULL is done, not a crash");
+        ASSERT_INT(am_program_close(NULL), 0, "closing NULL is a no-op");
+    }
+
     printf("\n═══ Results: %d/%d passed ═══\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }
