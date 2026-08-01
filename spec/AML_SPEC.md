@@ -610,6 +610,10 @@ temporal_debt       float   0–∞         Backward movement cost
 void        am_init(void);                          // Initialize to defaults
 int         am_exec(const char* script);            // Parse and execute AML
 int         am_exec_file(const char* path);         // Execute AML file
+void*       am_program_open(const char* script);    // Open a resumable program
+int         am_program_step(void* p, int max_lines);// Run a slice; 1 = finished
+int         am_program_close(void* p);              // Teardown; 1 if it errored
+int         am_program_remaining(void* p);          // Top-level statements left
 const char* am_get_error(void);                     // Last error message
 AM_State*   am_get_state(void);                     // Raw state access
 void        am_step(float dt);                      // Physics step
@@ -1119,6 +1123,11 @@ AML programs run through three paths:
 | **Interpreter** | `am_exec` / `am_exec_file` | General use; full Level 0/1/2; parse + execute in one pass |
 | **amlc transpiler** | `amlc foo.aml` | Static compile of AML + BLOOD C to a standalone binary; top-level directives lower to `am_exec()` in an `__attribute__((constructor))` so physics apply before `main()` |
 | **Bytecode** | `am_compile` / `am_exec_compiled` | Hot inference/training loops — parse once, run many times without re-parsing or string dispatch |
+| **Resumable** | `am_program_open` / `am_program_step` / `am_program_close` | A host that schedules — an OS giving a program a quantum, a runtime interleaving voices. The program yields and is resumed instead of running to completion |
+
+The resumable form is `am_exec` split at its own seams: `open` performs the preprocess, context setup, builtin and function registration; `step` runs a bounded slice of the same block loop and keeps the program counter; `close` does the persistent-globals save, array teardown and returns the result `am_exec` would have. Stepping is observationally identical to `am_exec` — the same program stepped one statement at a time leaves the field bit-for-bit as the one-shot call does (asserted in `core/test_aml.c` by `memcmp` over the whole `AM_State`).
+
+**The yield point is a top-level statement boundary.** Control flow (`if`, `while`, `def`) executes its body through a nested block inside a single statement, so a `while` completes *all* of its iterations within one step; `am_program_step` cannot suspend inside a loop. `am_program_remaining` reports the top-level statements left — telemetry for sizing a quantum, not a progress guarantee, since one statement may be a loop. `max_lines <= 0` runs to completion, making a single step exactly equivalent to `am_exec`.
 
 The bytecode form (core:6246-6291, header:28-30) pre-parses each line into an opcode with pre-split args; execution is a `switch` over opcodes (no `strcmp`/`sscanf` per line). Covered: the TAPE optimizer/grad ops and the hot sequence functions (`seq_embed`, `seq_matvec`, `seq_rmsnorm`, `multi_head_attention`, `seq_cross_entropy`, `add`, `mul`, `silu`); uncovered lines fall back to the interpreter via `BC_FALLBACK`. Use it when the same AML program runs every training step; `am_exec_file` is fine for one-shot field configuration.
 
