@@ -2956,6 +2956,34 @@ int am_channel_write(const char* name, float value) {
     return 0;
 }
 
+// How many values are queued. -1 if there is no such channel. A host that schedules needs to
+// be able to ask before it commits to a read.
+int am_channel_depth(const char* name) {
+    pthread_mutex_lock(&g_channel_mutex);
+    int idx = channel_find(name);
+    int n = (idx < 0) ? -1 : g_channels[idx].count;
+    pthread_mutex_unlock(&g_channel_mutex);
+    return n;
+}
+
+// Non-blocking read: takes one value if there is one, otherwise returns -1 at once. The polling
+// am_channel_read below waits up to a second, which is correct for a thread and ruinous for a
+// single-threaded host running the program in a scheduled quantum.
+int am_channel_try_read(const char* name, float* out) {
+    pthread_mutex_lock(&g_channel_mutex);
+    int idx = channel_find(name);
+    if (idx < 0 || g_channels[idx].count == 0) {
+        pthread_mutex_unlock(&g_channel_mutex);
+        return -1;
+    }
+    *out = g_channels[idx].data[g_channels[idx].head];
+    g_channels[idx].head = (g_channels[idx].head + 1) % g_channels[idx].capacity;
+    g_channels[idx].count--;
+    pthread_cond_broadcast(&g_channel_cond);
+    pthread_mutex_unlock(&g_channel_mutex);
+    return 0;
+}
+
 // Read a float from a channel (blocking if empty, with timeout)
 int am_channel_read(const char* name, float* out) {
     pthread_mutex_lock(&g_channel_mutex);
@@ -4710,6 +4738,34 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
             else
               symtab_set(&ctx->globals, vname, out);
           }
+        }
+      }
+      else if (!strcmp(subcmd, "TRY")) {
+        // CHANNEL TRY name var_name — non-blocking read; var is left untouched when empty
+        char chname[AM_SPAWN_NAME_LEN] = {0};
+        char vname[AML_MAX_NAME] = {0};
+        sscanf(rest, "%31s %31s", chname, vname);
+        if (chname[0] && vname[0] && ctx) {
+          float out = 0;
+          if (am_channel_try_read(chname, &out) == 0) {
+            if (ctx->call_depth > 0)
+              symtab_set(&ctx->locals[ctx->call_depth - 1], vname, out);
+            else
+              symtab_set(&ctx->globals, vname, out);
+          }
+        }
+      }
+      else if (!strcmp(subcmd, "DEPTH")) {
+        // CHANNEL DEPTH name var_name — how many values are queued (-1 if no such channel)
+        char chname[AM_SPAWN_NAME_LEN] = {0};
+        char vname[AML_MAX_NAME] = {0};
+        sscanf(rest, "%31s %31s", chname, vname);
+        if (chname[0] && vname[0] && ctx) {
+          float d = (float)am_channel_depth(chname);
+          if (ctx->call_depth > 0)
+            symtab_set(&ctx->locals[ctx->call_depth - 1], vname, d);
+          else
+            symtab_set(&ctx->globals, vname, d);
         }
       }
       else if (!strcmp(subcmd, "CLOSE")) {

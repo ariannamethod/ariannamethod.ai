@@ -12,6 +12,41 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-08-02 — Channels gain a non-blocking read and a depth query
+
+`am_channel_read` polls 1000 × 1 ms before giving up. For a spawned thread that is right — the
+writer is running in parallel and the wait is the point. For a **single-threaded host** running
+an AML program inside a scheduled quantum it is ruinous: one empty read freezes everything.
+Measured on this machine, same program, same channel: **1853.9 ms** wall on an empty channel
+versus **0.0 ms** on a full one.
+
+Four additive entries, no existing signature touched:
+- `am_channel_try_read(name, out)` — takes a value if one is queued, otherwise returns `-1` at
+  once and **leaves `out` untouched**.
+- `am_channel_depth(name)` — queued values, `-1` if there is no such channel.
+- `CHANNEL TRY <name> <var>` and `CHANNEL DEPTH <name> <var>` — the same two through the
+  language, binding by the scope rule the rest of AML uses.
+
+`CHANNEL READ` and `am_channel_read` are unchanged, verified by measurement rather than by
+reading the diff: the polling read still takes ~1.9 s on an empty channel after the change.
+
+### Verification
+- `make test` **538 → 550**, 0 fail.
+- **Three tests were empty until falsification exposed them**, and all three are the same
+  mistake — asserting something weaker than the claim:
+  - The timing check used `clock()`, which measures CPU time. The poll sleeps in `nanosleep` and
+    burns no CPU, so a build where `try_read` polls for two seconds **passed**. Now it measures
+    wall time via `CLOCK_MONOTONIC`, and that build fails.
+  - "A refused TRY leaves the name unbound" asserted that the field was *not* the value on the
+    bus — satisfied both by an untouched name and by a name bound to 0, which are exactly the
+    two cases it had to separate. It now seeds the name first: only an untouched binding
+    survives, and a build that binds on failure fails with `got 0.0000, expected 0.7700`.
+  - (The third was the function-scope check in the previous entry.)
+- Falsified in both directions: `try_read` delegating to the polling read → **549/550**; the
+  directive binding on failure → **549/550**; the fix → **550/550**.
+- ASan + UBSan over the whole suite: **550/550**, 0 sanitizer errors.
+- Spec §20 gains both directives and states the hazard with the measured numbers.
+
 ## 2026-08-02 — `CHANNEL READ` delivered the value and then dropped it
 
 The spec (§20) says `CHANNEL READ <name> <var>` reads one float **into** `<var>`. At top level it
