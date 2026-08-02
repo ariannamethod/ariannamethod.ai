@@ -12,6 +12,31 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-08-02 — `CHANNEL READ` delivered the value and then dropped it
+
+The spec (§20) says `CHANNEL READ <name> <var>` reads one float **into** `<var>`. At top level it
+did not: the value arrived from the channel and was written into `ctx->locals[0]`, a scope
+top-level code never consults. Every top-level `CHANNEL READ` silently produced 0.
+
+The line clamped the depth instead of branching on it:
+`int d = ctx->call_depth > 0 ? ctx->call_depth - 1 : 0; symtab_set(&ctx->locals[d], …)`. Inside a
+function that is correct; at depth 0 it aims at a local scope that does not apply. Assignment
+(`core:6197-6199`) and `PIPE READ` (`core:4379-4382`) both branch — locals when `call_depth > 0`,
+globals otherwise. `CHANNEL READ` now follows the same rule, which is the language's own.
+
+Found while wiring AML channels as IPC between scheduled monads in amosOZ: a writer monad put
+0.7 on the bus, a reader monad read it and set `TENSION` from it, and the field stayed at 0.
+Isolated with a C probe — `am_channel_read` at the C level returned exactly 0.700, so the channel
+was fine and the binding was not.
+
+### Verification
+- `make test` **535 → 537**, 0 fail. Two new checks: the value lands at top level, and it still
+  lands in the local scope inside a `def` body.
+- **Falsification, not assertion:** with the old line restored in a scratch build, the top-level
+  check fails (`got 0.0000, expected 0.7000`) while the function-body check still passes — so the
+  test catches the real defect and the working case was never broken.
+- ASan + UBSan over the whole suite: **537/537**, 0 AddressSanitizer errors, 0 UBSan runtime errors.
+
 ## 2026-08-01 — Resumable execution: `am_program_open` / `step` / `close`
 
 `am_exec` runs a script to completion in one call. A host that *schedules* cannot use that: an OS

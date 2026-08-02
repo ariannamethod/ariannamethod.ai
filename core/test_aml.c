@@ -3776,6 +3776,25 @@ int main(void) {
     }
 #endif // AM_IO_DISABLED
 
+    // ═══ CHANNEL READ binds into the caller's scope ═══
+    printf("\n── Channel read scope ──\n");
+    {
+        am_exec("CHANNEL CREATE scope_bus 8\nCHANNEL WRITE scope_bus 0.7\n"
+                "CHANNEL READ scope_bus v\nTENSION v\n");
+        ASSERT_FLOAT(am_get_state()->tension, 0.7f, 0.01f,
+                    "CHANNEL READ binds at top level (globals, not locals[0])");
+
+        // and inside a function the value must still land in the local scope
+        am_exec("CHANNEL CREATE scope_fn 8\nCHANNEL WRITE scope_fn 0.35\n"
+                "def take():\n"
+                "    CHANNEL READ scope_fn w\n"
+                "    TENSION w\n"
+                "take()\n");
+        ASSERT_FLOAT(am_get_state()->tension, 0.35f, 0.01f,
+                    "CHANNEL READ still binds inside a function body");
+        am_channel_close_all();
+    }
+
     // ═══ Resumable execution — am_program_open / step / close ═══
     printf("\n── Resumable execution ──\n");
     {

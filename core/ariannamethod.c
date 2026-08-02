@@ -4701,8 +4701,14 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
         if (chname[0] && vname[0] && ctx) {
           float out = 0;
           if (am_channel_read(chname, &out) == 0) {
-            int d = ctx->call_depth > 0 ? ctx->call_depth - 1 : 0;
-            symtab_set(&ctx->locals[d], vname, out);
+            /* same scope rule as assignment and PIPE READ: locals inside a function,
+             * globals at top level. Clamping the depth to 0 put a top-level read into
+             * locals[0], where nothing at top level ever looks for it — the value was
+             * delivered by the channel and then dropped on the floor. */
+            if (ctx->call_depth > 0)
+              symtab_set(&ctx->locals[ctx->call_depth - 1], vname, out);
+            else
+              symtab_set(&ctx->globals, vname, out);
           }
         }
       }
