@@ -3784,14 +3784,27 @@ int main(void) {
         ASSERT_FLOAT(am_get_state()->tension, 0.7f, 0.01f,
                     "CHANNEL READ binds at top level (globals, not locals[0])");
 
-        // and inside a function the value must still land in the local scope
+        // Inside a function the value must land in the LOCAL scope. Asserting only the
+        // tension set inside the body proves nothing: resolution falls back locals -> globals,
+        // so a value wrongly written to globals would read back the same there. The test that
+        // actually separates the two is whether the name escapes the function.
         am_exec("CHANNEL CREATE scope_fn 8\nCHANNEL WRITE scope_fn 0.35\n"
                 "def take():\n"
                 "    CHANNEL READ scope_fn w\n"
                 "    TENSION w\n"
                 "take()\n");
         ASSERT_FLOAT(am_get_state()->tension, 0.35f, 0.01f,
-                    "CHANNEL READ still binds inside a function body");
+                    "CHANNEL READ binds inside a function body");
+        /* the leak probe must run in the SAME script: every am_exec builds a fresh context
+         * with its own globals, so a separate call could never observe a leak either way */
+        am_exec("CHANNEL CREATE scope_lk 8\nCHANNEL WRITE scope_lk 0.35\n"
+                "def take2():\n"
+                "    CHANNEL READ scope_lk u\n"
+                "TENSION 0.9\n"
+                "take2()\n"
+                "TENSION u\n");
+        ASSERT(fabsf(am_get_state()->tension - 0.35f) > 0.01f,
+               "a name read inside a function does not leak into the caller's scope");
         am_channel_close_all();
     }
 

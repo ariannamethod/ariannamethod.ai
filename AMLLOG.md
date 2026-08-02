@@ -35,6 +35,15 @@ was fine and the binding was not.
 - **Falsification, not assertion:** with the old line restored in a scratch build, the top-level
   check fails (`got 0.0000, expected 0.7000`) while the function-body check still passes — so the
   test catches the real defect and the working case was never broken.
+- **The function-scope check was too weak, caught in review (Copilot on the PR).** Asserting only
+  the `tension` set inside the body proves nothing: resolution falls back locals → globals, so a
+  value wrongly written to globals reads back identically from inside the function. The test now
+  asks the question that separates the two — whether the name escapes into the caller. First
+  attempt at that was also empty, because the probe ran in a *separate* `am_exec`, and every
+  `am_exec` builds a fresh context with its own globals, so a leak could never be observed either
+  way. The probe now runs inside one script. Falsified in both directions: a build that always
+  writes globals fails the leak check (537/538), a build with the original clamp fails the
+  top-level check (537/538), and the fix passes **538/538**.
 - ASan + UBSan over the whole suite: **537/537**, 0 AddressSanitizer errors, 0 UBSan runtime errors.
 
 ## 2026-08-01 — Resumable execution: `am_program_open` / `step` / `close`
