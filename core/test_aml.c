@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
 #ifndef AM_IO_DISABLED
 #include <fcntl.h>
 #include <unistd.h>
@@ -3805,6 +3806,51 @@ int main(void) {
                 "TENSION u\n");
         ASSERT(fabsf(am_get_state()->tension - 0.35f) > 0.01f,
                "a name read inside a function does not leak into the caller's scope");
+        am_channel_close_all();
+    }
+
+    // ═══ Non-blocking read + depth ═══
+    printf("\n── Channel try/depth ──\n");
+    {
+        am_channel_close_all();
+        am_channel_create("probe", 8);
+        ASSERT_INT(am_channel_depth("probe"), 0, "a fresh channel has depth 0");
+        ASSERT_INT(am_channel_depth("nosuch"), -1, "depth of a missing channel is -1");
+
+        float v = -1.0f;
+        ASSERT_INT(am_channel_try_read("probe", &v), -1, "try_read on an empty channel refuses");
+        ASSERT_FLOAT(v, -1.0f, 0.001f, "a refused try_read leaves the destination untouched");
+
+        am_channel_write("probe", 0.6f);
+        ASSERT_INT(am_channel_depth("probe"), 1, "depth follows a write");
+        ASSERT_INT(am_channel_try_read("probe", &v), 0, "try_read takes a queued value");
+        ASSERT_FLOAT(v, 0.6f, 0.001f, "try_read delivers the value written");
+        ASSERT_INT(am_channel_depth("probe"), 0, "depth follows a read");
+
+        // The empty path must be cheap. Measure WALL time: the polling read sleeps in
+        // nanosleep and burns no CPU, so clock() cannot see the stall at all — a timing
+        // check built on clock() passes even when try_read polls for two seconds.
+        struct timespec w0, w1;
+        clock_gettime(CLOCK_MONOTONIC, &w0);
+        am_channel_try_read("probe", &v);
+        clock_gettime(CLOCK_MONOTONIC, &w1);
+        double try_ms = (w1.tv_sec - w0.tv_sec) * 1000.0 + (w1.tv_nsec - w0.tv_nsec) / 1e6;
+        ASSERT(try_ms < 500.0, "try_read on an empty channel returns without polling");
+
+        // AML directives, same scope rule as the rest of the language
+        am_exec("CHANNEL CREATE dbus 8\nCHANNEL WRITE dbus 0.44\n"
+                "CHANNEL DEPTH dbus d\nTENSION d\n");
+        ASSERT_FLOAT(am_get_state()->tension, 1.0f, 0.01f,
+                    "CHANNEL DEPTH binds the queue length at top level");
+        am_exec("CHANNEL TRY dbus t\nTENSION t\n");
+        ASSERT_FLOAT(am_get_state()->tension, 0.44f, 0.01f,
+                    "CHANNEL TRY binds the value at top level");
+        /* A refused TRY must leave the name ALONE. Asserting "tension is not the value that
+         * was on the bus" cannot see the difference: an unbound name and a name bound to 0
+         * both end at 0. Seed the name first — only an untouched binding survives. */
+        am_exec("t2 = 0.77\nCHANNEL TRY dbus t2\nTENSION t2\n");
+        ASSERT_FLOAT(am_get_state()->tension, 0.77f, 0.01f,
+                    "CHANNEL TRY on a drained channel leaves the name untouched");
         am_channel_close_all();
     }
 

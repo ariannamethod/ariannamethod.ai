@@ -1092,7 +1092,15 @@ Launches the indented block in a background thread. Local variable changes do no
 | `CHANNEL CREATE` | `CHANNEL CREATE <name> [capacity]` | Create a named channel (capacity default 64 = `AM_CHANNEL_BUF`) |
 | `CHANNEL WRITE` | `CHANNEL WRITE <name> <value_expr>` | Write a float (blocks if full) |
 | `CHANNEL READ` | `CHANNEL READ <name> <var>` | Read one float into `<var>` (blocks if empty) |
+| `CHANNEL TRY` | `CHANNEL TRY <name> <var>` | Non-blocking read: takes one float if the queue is non-empty, otherwise leaves `<var>` **untouched** and continues |
+| `CHANNEL DEPTH` | `CHANNEL DEPTH <name> <var>` | Queued values into `<var>` (`-1` if there is no such channel) |
 | `CHANNEL CLOSE` | `CHANNEL CLOSE <name>` | Deactivate a channel |
+
+`CHANNEL READ` polls 1000 x 1 ms before giving up, which is ~2 s of wall time in practice — correct for a spawned thread, ruinous
+for a single-threaded host running the program inside a scheduled quantum, where one empty read
+stalls everything (measured: ~1.9 s wall on an empty channel versus 0 ms on a full one). Such a
+host should ask `CHANNEL DEPTH` or use `CHANNEL TRY`, whose C forms are `am_channel_depth` and
+`am_channel_try_read`. `CHANNEL READ` is unchanged; the non-blocking pair is additive.
 
 ```aml
 CHANNEL CREATE bus 16
