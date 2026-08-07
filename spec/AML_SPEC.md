@@ -1096,7 +1096,7 @@ Launches the indented block in a background thread. Local variable changes do no
 | `CHANNEL DEPTH` | `CHANNEL DEPTH <name> <var>` | Queued values into `<var>` (`-1` if there is no such channel) |
 | `CHANNEL CLOSE` | `CHANNEL CLOSE <name>` | Deactivate a channel |
 
-`CHANNEL READ` polls for up to a second before giving up — correct for a spawned thread, ruinous
+`CHANNEL READ` polls 1000 x 1 ms before giving up, which is ~2 s of wall time in practice — correct for a spawned thread, ruinous
 for a single-threaded host running the program inside a scheduled quantum, where one empty read
 stalls everything (measured: ~1.9 s wall on an empty channel versus 0 ms on a full one). Such a
 host should ask `CHANNEL DEPTH` or use `CHANNEL TRY`, whose C forms are `am_channel_depth` and

@@ -894,7 +894,7 @@ int  am_spawn_count(void);
 // Channel API
 int  am_channel_create(const char* name, int capacity);
 int  am_channel_write(const char* name, float value);
-int  am_channel_read(const char* name, float* out);      // polls up to ~1s if empty
+int  am_channel_read(const char* name, float* out);      // polls 1000 x 1ms if empty: ~2s wall in practice
 int  am_channel_try_read(const char* name, float* out);  // non-blocking: -1 at once if empty
 int  am_channel_depth(const char* name);                 // queued values; -1 if no such channel
 int  am_channel_count(void);

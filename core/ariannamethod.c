@@ -2984,7 +2984,8 @@ int am_channel_try_read(const char* name, float* out) {
     return 0;
 }
 
-// Read a float from a channel (blocking if empty, with timeout)
+// Read a float from a channel. Blocking if empty: 1000 x 1ms sleeps plus mutex overhead,
+// which is ~2s of wall time in practice, not the ~1s the loop count suggests.
 int am_channel_read(const char* name, float* out) {
     pthread_mutex_lock(&g_channel_mutex);
     int idx = channel_find(name);
