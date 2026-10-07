@@ -92,7 +92,7 @@ EXPERT_STRUCTURAL 0.25
 gamma 0.5
 EOF
 "$OLDPWD/tools/amlc" --emit-c directives.aml >dir.c 2>dir.err || true
-N_LOWERED=$(grep -c 'am_exec("' dir.c || true)
+N_LOWERED=$(grep -Fc ' "\n"' dir.c || true)
 N_DROPPED=$(grep -c 'unknown directive' dir.err || true)
 if [ "$N_LOWERED" = "5" ] && [ "$N_DROPPED" = "0" ]; then
     echo "  PASS [A-1]: 5/5 directives lowered, 0 dropped (incl. lowercase 'gamma')"
@@ -125,7 +125,7 @@ ECHO startup message
 BLOOD INCLUDE "stdio.h"
 EOF
 "$OLDPWD/tools/amlc" --emit-c a5.aml >a5.c 2>/dev/null || true
-if grep -q 'am_exec("ECHO startup message")' a5.c \
+if grep -q '"ECHO startup message"' a5.c \
    && grep -q '#include "stdio.h"' a5.c \
    && ! grep -q '#include "ECHO' a5.c; then
     echo "  PASS [A-5]: ECHO → am_exec (log); BLOOD INCLUDE → #include"

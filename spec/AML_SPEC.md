@@ -68,7 +68,17 @@ args           = expression { "," expression } ;
 
 ### 2.0 Directive Lowering
 
-These runtime directives execute identically whether the program is run by the `aml` runner (`am_exec_file`) or compiled by `amlc`: the transpiler lowers every top-level directive (`PROPHECY`, `DESTINY`, `VELOCITY`, `FIELD`, `RESONANCE`, `LOAD`, `SAVE`, …) to an `am_exec("<directive>")` call inside an `__attribute__((constructor))`, so the compiled binary applies the field physics before `main()`. A directive's effect is identical in both paths.
+The transpiler preserves the runtime lines, their indentation, and their order
+in one embedded AML program. An `__attribute__((constructor))` executes that
+program with one `am_exec()` call before C `main()`. Assignments, `def`,
+`if/else`, `while`, arrays, and `SPAWN/AWAIT/CHANNEL` share one execution context
+and retain their block structure. Runtime failure prints `am_get_error()` and
+terminates before `main()`.
+
+`BLOOD COMPILE`, `BLOOD MAIN`, `BLOOD INCLUDE`, and `BLOOD LINK` retain their C
+compilation roles. Runtime source is bounded to 512 nonblank, noncomment lines
+of at most 511 bytes each in `amlc`; the interpreter's own line limits also
+apply. File-based `INCLUDE` continues to use runtime file resolution.
 
 ### 2.1 Prophecy Physics
 
