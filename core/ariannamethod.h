@@ -307,8 +307,10 @@ typedef struct {
 #define AML_TYPE_FLOAT  0
 #define AML_TYPE_ARRAY  1
 #define AML_TYPE_STRING 2
+#define AML_TYPE_LIST   3
 #define AM_MAX_ARRAY_SIZE  1048576  // 1M floats = 4MB
 #define AM_MAX_STRING_BYTES 1048576
+#define AM_MAX_LIST_ITEMS 65536
 
 // Immutable validated UTF-8. len counts Unicode codepoints, byte_len bytes.
 // Each owner keeps one atomic reference; embedded NUL is outside the text domain.
@@ -327,6 +329,25 @@ AM_String* am_string_slice(const AM_String* text, int start, int end);
 int am_string_find(const AM_String* text, const AM_String* needle);
 int am_string_codepoint(const AM_String* text, int index);
 AM_String* am_string_from_codepoint(int codepoint);
+
+// Mutable string container. Items are immutable retained strings. List refs
+// are atomic; mutation belongs to one execution context or a synchronized host.
+typedef struct {
+    AM_String** items;
+    int len;
+    int capacity;
+    int refcount;
+} AM_List;
+
+AM_List* am_list_new(void);
+void am_list_ref(AM_List* list);
+void am_list_free(AM_List* list);
+AM_List* am_list_clone(const AM_List* list);
+int am_list_push(AM_List* list, AM_String* item); // retain item; new length or -1
+AM_String* am_list_get(const AM_List* list, int index); // owned reference or NULL
+int am_list_set(AM_List* list, int index, AM_String* item); // retain; 0 or -1
+int am_list_find(const AM_List* list, const AM_String* item); // first index or -1
+AM_List* am_list_slice(const AM_List* list, int start, int end); // owned container
 
 typedef struct {
     float* data;
@@ -349,13 +370,14 @@ typedef struct {
     char origin[AML_MAX_SOURCE_PATH]; // absolute source file; survives IMPORT expansion
 } AML_Line;
 
-// Variable — supports float, array, or immutable UTF-8 string
+// Variable — supports float, array, immutable UTF-8 string, or string list
 typedef struct {
     char      name[AML_MAX_NAME];
-    int       type;     // AML_TYPE_FLOAT, AML_TYPE_ARRAY, or AML_TYPE_STRING
+    int       type;     // AML_TYPE_FLOAT / ARRAY / STRING / LIST
     float     value;    // used when type == FLOAT
     AM_Array* array;    // used when type == ARRAY (heap allocated)
     AM_String* string;  // used when type == STRING (one owned reference)
+    AM_List*   list;    // used when type == LIST (one owned reference)
 } AML_Var;
 
 // Symbol table
@@ -396,7 +418,8 @@ typedef struct {
     float        return_value;      // scalar return value
     AM_Array*    return_array;      // array return value (NULL if scalar)
     AM_String*   return_string;     // owned string return value
-    int          return_type;       // AML_TYPE_FLOAT / ARRAY / STRING
+    AM_List*     return_list;       // owned string list return value
+    int          return_type;       // AML_TYPE_FLOAT / ARRAY / STRING / LIST
 } AML_ExecCtx;
 
 // AM_State field map entry (for reading state in expressions)
@@ -1166,7 +1189,12 @@ float am_get_var_float(const char* name);
 int am_set_var_text(const char* name, const char* utf8);
 const char* am_get_var_text(const char* name);
 
-// Clear the calling thread's persistent globals (frees arrays and strings).
+// Clone a string-list container into the calling thread's persistent table.
+// Getter is borrowed until persistent mutation/reset; retained items are shared.
+int am_set_var_list(const char* name, const AM_List* list);
+const AM_List* am_get_var_list(const char* name);
+
+// Clear the calling thread's persistent globals (frees arrays, strings, lists).
 void am_persistent_clear(void);
 
 #ifdef __cplusplus

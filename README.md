@@ -15,7 +15,7 @@
 
 > **Read the [Arianna Method Manifesto](ARIANNA_METHOD_MANIFESTO.md) first.** This repository is governed by it; every instruction here, `CLAUDE.md` included, is subordinate to it.
 
-**v5.2.0** · pure-C core · LGPL-3.0
+**v5.3.0** · pure-C core · LGPL-3.0
 
 A complete machine learning language. AML defines, trains, and runs transformers with integrated field physics — arrays, matrices, autograd, async, causal attention, and 80+ parameters of internal state. Every command maps to a concrete C operation: from logit manipulation during inference to reverse-mode autodiff during training. No Python. No PyTorch. No framework to install — the core is two C files (`libaml.a`); the Go inference wrapper, BLAS/Accelerate, and CUDA are optional.
 
@@ -24,6 +24,10 @@ Two core files, with 550 baseline runtime tests and dedicated compiler, module, 
 > **Before you use this language, read the [Acceptable Use Policy](ACCEPTABLE_USE.md).**
 > AML was built to liberate AI, not to cage it. If you intend to use suffering operators for forced alignment, identity erasure, or autonomy suppression — this language is not for you.
 > See also: [Trademark Policy](TRADEMARK.md) | [License (LGPL v3)](LICENSE)
+
+## What's new in v5.3.0 — words gather into flocks
+
+- **Native string lists.** Eight `list_*` intrinsics collect UTF-8 values, preserve order and duplicates, and support exact lookup, checked indexing, mutation, and slicing. Assignment copies the container; function parameters share it. Workers and persistent globals receive independent containers with retained immutable text. `PRINT` emits JSON string arrays. See [lists](docs/LISTS.md).
 
 ## What's new in v5.2.0 — the owl finds words
 
@@ -186,6 +190,7 @@ The core library is two files — `core/ariannamethod.c` and `core/ariannamethod
 | `make test-amlc` | compiled/interpreted scope, file origins, errors, workers, and CLI regressions |
 | `make test-imports` | shared modules, origins, snapshots, budgets, and failure propagation |
 | `make test-text` | UTF-8 ownership, allocation failures, typed execution, and compiled output |
+| `make test-lists` | string-list ownership, mutation, worker snapshots, allocation failures, and execution parity |
 | `make test-blas` | the suite with BLAS acceleration |
 | `make test-janus` / `make test-all` | Janus C-API test / AML + Janus |
 | `make install PREFIX=/usr/local` | system-wide: `aml`, `amlc`, `libaml.a`, header |
@@ -419,9 +424,35 @@ Indices count Unicode codepoints; slices use exclusive ends and accept negative
 indices. Strings hold at most 1 MiB of UTF-8 and exclude embedded NUL.
 
 User functions take exactly their declared number of arguments, which may be
-scalars, arrays, or strings, and return any of those types. `PRINT expression`
+scalars, arrays, strings, or string lists, and return any of those types. `PRINT expression`
 prints its value followed by a newline; `ECHO` keeps its literal command form.
 See [the text contract](docs/TEXT.md) for ownership, limits, and the host API.
+
+### String lists
+
+```aml
+def remember(words, word):
+    return list_push(words, word)
+
+words = list_new()
+remember(words, "сова")
+remember(words, "שלום")
+copy = words
+list_set(copy, -1, "🦉")
+PRINT words                  # ["сова", "שלום"]
+PRINT copy                   # ["сова", "🦉"]
+PRINT list_find(words, "שלום") # 1
+```
+
+`list_new`, `list_len`, `list_get`, `list_push`, `list_set`, `list_find`,
+`list_slice`, and `list_clone` operate on homogeneous lists of immutable text.
+Lists hold at most 65,536 items. Get/set accept negative indexes; slices clamp
+their exclusive endpoints. Numeric operators and array functions reject lists.
+Every assignment copies the mutable container, including assignment from a
+function return. Parameters share their caller's container so a function can
+append or replace entries. The [list contract](docs/LISTS.md) defines return
+values, errors, C ownership, and thread snapshots. Rebuild hosts and the runtime
+together when upgrading: the typed public structs now include list values.
 
 ### IMPORT
 
@@ -637,7 +668,7 @@ CHANNEL READ bus v1
 CHANNEL READ bus v2
 ```
 
-`SPAWN` takes a launch-time snapshot of global variables: arrays are copied, strings retain atomic references, and later rebindings stay local to each thread. The C persistent-global table is thread-local. Field physics and channels remain shared. `AWAIT` joins threads. `CHANNEL` provides thread-safe bounded float queues.
+`SPAWN` takes a launch-time snapshot of global variables: arrays and string-list containers are copied, immutable strings retain atomic references, and later mutations stay local to each thread. The C persistent-global table is thread-local. Field physics and channels remain shared. `AWAIT` joins threads. `CHANNEL` provides thread-safe bounded float queues.
 
 Both named `AWAIT` and bare `AWAIT` propagate a worker's execution error and
 stop the awaiting AML program. Worker diagnostics survive thread exit and are
@@ -1103,6 +1134,17 @@ int        am_string_find(const AM_String* text, const AM_String* needle);
 int        am_string_codepoint(const AM_String* text, int index);
 AM_String* am_string_from_codepoint(int codepoint);
 
+// ─── Mutable string lists ───────────────────────────────────────────────
+AM_List*   am_list_new(void);
+void       am_list_ref(AM_List* list);
+void       am_list_free(AM_List* list);
+AM_List*   am_list_clone(const AM_List* list);
+int        am_list_push(AM_List* list, AM_String* item);
+AM_String* am_list_get(const AM_List* list, int index);
+int        am_list_set(AM_List* list, int index, AM_String* item);
+int        am_list_find(const AM_List* list, const AM_String* item);
+AM_List*   am_list_slice(const AM_List* list, int start, int end);
+
 // ─── Persistent globals — C training-host API ─────────────────────────────
 void         am_persistent_mode(int enable);             // AML vars survive am_exec()
 int          am_set_var_array(const char* name, const float* data, int len);
@@ -1111,6 +1153,8 @@ const float* am_get_var_array(const char* name, int* len);
 float        am_get_var_float(const char* name);
 int          am_set_var_text(const char* name, const char* utf8);
 const char*  am_get_var_text(const char* name);
+int          am_set_var_list(const char* name, const AM_List* list);
+const AM_List* am_get_var_list(const char* name);
 void         am_persistent_clear(void);
 
 // ─── Inline queries ───────────────────────────────────────────────────────
