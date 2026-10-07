@@ -399,6 +399,11 @@ void am_reset_debt(void);
 // Execute AML script (Level 0 + Level 2)
 int am_exec(const char* script);
 
+// Execute embedded source with file-relative INCLUDE resolution. source_path
+// names the source file; the file itself need not exist. Origin is scoped to
+// this call and restored on return. Relative paths are relative to the caller.
+int am_exec_source(const char* script, const char* source_path);
+
 // Execute AML file (convenience: reads file, executes)
 int am_exec_file(const char* path);
 
@@ -887,6 +892,7 @@ typedef struct {
 
 // Spawn API
 int  am_spawn_launch(const char* name, const char* script);
+// Failed joins transfer the worker's diagnostic to this thread's am_get_error().
 int  am_spawn_await(const char* name);
 void am_spawn_await_all(void);
 int  am_spawn_count(void);

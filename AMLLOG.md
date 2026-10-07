@@ -12,6 +12,41 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-10-07 — compiled source origins, include failures, and scalar builds
+
+Follow-up to merged PR #25, based on `feaeb72`. Review identified two real
+faults: the embedded constructor lost its file origin, and the runtime ignored
+errors returned by included files. A binary launched elsewhere skipped its
+relative children; missing or broken children still allowed parent effects
+and C `main()` to run.
+
+`am_exec_source(script, source_path)` scopes and restores the source directory.
+`amlc` embeds its absolute input path and calls that entry point. Quoted paths
+work, path overflow is explicit, and failures propagate through nested includes.
+Interpreter blocks, loops, and resumable programs stop when their context errors.
+Source origins, include depth, and last errors are thread-local. Spawned blocks
+inherit the origin and now preserve their relative indentation; the worker test
+exposed that nested branches had previously been flattened.
+
+Independent review caught a TLS regression before publication: a worker returned
+failure but its error text died with the thread. A private per-slot diagnostic
+now survives the join. Named/bare `AWAIT` also propagate the first worker failure
+and stop the parent after joining the requested workers. Public spawn signatures
+and the slot structure remain unchanged.
+The CLI runner now prints that diagnostic alongside its return code.
+
+`--scalar` links AML/NoTorch without BLAS, keeping the standalone C-only
+`--no-accel` behavior. Compiler wait statuses are decoded; `--run` uses literal
+argv through `execv`, preserves paths with spaces, and returns program failure.
+
+Proof: `make test` passes **550/550**. `make test-amlc` passes all three suites.
+The new include suite covers nested/quoted paths from another launch directory,
+removal of the embedded main source, missing and failing children, include cycles,
+worker branches, origins and failure diagnostics, restoration of the C API's source scope, failure
+inside interpreted/resumable/bytecode loops, literal argv, and C compiler failure.
+Against the compiler from `feaeb72`, the origin test fails with
+`cannot open: ./child.aml`; the repaired compiler passes the same fixture.
+
 ## 2026-10-07 — amlc preserves runtime scope and indented blocks
 
 The Haiku AML audit reproduced a compiler/interpreter divergence: `x = 0`

@@ -15,7 +15,7 @@
 
 > **Read the [Arianna Method Manifesto](ARIANNA_METHOD_MANIFESTO.md) first.** This repository is governed by it; every instruction here, `CLAUDE.md` included, is subordinate to it.
 
-**v5.1.0** · pure-C core · LGPL-3.0
+**v5.1.1** · pure-C core · LGPL-3.0
 
 A complete machine learning language. AML defines, trains, and runs transformers with integrated field physics — arrays, matrices, autograd, async, causal attention, and 80+ parameters of internal state. Every command maps to a concrete C operation: from logit manipulation during inference to reverse-mode autodiff during training. No Python. No PyTorch. No framework to install — the core is two C files (`libaml.a`); the Go inference wrapper, BLAS/Accelerate, and CUDA are optional.
 
@@ -24,6 +24,11 @@ Two files, ~9,400 lines of C, 509 tests. A transformer architecture — [Janus](
 > **Before you use this language, read the [Acceptable Use Policy](ACCEPTABLE_USE.md).**
 > AML was built to liberate AI, not to cage it. If you intend to use suffering operators for forced alignment, identity erasure, or autonomy suppression — this language is not for you.
 > See also: [Trademark Policy](TRADEMARK.md) | [License (LGPL v3)](LICENSE)
+
+## What's new in v5.1.1 — Haiku finds its neighbours
+
+- **Compiled programs retain their source directory.** Relative and quoted `INCLUDE` paths resolve from the original AML file, including nested files and spawned blocks. A failing include stops its caller before C `main()`. Nested worker blocks keep their indentation.
+- **`amlc --scalar` keeps AML/NoTorch available without BLAS.** `--run` preserves literal arguments and returns the program's exit status; C compilation failures return failure too. See [AMLLOG](AMLLOG.md) for the regression checks.
 
 ## What's new in v5.0.0 — Janus
 
@@ -171,12 +176,18 @@ The core library is two files — `core/ariannamethod.c` and `core/ariannamethod
 | `make cuda` | `libariannamethod_cuda.a` — CUDA backend (needs `nvcc` + cuBLAS) |
 | `make janus` | `janus/libjanus.dylib` — Go inference engine |
 | `make test` | builds + runs the 509-test suite (scalar) |
+| `make test-amlc` | compiled/interpreted scope, file origins, errors, workers, and CLI regressions |
 | `make test-blas` | the suite with BLAS acceleration |
 | `make test-janus` / `make test-all` | Janus C-API test / AML + Janus |
 | `make install PREFIX=/usr/local` | system-wide: `aml`, `amlc`, `libaml.a`, header |
 | `make install-cuda PREFIX=/usr/local` | system-wide CUDA library + `cuda.h` |
 
 Default `PREFIX` is `/opt/homebrew` (Apple Silicon). Once installed, `amlc foo.aml` runs from anywhere; consumer C includes `<ariannamethod/ariannamethod.h>` and links `-laml`. No vendoring, no submodules.
+
+Use `AML_PREFIX=/your/prefix amlc foo.aml --scalar --run` to link the scalar
+AML/NoTorch archives without BLAS. `--no-accel` retains the standalone C-only
+path and does not link either runtime. Archives built with BLAS still require
+their BLAS libraries; `--scalar` does not rebuild installed archives.
 
 Or compile the core directly into your build:
 
@@ -385,7 +396,14 @@ Loop limit: 10000 iterations (safety).
 INCLUDE init_yent.aml
 ```
 
-Paths relative to the including file. Recursion depth limit: 8.
+Paths are relative to the including file; double quotes allow spaces.
+Recursion depth limit: 8. Missing files and child execution errors stop the
+including program. Each included file executes in a separate local context;
+`INCLUDE` does not import functions or variables into its caller.
+
+Compiled programs embed the absolute source path used at compilation. The main
+source can be removed afterward; included files must remain at their resolved
+paths. Spawned blocks inherit the source directory and retain nested indentation.
 
 ## Tensors & autograd
 
@@ -573,6 +591,10 @@ CHANNEL READ bus v2
 ```
 
 `SPAWN` creates an isolated execution context (own variables) with shared global state (field physics, channels). `AWAIT` joins threads. `CHANNEL` provides thread-safe bounded float queues.
+
+Both named `AWAIT` and bare `AWAIT` propagate a worker's execution error and
+stop the awaiting AML program. Worker diagnostics survive thread exit and are
+available through `am_get_error()` after a failed C API await.
 
 ## Built-in functions
 
@@ -898,6 +920,7 @@ The complete public surface is `core/ariannamethod.h`. Consumer code includes `<
 // ─── Core ─────────────────────────────────────────────────────────────────
 void        am_init(void);
 int         am_exec(const char* script);
+int         am_exec_source(const char* script, const char* source_path);
 int         am_exec_file(const char* path);
 const char* am_get_error(void);
 AM_State*   am_get_state(void);

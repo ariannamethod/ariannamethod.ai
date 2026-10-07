@@ -40,6 +40,6 @@ int main(int argc, char **argv) {
 
     int rc = am_exec_file(argv[1]);
     if (rc != 0)
-        fprintf(stderr, "aml: exec failed (rc=%d)\n", rc);
+        fprintf(stderr, "aml: exec failed (rc=%d): %s\n", rc, am_get_error());
     return rc;
 }
