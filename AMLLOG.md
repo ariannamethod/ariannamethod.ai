@@ -12,6 +12,47 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-10-07 — each voice keeps its own chance (v5.5.0)
+
+Haiku's Markov generator needs weighted draws whose state belongs to the voice.
+Five typed intrinsics expose owned PCG32 state, uniform and unbiased bounded
+draws, positive-temperature categorical sampling, and explicit-draw replay.
+The core validates types/state and publishes new limbs only after success.
+Numerical work runs in canonical NoTorch through an optional copied callback
+table and `libaml_notorch.a`. The two-file AML core remains standalone.
+
+RNG maps contain `algorithm=1` and four exact 16-bit limbs. Assignment,
+parenthesized expressions, returns, persistent host state, and worker snapshots
+retain independent containers; parameters share deliberate mutation. Existing
+`randn` and tensor streams keep their behavior. The optional runner registers
+NoTorch before execution; `amlc` does the same when all three archives exist.
+Missing/incomplete backends fail explicitly. Shared-program limits grow to
+128 function slots and 4,096 lines; the compiler's 4,096-directive table moves
+off the stack.
+
+Proof on Linux x86_64 / GCC 13.3:
+
+- `make test-sampling`: **927** mock-backend API checks, **956** allocation
+  checks covering all **13** RNG construction sites, and **2,199** real-NoTorch
+  runtime checks. Every rejected construction releases its tracked allocations.
+- Independent integer reference vectors agree through interpreter, resumable,
+  bytecode, runner, and compiled scalar execution. **51** invalid argument/state
+  cases preserve RNG state in all three host execution modes; eight more
+  runner/compiler cases stop before later AML or C-main effects.
+- Host save/restore, copied continuations, parent/worker snapshots, and
+  interleaved libc/NoTorch tensor randomness retain the expected next draw.
+  Compiler gates accept a 602-directive root and reject 4,097 directives.
+- ASan/UBSan pass the **927** API checks and existing **3,727** map runtime
+  checks, including **12 workers / 120,000** mutation cycles. Leak detection
+  is disabled because the environment prevents process-task inspection;
+  the explicit allocation gate checks retained blocks.
+- Existing **550/550** runtime tests, three compiler suites, and import, text,
+  list, and map gates pass. Haiku's existing organs plus new English form pass
+  **8,096 reference results** through interpreted and compiled scalar paths.
+
+See [sampling](docs/SAMPLING.md) for the build, API, state representation, and
+reference reproduction. Rebuild hosts against the expanded runtime header.
+
 ## 2026-10-07 — bound composite-key writes after CodeQL review
 
 PR #29's CodeQL review identified `snprintf` return values feeding the next

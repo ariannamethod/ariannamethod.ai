@@ -38,6 +38,9 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+#ifdef AML_WITH_NOTORCH
+    am_use_notorch_sampling();
+#endif
     int rc = am_exec_file(argv[1]);
     if (rc != 0)
         fprintf(stderr, "aml: exec failed (rc=%d): %s\n", rc, am_get_error());

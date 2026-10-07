@@ -63,13 +63,13 @@ The bytecode path uses the prepared function table once and advances past alread
 | Imported file | 1 MiB |
 | Source files per preparation | 64 including the root (`AML_MAX_IMPORTS`) |
 | Nested import edges from root | 16 (`AML_MAX_IMPORT_DEPTH`) |
-| Expanded executable/source-boundary lines | 1024 (`AML_MAX_LINES`) |
+| Expanded executable/source-boundary lines | 4096 (`AML_MAX_LINES`) |
 | Nonblank, noncomment line content after indentation | 255 bytes plus NUL (`AML_MAX_LINE_LEN`) |
-| Function table | 64 entries, including 17 current registered builtins: 47 user definitions |
+| Function table | 128 entries, including 17 current registered builtins: 111 user definitions |
 | Function name and parameter name | 31 bytes plus NUL |
 | Parameters per function | 8 |
 
-Whole-line comments and blank lines do not consume expanded line slots. Import boundaries do consume slots. The root `amlc` frontend also retains its existing 512-directive input limit; imported runtime sources are governed by the expanded 1024-line budget. These budgets fail explicitly instead of dropping trailing lines or definitions.
+Whole-line comments and blank lines do not consume expanded line slots. Import boundaries do consume slots. The root `amlc` frontend accepts 4096 directives; imported runtime sources share the expanded 4096-line budget. These budgets fail explicitly instead of dropping trailing lines or definitions. The expanded budgets accommodate Haiku's combined memory, English form, and generator modules.
 
 ## Verification
 

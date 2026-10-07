@@ -21,7 +21,7 @@ ifdef BLAS
   endif
 endif
 
-.PHONY: all test test-amlc test-imports test-text test-lists test-maps test-janus janus clean test-all test-blas amlc runner install
+.PHONY: all test test-amlc test-imports test-text test-lists test-maps test-sampling test-janus janus clean test-all test-blas amlc runner install notorch install-notorch
 
 # ═══ Core AML ═══
 all: libaml.a runner amlc
@@ -43,6 +43,24 @@ runner: runner/aml
 
 runner/aml: runner/am.c libaml.a
 	$(CC) $(CFLAGS) -Icore runner/am.c libaml.a -o $@ $(LDFLAGS)
+
+# Canonical NoTorch sampling is an explicit optional binding. The core archive
+# stays usable on its own; build NoTorch's archive before invoking this target.
+NOTORCH_ROOT ?= ../notorch
+NOTORCH_INCLUDE ?= $(NOTORCH_ROOT)
+NOTORCH_LIB ?= $(NOTORCH_ROOT)/libnotorch.a
+NOTORCH_LDFLAGS ?=
+
+notorch: all libaml_notorch.a runner/aml-notorch
+
+libaml_notorch.a: core/aml_notorch.o
+	ar rcs $@ $^
+
+core/aml_notorch.o: core/aml_notorch.c core/ariannamethod.h $(NOTORCH_INCLUDE)/notorch.h
+	$(CC) $(CFLAGS) -Icore -I$(NOTORCH_INCLUDE) -c $< -o $@
+
+runner/aml-notorch: runner/am.c libaml_notorch.a libaml.a $(NOTORCH_LIB)
+	$(CC) $(CFLAGS) -DAML_WITH_NOTORCH -Icore runner/am.c libaml_notorch.a libaml.a $(NOTORCH_LIB) -o $@ $(LDFLAGS) $(NOTORCH_LDFLAGS) -lpthread
 
 # ═══ CUDA backend (optional, requires nvcc + cuBLAS) ═══
 # Build:   make cuda
@@ -73,6 +91,12 @@ install: all
 	install -m 0644 libaml.a $(PREFIX)/lib/libaml.a
 	install -m 0644 core/ariannamethod.h $(PREFIX)/include/ariannamethod/ariannamethod.h
 
+# NoTorch is installed independently. amlc discovers this bridge alongside
+# libaml.a and libnotorch.a in the same prefix.
+install-notorch: install notorch
+	install -m 0755 runner/aml-notorch $(PREFIX)/bin/aml-notorch
+	install -m 0644 libaml_notorch.a $(PREFIX)/lib/libaml_notorch.a
+
 # Install CUDA library (optional — run `make cuda` first, then `make install-cuda`)
 install-cuda: libariannamethod_cuda.a
 	install -d $(PREFIX)/lib $(PREFIX)/include/ariannamethod
@@ -100,6 +124,9 @@ test-lists: all
 
 test-maps: all
 	bash tests/test_aml_maps.sh
+
+test-sampling: notorch
+	NOTORCH_LIB="$(abspath $(NOTORCH_LIB))" NOTORCH_INCLUDE="$(abspath $(NOTORCH_INCLUDE))" NOTORCH_LDFLAGS="$(NOTORCH_LDFLAGS)" bash tests/test_aml_sampling.sh
 
 core/test_aml: core/test_aml.c core/ariannamethod.c core/ariannamethod.h
 	$(CC) $(CFLAGS) core/test_aml.c core/ariannamethod.c -o $@ $(LDFLAGS)
@@ -130,5 +157,5 @@ test-all: test test-janus
 
 # ═══ Clean ═══
 clean:
-	rm -f core/*.o core/test_aml core/test_aml_blas libaml.a
+	rm -f core/*.o core/test_aml core/test_aml_blas libaml.a libaml_notorch.a runner/aml runner/aml-notorch tools/amlc
 	rm -f janus/libjanus.dylib janus/libjanus.h janus/test_janus_c

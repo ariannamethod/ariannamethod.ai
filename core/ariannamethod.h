@@ -287,11 +287,11 @@ typedef struct {
 // AML LEVEL 2 — flow control, variables, expressions
 // ═══════════════════════════════════════════════════════════════════════════════
 
-#define AML_MAX_LINES       1024
+#define AML_MAX_LINES       4096
 #define AML_MAX_LINE_LEN    256
 #define AML_MAX_VARS        256
 #define AML_MAX_NAME        32
-#define AML_MAX_FUNCS       64    // total slots, including registered builtins
+#define AML_MAX_FUNCS       128   // total slots, including registered builtins
 #define AML_MAX_PARAMS      8
 #define AML_MAX_CALL_DEPTH  16
 #define AML_MAX_INCLUDE     8
@@ -380,6 +380,33 @@ int am_map_get(const AM_Map* map, const AM_String* key, float* out); // 1/0/-1
 int am_map_set(AM_Map* map, AM_String* key, float value); // retain new key; 0/-1
 int am_map_delete(AM_Map* map, const AM_String* key); // 1 removed, 0 absent, -1 invalid
 AM_List* am_map_keys(const AM_Map* map); // independent owned list, retained keys
+
+// Optional owned sampling backend. The callback table is copied by registration
+// and remains installed across am_init() and worker initialization. Configure it
+// before execution/worker creation; replacing it during execution is unsupported.
+// NULL unregisters it. All six callbacks are required, and their code must remain
+// loaded until unregistered. No callback may retain a state or weights pointer.
+//
+// State version 1 is NoTorch's PCG32 stream 54. AML represents its uint64_t state
+// as an ordinary five-entry map: algorithm=1 and state0..state3 are little-endian
+// 16-bit limbs. Map assignment/snapshots copy the stream; parameters share it.
+// Integer/categorical callbacks return 0 on success or -1 on invalid arguments.
+// Numeric computation belongs to the backend; the core validates AML types and
+// state and publishes a new state only after a successful, in-range result.
+typedef struct {
+    void (*seed)(uint64_t* state, uint64_t seed);
+    uint32_t (*u32)(uint64_t* state);
+    float (*uniform)(uint64_t* state);
+    int (*index)(uint64_t* state, uint32_t bound, uint32_t* out);
+    int (*categorical_at)(const float* weights, int n, float temperature,
+                          double draw, int* out);
+    int (*categorical)(uint64_t* state, const float* weights, int n,
+                       float temperature, int* out);
+} AM_SamplingBackend;
+
+void am_set_sampling_backend(const AM_SamplingBackend* backend);
+// Supplied by optional libaml_notorch.a; link it with libaml.a and libnotorch.a.
+void am_use_notorch_sampling(void);
 
 typedef struct {
     float* data;
