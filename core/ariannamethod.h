@@ -290,10 +290,13 @@ typedef struct {
 #define AML_MAX_LINE_LEN    256
 #define AML_MAX_VARS        256
 #define AML_MAX_NAME        32
-#define AML_MAX_FUNCS       64    // increased: 32 user + 32 built-in
+#define AML_MAX_FUNCS       64    // total slots, including registered builtins
 #define AML_MAX_PARAMS      8
 #define AML_MAX_CALL_DEPTH  16
 #define AML_MAX_INCLUDE     8
+#define AML_MAX_IMPORTS    64    // source files in one prepared program, root included
+#define AML_MAX_IMPORT_DEPTH 16
+#define AML_MAX_SOURCE_PATH 256
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // AML v4.0 — ARRAYS (Phase 1)
@@ -303,7 +306,27 @@ typedef struct {
 
 #define AML_TYPE_FLOAT  0
 #define AML_TYPE_ARRAY  1
+#define AML_TYPE_STRING 2
 #define AM_MAX_ARRAY_SIZE  1048576  // 1M floats = 4MB
+#define AM_MAX_STRING_BYTES 1048576
+
+// Immutable validated UTF-8. len counts Unicode codepoints, byte_len bytes.
+// Each owner keeps one atomic reference; embedded NUL is outside the text domain.
+typedef struct {
+    char* data;
+    int byte_len;
+    int len;
+    int refcount;
+} AM_String;
+
+AM_String* am_string_new(const char* utf8);
+void am_string_ref(AM_String* text);
+void am_string_free(AM_String* text);
+AM_String* am_string_concat(const AM_String* a, const AM_String* b);
+AM_String* am_string_slice(const AM_String* text, int start, int end);
+int am_string_find(const AM_String* text, const AM_String* needle);
+int am_string_codepoint(const AM_String* text, int index);
+AM_String* am_string_from_codepoint(int codepoint);
 
 typedef struct {
     float* data;
@@ -323,14 +346,16 @@ typedef struct {
     char text[AML_MAX_LINE_LEN];
     int  indent;
     int  lineno;
+    char origin[AML_MAX_SOURCE_PATH]; // absolute source file; survives IMPORT expansion
 } AML_Line;
 
-// Variable — supports float or array
+// Variable — supports float, array, or immutable UTF-8 string
 typedef struct {
     char      name[AML_MAX_NAME];
-    int       type;     // AML_TYPE_FLOAT or AML_TYPE_ARRAY
+    int       type;     // AML_TYPE_FLOAT, AML_TYPE_ARRAY, or AML_TYPE_STRING
     float     value;    // used when type == FLOAT
     AM_Array* array;    // used when type == ARRAY (heap allocated)
+    AM_String* string;  // used when type == STRING (one owned reference)
 } AML_Var;
 
 // Symbol table
@@ -370,7 +395,8 @@ typedef struct {
     int          has_return;        // 1 if function returned a value
     float        return_value;      // scalar return value
     AM_Array*    return_array;      // array return value (NULL if scalar)
-    int          return_type;       // AML_TYPE_FLOAT or AML_TYPE_ARRAY
+    AM_String*   return_string;     // owned string return value
+    int          return_type;       // AML_TYPE_FLOAT / ARRAY / STRING
 } AML_ExecCtx;
 
 // AM_State field map entry (for reading state in expressions)
@@ -1111,7 +1137,9 @@ AM_MethodState* am_method_get_state(void);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // PERSISTENT GLOBALS — C training host API
-// When persistent mode is ON, AML variables survive across am_exec() calls.
+// When persistent mode is ON, AML variables survive across am_exec() calls
+// in the calling thread. SPAWN takes a launch-time snapshot; worker changes
+// remain in that worker's own store and are released when it exits.
 // The C host can inject/read arrays by name, enabling batch-feeding loops:
 //   am_set_var_array("tokens", tok_arr);
 //   am_exec(model_script);
@@ -1134,7 +1162,11 @@ const float* am_get_var_array(const char* name, int* len);
 // Get a named AML variable as float. Returns 0 if not found.
 float am_get_var_float(const char* name);
 
-// Clear all persistent globals (frees arrays, resets to empty)
+// Copy UTF-8 text into a persistent variable; getter is borrowed until mutation.
+int am_set_var_text(const char* name, const char* utf8);
+const char* am_get_var_text(const char* name);
+
+// Clear the calling thread's persistent globals (frees arrays and strings).
 void am_persistent_clear(void);
 
 #ifdef __cplusplus

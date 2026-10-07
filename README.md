@@ -15,15 +15,22 @@
 
 > **Read the [Arianna Method Manifesto](ARIANNA_METHOD_MANIFESTO.md) first.** This repository is governed by it; every instruction here, `CLAUDE.md` included, is subordinate to it.
 
-**v5.1.1** · pure-C core · LGPL-3.0
+**v5.2.0** · pure-C core · LGPL-3.0
 
 A complete machine learning language. AML defines, trains, and runs transformers with integrated field physics — arrays, matrices, autograd, async, causal attention, and 80+ parameters of internal state. Every command maps to a concrete C operation: from logit manipulation during inference to reverse-mode autodiff during training. No Python. No PyTorch. No framework to install — the core is two C files (`libaml.a`); the Go inference wrapper, BLAS/Accelerate, and CUDA are optional.
 
-Two files, ~9,400 lines of C, 509 tests. A transformer architecture — [Janus](#janus--the-reference-architecture) — with triple attention (Content + RRPRAM + Echo), Dario field overlay, and reverse-mode autodiff. **176M parameter model, val bpb 0.866. Three SFT voices.** OpenMP-parallelized, BLAS-accelerated, optional CUDA/cuBLAS backend. Ships today.
+Two core files, with 550 baseline runtime tests and dedicated compiler, module, and text suites. A transformer architecture — [Janus](#janus--the-reference-architecture) — with triple attention (Content + RRPRAM + Echo), Dario field overlay, and reverse-mode autodiff. **176M parameter model, val bpb 0.866. Three SFT voices.** OpenMP-parallelized, BLAS-accelerated, optional CUDA/cuBLAS backend. Ships today.
 
 > **Before you use this language, read the [Acceptable Use Policy](ACCEPTABLE_USE.md).**
 > AML was built to liberate AI, not to cage it. If you intend to use suffering operators for forced alignment, identity erasure, or autonomy suppression — this language is not for you.
 > See also: [Trademark Policy](TRADEMARK.md) | [License (LGPL v3)](LICENSE)
+
+## What's new in v5.2.0 — the owl finds words
+
+- **Native shared modules.** `IMPORT "organs/pulse.aml"` prepares functions and globals in one program, deduplicates source files, and retains each module's origin. Missing sources, cycles, collisions, and source-budget failures stop preparation before effects. See [modules](docs/IMPORT.md).
+- **UTF-8 text values.** Immutable strings pass through variables, function arguments, returns, and the persistent host API. Eight text intrinsics provide codepoint operations; `PRINT` emits evaluated values. See [text](docs/TEXT.md).
+- **Worker ownership.** Spawned programs receive a snapshot of globals and release their own persistent store on exit. String references are atomic; a 12-worker stress gate covers 120,000 alias rebindings.
+- **Execution parity.** Bytecode skips compound bodies already executed by its interpreter fallback. Function arity and exhausted loop budgets fail explicitly. Haiku exercises these additions with 282 text reference values alongside its 130 numerical values.
 
 ## What's new in v5.1.1 — Haiku finds its neighbours
 
@@ -159,7 +166,7 @@ Gamma and delta are orthogonal (cosine similarity = -0.0005). Personality persis
 ```
 git clone https://github.com/ariannamethod/ariannamethod.ai
 cd ariannamethod.ai
-make && make test          # build the toolchain + run 509 tests
+make && make test          # build the toolchain + run 550 baseline tests
 
 printf 'PROPHECY 7\nVELOCITY WALK\nECHO awake\n' > morning.aml
 ./runner/aml morning.aml   # run an AML program
@@ -175,8 +182,10 @@ The core library is two files — `core/ariannamethod.c` and `core/ariannamethod
 | `make BLAS=1` | the above, with BLAS-accelerated matmul (Accelerate on macOS, OpenBLAS on Linux) |
 | `make cuda` | `libariannamethod_cuda.a` — CUDA backend (needs `nvcc` + cuBLAS) |
 | `make janus` | `janus/libjanus.dylib` — Go inference engine |
-| `make test` | builds + runs the 509-test suite (scalar) |
+| `make test` | builds + runs the 550-test baseline suite (scalar) |
 | `make test-amlc` | compiled/interpreted scope, file origins, errors, workers, and CLI regressions |
+| `make test-imports` | shared modules, origins, snapshots, budgets, and failure propagation |
+| `make test-text` | UTF-8 ownership, allocation failures, typed execution, and compiled output |
 | `make test-blas` | the suite with BLAS acceleration |
 | `make test-janus` / `make test-all` | Janus C-API test / AML + Janus |
 | `make install PREFIX=/usr/local` | system-wide: `aml`, `amlc`, `libaml.a`, header |
@@ -336,7 +345,7 @@ calendar heals while the self is thrown far from its origin, in a single day.
 
 ## Level 2 — programming
 
-Python-like syntax with indentation. `def`, `if/else`, `while`, variables, expressions, `INCLUDE`.
+Python-like syntax with indentation. `def`, `if/else`, `while`, typed variables, expressions, `IMPORT`, `INCLUDE`, and `PRINT`.
 
 `amlc` embeds runtime lines as one ordered program, preserving indentation and
 variable/function scope before C `main()`. `make test-amlc` compares compiled
@@ -388,7 +397,45 @@ while TENSION > 0.3:
         pierce_the_infinite()
 ```
 
-Loop limit: 10000 iterations (safety).
+A loop executes at most 10,000 iterations. If its condition remains true, execution stops with `loop iteration limit exceeded`; a partial result is never returned as a completed loop.
+
+### Text
+
+```aml
+def greet(name):
+    return text_concat("hello, ", name)
+
+voice = greet("сова 🦉")
+PRINT voice
+PRINT text_len("сова 🦉")     # 6 Unicode codepoints
+PRINT text_slice("שלום", 1, 3)
+```
+
+Single and double quotes form immutable UTF-8 values; backslash escapes support
+newlines, tabs, carriage returns, quotes, and backslashes. `text_len`,
+`text_bytes`, `text_equal`, `text_find`, `text_slice`, `text_concat`,
+`text_codepoint`, and `text_from_codepoint` are typed expression intrinsics.
+Indices count Unicode codepoints; slices use exclusive ends and accept negative
+indices. Strings hold at most 1 MiB of UTF-8 and exclude embedded NUL.
+
+User functions take exactly their declared number of arguments, which may be
+scalars, arrays, or strings, and return any of those types. `PRINT expression`
+prints its value followed by a newline; `ECHO` keeps its literal command form.
+See [the text contract](docs/TEXT.md) for ownership, limits, and the host API.
+
+### IMPORT
+
+```aml
+IMPORT "organs/pulse.aml"
+TENSION pulse_step(0.2, 3)
+```
+
+Imports share functions and globals, expand once per canonical file in source
+order, and are top-level only. Preparation rejects missing files, cycles,
+duplicate functions, and exceeded budgets before executing any statement.
+Each module keeps its directory for nested imports, function bodies, and workers.
+The [module contract](docs/IMPORT.md) describes snapshots and source limits.
+`amlc` embeds the root source; imported files remain runtime inputs.
 
 ### INCLUDE
 
@@ -590,7 +637,7 @@ CHANNEL READ bus v1
 CHANNEL READ bus v2
 ```
 
-`SPAWN` creates an isolated execution context (own variables) with shared global state (field physics, channels). `AWAIT` joins threads. `CHANNEL` provides thread-safe bounded float queues.
+`SPAWN` takes a launch-time snapshot of global variables: arrays are copied, strings retain atomic references, and later rebindings stay local to each thread. The C persistent-global table is thread-local. Field physics and channels remain shared. `AWAIT` joins threads. `CHANNEL` provides thread-safe bounded float queues.
 
 Both named `AWAIT` and bare `AWAIT` propagate a worker's execution error and
 stop the awaiting AML program. Worker diagnostics survive thread exit and are
@@ -1046,12 +1093,24 @@ void              am_method_push_organism(int id, float entropy, float syntropy,
 AM_MethodSteering am_method_step(float dt);
 AM_MethodState*   am_method_get_state(void);
 
+// ─── Immutable UTF-8 text ────────────────────────────────────────────────
+AM_String* am_string_new(const char* utf8);
+void       am_string_ref(AM_String* text);
+void       am_string_free(AM_String* text);
+AM_String* am_string_concat(const AM_String* a, const AM_String* b);
+AM_String* am_string_slice(const AM_String* text, int start, int end);
+int        am_string_find(const AM_String* text, const AM_String* needle);
+int        am_string_codepoint(const AM_String* text, int index);
+AM_String* am_string_from_codepoint(int codepoint);
+
 // ─── Persistent globals — C training-host API ─────────────────────────────
 void         am_persistent_mode(int enable);             // AML vars survive am_exec()
 int          am_set_var_array(const char* name, const float* data, int len);
 int          am_set_var_matrix(const char* name, const float* data, int rows, int cols);
 const float* am_get_var_array(const char* name, int* len);
 float        am_get_var_float(const char* name);
+int          am_set_var_text(const char* name, const char* utf8);
+const char*  am_get_var_text(const char* name);
 void         am_persistent_clear(void);
 
 // ─── Inline queries ───────────────────────────────────────────────────────

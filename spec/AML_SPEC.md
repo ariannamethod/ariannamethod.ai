@@ -1,6 +1,6 @@
 # AML — Arianna Method Language
 
-**Version:** 5.1.1 (Source origins)
+**Version:** 5.2.0 (Modules and text)
 **Extension:** `.aml`
 **Status:** Living specification
 
@@ -42,8 +42,9 @@ identifier     = letter { letter | digit | "_" } ;
 
 ```ebnf
 program        = { statement } ;
-statement      = command | include | def | if_stmt | while_stmt | assignment | comment | empty ;
+statement      = command | import | include | def | if_stmt | while_stmt | assignment | return_stmt | print_stmt | comment | empty ;
 
+import         = "IMPORT" quoted_string ;  (* top-level only *)
 include        = "INCLUDE" path ;
 path           = quoted_string | word ".aml" ;
 
@@ -54,15 +55,46 @@ block          = INDENT { statement } DEDENT ;
 if_stmt        = "if" expression ":" block [ "else" ":" block ] ;
 while_stmt     = "while" expression ":" block ;
 
-assignment     = identifier "=" expression ;
+assignment     = identifier "=" value ;
+return_stmt    = "return" [ value ] ;
+print_stmt     = "PRINT" value ;
+value          = text_literal | array_expression | expression ;
+text_literal   = double_quoted_utf8 | single_quoted_utf8 ;
 expression     = term { ( "+" | "-" | "*" | "/" | ">" | "<" | "==" | "!=" | "and" | "or" ) term } ;
 term           = number | identifier | identifier "(" [ args ] ")" | "(" expression ")" ;
-args           = expression { "," expression } ;
+args           = value { "," value } ;
 ```
 
 **Note on indentation:** AML Level 2 uses Python-style indentation for blocks. This is deliberate — transformer attention weights respond strongly to indented code-like structures (see TRIPD research). The indentation IS the syntax, not decoration.
 
 ---
+
+### 1.4 Shared modules and UTF-8 values
+
+`IMPORT "path"` expands a canonical source once into the current program's
+function/global scope before execution. It preserves the originating directory
+and line for each statement. Preparation rejects cycles, missing files,
+colliding functions, malformed declarations, and source-budget overflow before
+any statement executes. Imports must be top-level; `INCLUDE` retains its child
+execution context. [IMPORT.md](../docs/IMPORT.md) defines order, snapshots,
+limits, and compiled-program file requirements.
+
+Strings are immutable validated UTF-8, with at most 1 MiB of content and no
+embedded NUL. Variables, arguments, and returns carry their actual scalar,
+array, or string type. User functions require exactly their declared arity.
+`PRINT value` writes UTF-8 strings, numeric scalars, or bracketed numeric arrays,
+then a newline. `ECHO` keeps its literal command semantics.
+
+The eight expression intrinsics are `text_len`, `text_bytes`, `text_equal`,
+`text_find`, `text_slice`, `text_concat`, `text_codepoint`, and
+`text_from_codepoint`. Codepoint indices are distinct from bytes and grapheme
+clusters; slicing has an exclusive end and clamps negative indices.
+[TEXT.md](../docs/TEXT.md) defines their signatures, errors, escapes, ownership,
+and C API. Numeric operators require scalar values; use the text intrinsics
+for string operations.
+
+A loop may execute 10,000 iterations; if its condition remains true, it fails
+explicitly. This bound applies to text-processing loops as to other AML loops.
 
 ## 2. Command Reference
 
@@ -80,7 +112,9 @@ compilation roles. Runtime source is bounded to 512 nonblank, noncomment lines
 of at most 511 bytes each in `amlc`; the interpreter's own line limits also
 apply. The call supplies the absolute input path captured by `amlc` and
 resolves runtime `INCLUDE` from that directory, regardless of launch directory.
-The main source file is embedded; included files are read at runtime.
+The main source file is embedded; imported and included files are read at runtime.
+The runtime accepts at most 255 bytes per executable line and 1024 expanded
+lines, including import boundaries; exceeded budgets fail explicitly.
 
 `--scalar` links available AML/NoTorch archives without BLAS flags or libraries;
 use archives built in scalar mode. `--no-accel` builds standalone C without
@@ -1106,7 +1140,7 @@ TAPE CLEAR
 
 ## 20. Async — SPAWN / AWAIT / CHANNEL
 
-Parallel execution via pthreads (verified core:4517-4591, 5889-5922; header:822-848). Each `SPAWN` block runs in its own thread with an isolated local scope but shared global field state. Threads communicate through thread-safe bounded float queues (CHANNEL). Disableable at compile time with `#define AM_ASYNC_DISABLED`.
+Parallel execution via pthreads (verified core:4517-4591, 5889-5922; header:822-848). Each `SPAWN` block runs in its own thread with a launch-time snapshot of global variables and shared global field state. Arrays are copied; immutable strings retain atomic references. Persistent host variables belong to the calling thread; worker changes remain in that worker and its store is released at exit. Threads communicate through thread-safe bounded float queues (CHANNEL). Disableable at compile time with `#define AM_ASYNC_DISABLED`.
 
 ```aml
 SPAWN <name>:

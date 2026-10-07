@@ -12,6 +12,55 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-10-07 — native modules, UTF-8 values, and worker snapshots (v5.2.0)
+
+Haiku needs organs in separate AML files and words that remain words through
+function calls. `IMPORT "path"` now prepares one shared program: source order,
+canonical deduplication, cycle detection, function collision checks, and explicit
+budgets. Origins survive calls, workers, resumable execution, and bytecode
+snapshots. All preparation errors precede program effects. The existing
+`IMPORT CODES_RIC` / `DARKMATTER` / `NOTORCH` pack aliases remain valid.
+`amlc` embeds its root and loads imported AML files at process startup.
+
+Immutable UTF-8 strings now pass through variables, mixed function arguments,
+returns, and the persistent host API. Eight text intrinsics use codepoint
+indices; `PRINT` emits actual values. Literals preserve quoted punctuation and
+support explicit escapes. Source lines are bounded to 255 bytes; text values
+to 1 MiB. User function arity and the 10,000-iteration loop budget fail
+explicitly. Text used as an array/scalar produces an error before a numeric
+field, array element, optimizer, or channel is updated by that operation.
+
+Review exposed a concurrent double-free: two workers inherited the same mutable
+persistent table and decremented a shared string's plain reference count.
+Persistent globals are now thread-local; a launch snapshots globals, clones
+arrays, and retains strings through atomic references. Worker teardown releases
+its own store. Channel barriers verify that parent rebindings and worker
+assignments stay independent. CUDA snapshots synchronize the source array's CPU
+mirror before copying; accelerator execution was not tested in this environment.
+
+The bytecode audit also found duplicate function registration, repeated bodies
+after fallback control flow, quoted `=` misclassified as assignment, silent
+array type failures, and numeric TAPE literals read as variable names. The
+repaired fast path validates simple operands; complex expressions execute once
+through the common evaluator. Quoted brackets in array arguments/indices work,
+and array literals reject nonnumeric elements instead of manufacturing zeros.
+
+Proof on Linux x86_64:
+
+- `make test`: **550/550** baseline runtime checks.
+- `make test-amlc`: all three compiler suites pass.
+- `make test-imports`: **1017 checks**, interpreter/scalar parity, snapshots,
+  pack compatibility, type failures, and preparation failures before C main.
+- `make test-text`: **483 API**, **515 allocation-fault**, **1122 runtime** checks;
+  byte-exact output and **41 invalid programs** across five execution paths.
+- ASan/UBSan pass the complete text API/runtime suites, including **12 workers /
+  120,000 alias rebindings**. LeakSanitizer is unavailable under ptrace; the
+  fault-injection harness finishes with zero tracked live allocations.
+- Haiku: **130 numerical + 282 text reference values** pass interpreted and
+  compiled scalar execution, using native imports and pure AML organism code.
+
+See [IMPORT](docs/IMPORT.md), [TEXT](docs/TEXT.md), and the v5.2.0 specification.
+
 ## 2026-10-07 — compiled source origins, include failures, and scalar builds
 
 Follow-up to merged PR #25, based on `feaeb72`. Review identified two real
