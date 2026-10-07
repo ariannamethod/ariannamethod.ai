@@ -1,6 +1,6 @@
 # AML — Arianna Method Language
 
-**Version:** 5.3.0 (String collections)
+**Version:** 5.5.0 (Owned sampling)
 **Extension:** `.aml`
 **Status:** Living specification
 
@@ -138,6 +138,27 @@ Argument expressions follow ordinary eager evaluation. Assertion failure
 does not roll back effects of earlier statements or argument evaluation.
 `floor(x)` accepts exactly one finite scalar and returns its downward-rounded
 integer value as a scalar; wrong types and nonfinite inputs fail explicitly.
+
+Owned sampling uses an optional registered NoTorch backend. `rng_new(seed)`
+accepts an integer seed in `[0, 16777215]` and returns a numeric map with
+`algorithm=1` and four little-endian 16-bit limbs, `state0` through `state3`.
+The state follows PCG32 XSH-RR with fixed stream 54. `rng_uniform(state)` gives
+a float32 value in `[0,1)` from the upper 24 bits. `rng_index(state, bound)`
+accepts integer bounds `[1, 16777216]` and uses unbiased rejection sampling.
+`rng_categorical(state, weights, temperature)` consumes one full 32-bit draw
+and returns a zero-based index. `categorical_at(weights, temperature, draw)`
+uses a supplied finite draw in `[0,1)` without a stream.
+
+Weights must form a nonempty numeric array, be finite and nonnegative, and
+contain a positive entry. Temperature must be finite and positive. NoTorch
+evaluates weights proportional to `weight^(1/temperature)` using logarithms
+and double-precision accumulation; zero weights cannot win. The complete
+state and call arguments are checked before publishing a changed stream.
+Invalid calls preserve the supplied stream. Argument expressions still follow
+ordinary eager evaluation. Map assignment copies a stream, function parameters
+share it, and persistent/worker snapshots retain independent containers.
+A missing backend is an explicit runtime error; existing `randn` and tensor
+initialization keep their current streams. See [SAMPLING.md](../docs/SAMPLING.md).
 
 The numeric array queries `len`, `sum`, `rows`, and `cols` take exactly one typed
 argument; `dot` takes exactly two. Parenthesized and returned values retain

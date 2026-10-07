@@ -15,7 +15,7 @@
 
 > **Read the [Arianna Method Manifesto](ARIANNA_METHOD_MANIFESTO.md) first.** This repository is governed by it; every instruction here, `CLAUDE.md` included, is subordinate to it.
 
-**v5.4.0** · pure-C core · LGPL-3.0
+**v5.5.0** · pure-C core · LGPL-3.0
 
 A complete machine learning language. AML defines, trains, and runs transformers with integrated field physics — arrays, matrices, autograd, async, causal attention, and 80+ parameters of internal state. Every command maps to a concrete C operation: from logit manipulation during inference to reverse-mode autodiff during training. No Python. No PyTorch. No framework to install — the core is two C files (`libaml.a`); the Go inference wrapper, BLAS/Accelerate, and CUDA are optional.
 
@@ -24,6 +24,11 @@ Two core files, with 550 baseline runtime tests and dedicated compiler, module, 
 > **Before you use this language, read the [Acceptable Use Policy](ACCEPTABLE_USE.md).**
 > AML was built to liberate AI, not to cage it. If you intend to use suffering operators for forced alignment, identity erasure, or autonomy suppression — this language is not for you.
 > See also: [Trademark Policy](TRADEMARK.md) | [License (LGPL v3)](LICENSE)
+
+## What's new in v5.5.0 — each voice keeps its own chance
+
+- **Owned sampling through NoTorch.** `rng_new`, `rng_uniform`, `rng_index`, and `rng_categorical` carry a replayable stream in an ordinary numeric map. Copies, persistent globals, and worker snapshots retain their own state. `categorical_at` replays an explicit draw; positive-temperature weighting stays finite at extreme temperatures. The optional bridge calls canonical NoTorch arithmetic. See [sampling](docs/SAMPLING.md).
+- **Room for the organism.** Shared programs now admit 128 function slots and 4,096 expanded lines, enough for Haiku's combined memory, English form, and generator modules. Exceeded budgets still fail during preparation.
 
 ## What's new in v5.4.0 — words carry their own weight
 
@@ -187,6 +192,7 @@ The core library is two files — `core/ariannamethod.c` and `core/ariannamethod
 | Command | Builds |
 |---------|--------|
 | `make` | `libaml.a` + `aml` runner + `amlc` transpiler |
+| `make notorch NOTORCH_ROOT=../notorch` | the toolchain plus `libaml_notorch.a` and `runner/aml-notorch`, using the sibling NoTorch archive |
 | `make BLAS=1` | the above, with BLAS-accelerated matmul (Accelerate on macOS, OpenBLAS on Linux) |
 | `make cuda` | `libariannamethod_cuda.a` — CUDA backend (needs `nvcc` + cuBLAS) |
 | `make janus` | `janus/libjanus.dylib` — Go inference engine |
@@ -195,9 +201,12 @@ The core library is two files — `core/ariannamethod.c` and `core/ariannamethod
 | `make test-imports` | shared modules, origins, snapshots, budgets, and failure propagation |
 | `make test-text` | UTF-8 ownership, allocation failures, typed execution, and compiled output |
 | `make test-lists` | string-list ownership, mutation, worker snapshots, allocation failures, and execution parity |
+| `make test-maps` | ordered numeric maps, exact composite keys, and state ownership |
+| `make test-sampling` | owned streams, replay, rejection, backend wiring, and execution parity |
 | `make test-blas` | the suite with BLAS acceleration |
 | `make test-janus` / `make test-all` | Janus C-API test / AML + Janus |
 | `make install PREFIX=/usr/local` | system-wide: `aml`, `amlc`, `libaml.a`, header |
+| `make install-notorch PREFIX=/usr/local` | the toolchain plus optional NoTorch bridge and `aml-notorch` runner |
 | `make install-cuda PREFIX=/usr/local` | system-wide CUDA library + `cuda.h` |
 
 Default `PREFIX` is `/opt/homebrew` (Apple Silicon). Once installed, `amlc foo.aml` runs from anywhere; consumer C includes `<ariannamethod/ariannamethod.h>` and links `-laml`. No vendoring, no submodules.
@@ -206,6 +215,13 @@ Use `AML_PREFIX=/your/prefix amlc foo.aml --scalar --run` to link the scalar
 AML/NoTorch archives without BLAS. `--no-accel` retains the standalone C-only
 path and does not link either runtime. Archives built with BLAS still require
 their BLAS libraries; `--scalar` does not rebuild installed archives.
+
+For native sampling, build NoTorch with scalar flags, then `make notorch`.
+Install its archive and the AML bridge in the same prefix. `amlc` discovers
+`libaml_notorch.a` alongside `libaml.a` and `libnotorch.a`, registers the backend,
+and links them in dependency order. The ordinary core and `runner/aml` remain
+standalone; a sampling call without a registered backend reports an error.
+The [sampling guide](docs/SAMPLING.md) gives exact build and embedding commands.
 
 Or compile the core directly into your build:
 
@@ -485,6 +501,26 @@ count followed by each UTF-8 byte length and its content. For example,
 execution with the message; nonzero returns one. `floor(x)` takes one finite
 scalar and rounds downward to an integer-valued scalar. See [maps](docs/MAPS.md) for
 the C API, ownership, allocation guarantees, and complete encoding contract.
+
+### Owned sampling
+
+```aml
+voice = rng_new(42)
+snapshot = voice
+PRINT rng_index(voice, 576)
+PRINT rng_index(snapshot, 576)  # same draw, independently owned state
+weights = zeros(3)
+weights[1] = 1
+weights[2] = 3
+PRINT rng_categorical(voice, weights, 0.7)
+```
+
+`rng_uniform` returns a float in `[0,1)`; `rng_index` selects uniformly with
+rejection; `rng_categorical` uses stable positive-temperature weights.
+`categorical_at(weights, temperature, draw)` supplies the same distribution
+with an explicit draw for replay. These intrinsics require the optional
+NoTorch backend. Stream state travels through normal map ownership, including
+persistent globals and workers. See [sampling](docs/SAMPLING.md).
 
 ### IMPORT
 
@@ -1188,6 +1224,10 @@ int        am_map_get(const AM_Map* map, const AM_String* key, float* out);
 int        am_map_set(AM_Map* map, AM_String* key, float value);
 int        am_map_delete(AM_Map* map, const AM_String* key);
 AM_List*   am_map_keys(const AM_Map* map);
+
+// ─── Optional owned sampling ────────────────────────────────────────────
+void am_set_sampling_backend(const AM_SamplingBackend* backend);
+void am_use_notorch_sampling(void); // optional bridge archive
 
 // ─── Persistent globals — C training-host API ─────────────────────────────
 void         am_persistent_mode(int enable);             // AML vars survive am_exec()

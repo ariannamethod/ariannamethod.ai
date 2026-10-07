@@ -100,6 +100,15 @@ static _Thread_local char g_base_dir[256] = ".";  // directory of this thread's 
                                    // including file, not the filesystem root.
 static _Thread_local char g_source_path[AML_MAX_SOURCE_PATH] = "";
 
+// Immutable execution-time configuration. Owned streams themselves are maps in
+// the execution context, so workers never advance a shared global RNG state.
+static AM_SamplingBackend g_sampling_backend;
+
+void am_set_sampling_backend(const AM_SamplingBackend* backend) {
+    if (backend) g_sampling_backend = *backend;
+    else memset(&g_sampling_backend, 0, sizeof(g_sampling_backend));
+}
+
 // Blood compiler globals (used by Level 0 dispatch + Blood API)
 static AM_BloodModule g_blood_modules[AM_BLOOD_MAX_MODULES];
 static int g_blood_count = 0;
@@ -3397,6 +3406,14 @@ static int aml_scalar_intrinsic_function(const char* name) {
     return strcasecmp(name, "assert") == 0 || strcasecmp(name, "floor") == 0;
 }
 
+static int aml_sampling_function(const char* name) {
+    static const char* names[] = {"rng_new", "rng_uniform", "rng_index",
+        "rng_categorical", "categorical_at"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+        if (strcasecmp(name, names[i]) == 0) return 1;
+    return 0;
+}
+
 // Decode quoted source into UTF-8. Escapes are explicit and never insert NUL.
 static AM_String* aml_string_literal(AML_ExecCtx* ctx, const char** cursor) {
     const char* p = *cursor;
@@ -3650,6 +3667,153 @@ static int aml_scalar_intrinsic_dispatch(AML_ExecCtx* ctx, const char* name,
     return 0;
 }
 
+static const char* const aml_rng_keys[] = {
+    "algorithm", "state0", "state1", "state2", "state3"
+};
+
+// Decode exactly five named entries without allocating temporary lookup keys.
+// Retain their entry indices so publishing the four limbs cannot allocate/fail.
+static int aml_rng_read(AML_ExecCtx* ctx, const AML_Var* value,
+                        uint64_t* state, int entries[4]) {
+    if (value->type != AML_TYPE_MAP || !value->map || value->map->len != 5) {
+        set_error(ctx, "RNG state must be a five-entry map"); return 1;
+    }
+    AM_Map* map = value->map;
+    unsigned int found = 0;
+    uint64_t decoded = 0;
+    for (int i = 0; i < map->len; i++) {
+        AM_MapEntry* entry = &map->entries[i];
+        int field = -1;
+        for (int k = 0; k < 5; k++) {
+            if (!strcmp(entry->key->data, aml_rng_keys[k])) { field = k; break; }
+        }
+        if (field < 0 || (found & (1u << field)) || !isfinite(entry->value) ||
+            entry->value < 0 || truncf(entry->value) != entry->value ||
+            (field == 0 ? entry->value != 1 : entry->value > 65535)) {
+            set_error(ctx, "invalid RNG algorithm or state limb"); return 1;
+        }
+        found |= 1u << field;
+        if (field) {
+            entries[field - 1] = i;
+            decoded |= (uint64_t)entry->value << (16 * (field - 1));
+        }
+    }
+    if (found != 31u) { set_error(ctx, "invalid RNG state keys"); return 1; }
+    *state = decoded;
+    return 0;
+}
+
+static void aml_rng_publish(AM_Map* map, const int entries[4], uint64_t state) {
+    for (int i = 0; i < 4; i++)
+        map->entries[entries[i]].value = (float)((state >> (16 * i)) & UINT64_C(65535));
+}
+
+static int aml_sampling_integer(AML_ExecCtx* ctx, const AML_Var* value,
+                                float minimum, float maximum, uint32_t* out) {
+    if (value->type != AML_TYPE_FLOAT || !isfinite(value->value) ||
+        value->value < minimum || value->value > maximum ||
+        truncf(value->value) != value->value) {
+        set_error(ctx, "sampling integer is outside its exact scalar range"); return 1;
+    }
+    *out = (uint32_t)value->value;
+    return 0;
+}
+
+static int aml_sampling_weights(AML_ExecCtx* ctx, const AML_Var* weights,
+                                const AML_Var* temperature) {
+    if (weights->type != AML_TYPE_ARRAY || !weights->array ||
+        weights->array->len < 1 || !weights->array->data) {
+        set_error(ctx, "categorical weights must be a nonempty numeric array"); return 1;
+    }
+    if (temperature->type != AML_TYPE_FLOAT || !isfinite(temperature->value) ||
+        temperature->value <= 0) {
+        set_error(ctx, "categorical temperature must be finite and positive"); return 1;
+    }
+#ifdef USE_CUDA
+    ensure_cpu(weights->array);
+#endif
+    return 0;
+}
+
+static int aml_sampling_dispatch(AML_ExecCtx* ctx, const char* name,
+                                 AML_Var* args, int nargs, AML_Var* out) {
+    int is_new = !strcasecmp(name, "rng_new");
+    int is_uniform = !strcasecmp(name, "rng_uniform");
+    int is_index = !strcasecmp(name, "rng_index");
+    int is_at = !strcasecmp(name, "categorical_at");
+    int need = (is_new || is_uniform) ? 1 : is_index ? 2 : 3;
+    if (nargs != need) { set_error(ctx, "wrong number of sampling arguments"); return 1; }
+    const AM_SamplingBackend* backend = &g_sampling_backend;
+    if (!backend->seed || !backend->u32 || !backend->uniform || !backend->index ||
+        !backend->categorical_at || !backend->categorical) {
+        set_error(ctx, "sampling backend unavailable; use NoTorch-enabled AML"); return 1;
+    }
+    if (is_new) {
+        uint32_t seed;
+        if (aml_sampling_integer(ctx, &args[0], 0, 16777215, &seed)) return 1;
+        uint64_t state;
+        backend->seed(&state, seed);
+        AM_Map* map = am_map_new();
+        if (!map) { set_error(ctx, "RNG map allocation failed"); return 1; }
+        for (int i = 0; i < 5; i++) {
+            AM_String* key = am_string_new(aml_rng_keys[i]);
+            float value = i == 0 ? 1 : (float)((state >> (16 * (i - 1))) & UINT64_C(65535));
+            int rc = key ? am_map_set(map, key, value) : -1;
+            am_string_free(key);
+            if (rc) {
+                am_map_free(map);
+                set_error(ctx, "RNG map allocation failed"); return 1;
+            }
+        }
+        out->map = map;
+        out->type = AML_TYPE_MAP;
+        return 0;
+    }
+    if (is_at) {
+        if (aml_sampling_weights(ctx, &args[0], &args[1])) return 1;
+        if (args[2].type != AML_TYPE_FLOAT || !isfinite(args[2].value) ||
+            args[2].value < 0 || args[2].value >= 1) {
+            set_error(ctx, "categorical draw must be finite in [0, 1)"); return 1;
+        }
+        int result = -1;
+        if (backend->categorical_at(args[0].array->data, args[0].array->len,
+                                   args[1].value, args[2].value, &result) ||
+            result < 0 || result >= args[0].array->len) {
+            set_error(ctx, "sampling backend rejected categorical arguments"); return 1;
+        }
+        out->value = (float)result;
+        return 0;
+    }
+    uint64_t state;
+    int entries[4];
+    if (aml_rng_read(ctx, &args[0], &state, entries)) return 1;
+    if (is_uniform) {
+        float result = backend->uniform(&state);
+        if (!isfinite(result) || result < 0 || result >= 1) {
+            set_error(ctx, "sampling backend returned an invalid uniform draw"); return 1;
+        }
+        out->value = result;
+    } else if (is_index) {
+        uint32_t bound, result = 0;
+        if (aml_sampling_integer(ctx, &args[1], 1, 16777216, &bound)) return 1;
+        if (backend->index(&state, bound, &result) || result >= bound) {
+            set_error(ctx, "sampling backend rejected index arguments"); return 1;
+        }
+        out->value = (float)result;
+    } else {
+        if (aml_sampling_weights(ctx, &args[1], &args[2])) return 1;
+        int result = -1;
+        if (backend->categorical(&state, args[1].array->data, args[1].array->len,
+                                args[2].value, &result) ||
+            result < 0 || result >= args[1].array->len) {
+            set_error(ctx, "sampling backend rejected categorical arguments"); return 1;
+        }
+        out->value = (float)result;
+    }
+    aml_rng_publish(args[0].map, entries, state);
+    return 0;
+}
+
 static int aml_array_scalar_function(const char* name) {
     return !strcasecmp(name, "len") || !strcasecmp(name, "sum") ||
            !strcasecmp(name, "dot") || !strcasecmp(name, "rows") ||
@@ -3737,6 +3901,7 @@ static int aml_invoke_value(AML_ExecCtx* ctx, const char* name,
     else if (aml_list_function(name)) rc = aml_list_dispatch(ctx, name, args, nargs, out);
     else if (aml_map_function(name)) rc = aml_map_dispatch(ctx, name, args, nargs, out);
     else if (aml_scalar_intrinsic_function(name)) rc = aml_scalar_intrinsic_dispatch(ctx, name, args, nargs, out);
+    else if (aml_sampling_function(name)) rc = aml_sampling_dispatch(ctx, name, args, nargs, out);
     else if (aml_array_scalar_function(name)) rc = aml_array_scalar_dispatch(ctx, name, args, nargs, out);
     else {
         AML_Func* f = aml_value_function(ctx, name);
@@ -3827,6 +3992,7 @@ static float expr_primary(AML_Expr* e) {
         if (*e->p == '(') {
             if (e->ctx && (aml_text_function(name) || aml_list_function(name) ||
                            aml_map_function(name) || aml_scalar_intrinsic_function(name) ||
+                           aml_sampling_function(name) ||
                            aml_array_scalar_function(name) ||
                            aml_value_function(e->ctx, name))) {
                 AML_Var result = {0};
@@ -4072,6 +4238,7 @@ static int aml_eval_value(AML_ExecCtx* ctx, const char* text, AML_Var* out) {
         }
         if (*p == '(' && (aml_text_function(name) || aml_list_function(name) ||
                           aml_map_function(name) || aml_scalar_intrinsic_function(name) ||
+                          aml_sampling_function(name) ||
                           aml_array_scalar_function(name) ||
                           aml_value_function(ctx, name))) {
             const char* close = aml_value_close(p);
@@ -5766,7 +5933,8 @@ static int aml_reserved_function(const char* name) {
         "list_new", "list_len", "list_get", "list_push", "list_set", "list_find",
         "list_slice", "list_clone", "list_key",
         "map_new", "map_len", "map_has", "map_get", "map_set", "map_delete",
-        "map_keys", "map_clone", "assert", "floor"
+        "map_keys", "map_clone", "assert", "floor", "rng_new", "rng_uniform",
+        "rng_index", "rng_categorical", "categorical_at"
     };
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (strcasecmp(name, names[i]) == 0) return 1;
@@ -7471,7 +7639,8 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
         }
         if (n && n < AML_MAX_NAME && *p == '(' &&
             (aml_value_function(ctx, name) || aml_text_function(name) || aml_list_function(name) ||
-             aml_map_function(name) || aml_scalar_intrinsic_function(name))) {
+             aml_map_function(name) || aml_scalar_intrinsic_function(name) ||
+             aml_sampling_function(name))) {
             AML_Var value = {0};
             aml_eval_value(ctx, text, &value);
             aml_value_clear(&value);

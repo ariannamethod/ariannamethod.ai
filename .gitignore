@@ -9,6 +9,7 @@ core/test_aml_asan.dSYM/
 janus_train
 test_aml
 runner/aml
+runner/aml-notorch
 tools/amlc
 janus_ckpt_step*.bin
 
