@@ -15,7 +15,7 @@
 
 > **Read the [Arianna Method Manifesto](ARIANNA_METHOD_MANIFESTO.md) first.** This repository is governed by it; every instruction here, `CLAUDE.md` included, is subordinate to it.
 
-**v5.5.0** · pure-C core · LGPL-3.0
+**v5.6.0** · pure-C core · LGPL-3.0
 
 A complete machine learning language. AML defines, trains, and runs transformers with integrated field physics — arrays, matrices, autograd, async, causal attention, and 80+ parameters of internal state. Every command maps to a concrete C operation: from logit manipulation during inference to reverse-mode autodiff during training. No Python. No PyTorch. No framework to install — the core is two C files (`libaml.a`); the Go inference wrapper, BLAS/Accelerate, and CUDA are optional.
 
@@ -24,6 +24,11 @@ Two core files, with 550 baseline runtime tests and dedicated compiler, module, 
 > **Before you use this language, read the [Acceptable Use Policy](ACCEPTABLE_USE.md).**
 > AML was built to liberate AI, not to cage it. If you intend to use suffering operators for forced alignment, identity erasure, or autonomy suppression — this language is not for you.
 > See also: [Trademark Policy](TRADEMARK.md) | [License (LGPL v3)](LICENSE)
+
+## What's new in v5.6.0 — experience reaches the weights
+
+- **Numerical values through NoTorch.** Linear layers, tanh, explicit reverse derivatives, mean squared error, plain SGD, and owned normal draws operate on ordinary AML arrays. AML composes the learning rule and owns publication; the optional bridge calls canonical NoTorch kernels without entering either runtime's global tape. See [numerical values](docs/NUMERICAL_VALUES.md).
+- **Unicode lowercase.** `text_lower` implements Unicode 15 default lowercase, including expanding `İ` and contextual Greek sigma. `isfinite` lets an AML organ handle nonfinite scalar observations explicitly. See [lowercase](docs/TEXT_LOWER.md).
 
 ## What's new in v5.5.0 — each voice keeps its own chance
 
@@ -203,6 +208,8 @@ The core library is two files — `core/ariannamethod.c` and `core/ariannamethod
 | `make test-lists` | string-list ownership, mutation, worker snapshots, allocation failures, and execution parity |
 | `make test-maps` | ordered numeric maps, exact composite keys, and state ownership |
 | `make test-sampling` | owned streams, replay, rejection, backend wiring, and execution parity |
+| `make test-numerical` | NoTorch value kernels, explicit derivatives, backend failures, and owned outputs |
+| `make test-text-lower` | Unicode lowercase, contextual sigma, expansion limits, and execution parity |
 | `make test-blas` | the suite with BLAS acceleration |
 | `make test-janus` / `make test-all` | Janus C-API test / AML + Janus |
 | `make install PREFIX=/usr/local` | system-wide: `aml`, `amlc`, `libaml.a`, header |
@@ -216,12 +223,15 @@ AML/NoTorch archives without BLAS. `--no-accel` retains the standalone C-only
 path and does not link either runtime. Archives built with BLAS still require
 their BLAS libraries; `--scalar` does not rebuild installed archives.
 
-For native sampling, build NoTorch with scalar flags, then `make notorch`.
+For native sampling and numerical values, build NoTorch with scalar flags, then `make notorch`.
 Install its archive and the AML bridge in the same prefix. `amlc` discovers
 `libaml_notorch.a` alongside `libaml.a` and `libnotorch.a`, registers the backend,
 and links them in dependency order. The ordinary core and `runner/aml` remain
-standalone; a sampling call without a registered backend reports an error.
-The [sampling guide](docs/SAMPLING.md) gives exact build and embedding commands.
+standalone; a sampling or numerical call without its registered backend reports
+an error. `am_use_notorch()` installs both tables; the older
+`am_use_notorch_sampling()` installs sampling only. The
+[numerical guide](docs/NUMERICAL_VALUES.md) and [sampling guide](docs/SAMPLING.md)
+give build and embedding commands.
 
 Or compile the core directly into your build:
 
@@ -439,9 +449,11 @@ PRINT text_slice("שלום", 1, 3)
 Single and double quotes form immutable UTF-8 values; backslash escapes support
 newlines, tabs, carriage returns, quotes, and backslashes. `text_len`,
 `text_bytes`, `text_equal`, `text_find`, `text_slice`, `text_concat`,
-`text_codepoint`, and `text_from_codepoint` are typed expression intrinsics.
+`text_codepoint`, `text_from_codepoint`, and `text_lower` are typed expression intrinsics.
 Indices count Unicode codepoints; slices use exclusive ends and accept negative
 indices. Strings hold at most 1 MiB of UTF-8 and exclude embedded NUL.
+`text_lower("ΟΣ İ")` returns `"ος i̇"` using Unicode 15 default casing;
+the [lowercase contract](docs/TEXT_LOWER.md) specifies context and expansions.
 
 User functions take exactly their declared number of arguments, which may be
 scalars, arrays, strings, string lists, or numeric maps, and return any of those types. `PRINT expression`
@@ -501,6 +513,8 @@ count followed by each UTF-8 byte length and its content. For example,
 execution with the message; nonzero returns one. `floor(x)` takes one finite
 scalar and rounds downward to an integer-valued scalar. See [maps](docs/MAPS.md) for
 the C API, ownership, allocation guarantees, and complete encoding contract.
+`isfinite(x)` takes one scalar and returns zero for NaN or either infinity,
+one otherwise.
 
 ### Owned sampling
 
@@ -521,6 +535,28 @@ rejection; `rng_categorical` uses stable positive-temperature weights.
 with an explicit draw for replay. These intrinsics require the optional
 NoTorch backend. Stream state travels through normal map ownership, including
 persistent globals and workers. See [sampling](docs/SAMPLING.md).
+
+### Numerical values through NoTorch
+
+```aml
+stream = rng_new(42)
+weights = rng_normal(stream, 5)
+bias = zeros(1)
+features = zeros(5)
+raw = nt_linear(weights, bias, features, 1, 5)
+prediction = nt_tanh(raw)
+target = zeros(1)
+loss_and_gradient = nt_mse_grad(prediction, target)
+PRINT loss_and_gradient
+```
+
+`nt_linear_vjp` returns packed weight, bias, and input derivatives;
+`nt_tanh_vjp` differentiates saved tanh outputs. `nt_sgd` returns updated
+parameters in a fresh array. These operations borrow finite inputs and publish
+their outputs only after success. `rng_normal` consumes two owned PCG32 words
+per value, with no hidden cached draw. Model layout, loss composition, clamping,
+and observation order live in AML. See [numerical values](docs/NUMERICAL_VALUES.md)
+for signatures, packed layouts, and backend registration.
 
 ### IMPORT
 
@@ -1201,6 +1237,7 @@ AM_String* am_string_slice(const AM_String* text, int start, int end);
 int        am_string_find(const AM_String* text, const AM_String* needle);
 int        am_string_codepoint(const AM_String* text, int index);
 AM_String* am_string_from_codepoint(int codepoint);
+AM_String* am_string_lower(const AM_String* text);
 
 // ─── Mutable string lists ───────────────────────────────────────────────
 AM_List*   am_list_new(void);
@@ -1228,6 +1265,10 @@ AM_List*   am_map_keys(const AM_Map* map);
 // ─── Optional owned sampling ────────────────────────────────────────────
 void am_set_sampling_backend(const AM_SamplingBackend* backend);
 void am_use_notorch_sampling(void); // optional bridge archive
+
+// ─── Optional numerical values ──────────────────────────────────────────
+void am_set_numerical_backend(const AM_NumericalBackend* backend);
+void am_use_notorch(void); // installs sampling and numerical tables
 
 // ─── Persistent globals — C training-host API ─────────────────────────────
 void         am_persistent_mode(int enable);             // AML vars survive am_exec()

@@ -12,6 +12,60 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-10-07 — experience reaches the weights (v5.6.0)
+
+Haiku's MathBrain and RAE now compose their learning in AML over seven
+stateless NoTorch value operations. An independent copied numerical callback
+table supplies linear layers and their reverse derivatives, tanh and its
+reverse derivative, mean squared error with gradient, functional SGD, and
+owned standard normals. The runtime checks inputs and dimensions, allocates
+unpublished outputs, and exposes a result only after backend success and
+complete finite checks. Normal draws publish the RNG map last. Both global
+tapes keep their existing state.
+The canonical kernels are [NoTorch PR #162](https://github.com/ariannamethod/notorch/pull/162),
+published as `8c39e3e6d47e11bad30d3f64f45c1a863929a2a2`.
+
+The optional bridge exports `am_use_notorch()` for sampling and numerical
+tables together. Runner and compiler use it, while the old sampling-only
+entry point and generated-C macro remain available. `isfinite` adds a typed
+scalar decision for skipped observations. Ordinary arrays and maps carry model
+and random state through functions, host snapshots, and workers.
+
+`text_lower` implements Unicode 15 default lowercase for RAE's word features.
+The two-file core embeds 7,648 bytes of generated mapping/property tables.
+U+0130 expands; Greek sigma reads the original Cased/Case_Ignorable context.
+Two passes enforce the output cap before allocation and write a fresh string.
+The frozen direct-Python oracle covers **5,560,315** scalar/context cases,
+62 curated strings, four long ignorable runs, and 200 random context strings.
+
+Review also reproduced signed product overflow in `am_set_var_matrix` and
+`am_matrix_new` with dimensions **65,536 × 65,537**. Division bounds now precede
+multiplication. The host rejects before reading its input; the AML constructor
+retains its established failed-construction result. UBSan catches both old
+paths and passes the repaired paths.
+
+Proof on Linux x86_64 / GCC 13.3:
+
+- `make test-numerical`: **990** callback/API checks, **1,057** allocation
+  checks, and **3,880** runtime checks. The **620** independent scalar/Python
+  assertions pass through all five execution paths. Seventy-four malformed
+  calls and four overflow cases preserve state in each host mode; fourteen
+  runner/compiler cases stop before later AML or C-main effects.
+  ASan/UBSan pass the API and runtime gates with leak detection disabled;
+  this environment prevents LeakSanitizer's process-task inspection. The
+  allocation gate verifies zero retained blocks at both refused output sites.
+- `make test-text-lower`: **783** API, **1,203** allocation, and **220** runtime
+  checks, with ten invalid programs across all five paths and zero tracked
+  retained blocks. The direct Python oracle agrees byte for byte; its table
+  regeneration agrees with the embedded data. ASan/UBSan pass the API suite.
+- Existing **550/550** runtime tests, compiler suites, imports, text, lists,
+  maps, and sampling all pass. Haiku's prior **8,096** reference results and
+  **22** scripted generator cases pass in interpreted and compiled scalar
+  execution, including the previous rejection/state-preservation gates.
+
+See [numerical values](docs/NUMERICAL_VALUES.md) and
+[Unicode lowercase](docs/TEXT_LOWER.md) for contracts and reproducible gates.
+
 ## 2026-10-07 — each voice keeps its own chance (v5.5.0)
 
 Haiku's Markov generator needs weighted draws whose state belongs to the voice.

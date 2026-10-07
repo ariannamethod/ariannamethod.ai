@@ -1,6 +1,6 @@
 # AML — Arianna Method Language
 
-**Version:** 5.5.0 (Owned sampling)
+**Version:** 5.6.0 (Numerical values and Unicode lowercase)
 **Extension:** `.aml`
 **Status:** Living specification
 
@@ -88,13 +88,20 @@ quotes, backslashes, and control bytes. `ECHO` keeps its literal command semanti
 Numeric maps print as JSON objects with the same escaped keys and finite
 numeric values, in insertion order.
 
-The eight expression intrinsics are `text_len`, `text_bytes`, `text_equal`,
+The nine expression intrinsics are `text_len`, `text_bytes`, `text_equal`,
 `text_find`, `text_slice`, `text_concat`, `text_codepoint`, and
-`text_from_codepoint`. Codepoint indices are distinct from bytes and grapheme
+`text_from_codepoint`, plus `text_lower`. Codepoint indices are distinct from bytes and grapheme
 clusters; slicing has an exclusive end and clamps negative indices.
 [TEXT.md](../docs/TEXT.md) defines their signatures, errors, escapes, ownership,
 and C API. Numeric operators require scalar values; use the text intrinsics
 for string operations.
+
+`text_lower(s)` returns a fresh string using Unicode 15 default lowercase.
+It includes expanding mappings and the original input's cased/case-ignorable
+context for Greek final sigma. Locale-specific casing and normalization are
+separate operations. Output must fit the same 1 MiB bound; a failed allocation
+or expansion leaves the input unchanged. [TEXT_LOWER.md](../docs/TEXT_LOWER.md)
+records the tables, provenance, and exact casing contract.
 
 String lists are ordered mutable containers of immutable text, with a maximum
 of 65,536 items. Their eight intrinsics are `list_new`, `list_len`, `list_get`,
@@ -138,6 +145,8 @@ Argument expressions follow ordinary eager evaluation. Assertion failure
 does not roll back effects of earlier statements or argument evaluation.
 `floor(x)` accepts exactly one finite scalar and returns its downward-rounded
 integer value as a scalar; wrong types and nonfinite inputs fail explicitly.
+`isfinite(x)` accepts exactly one scalar and returns zero for NaN or either
+infinity, one for every finite value. Other types and arities fail.
 
 Owned sampling uses an optional registered NoTorch backend. `rng_new(seed)`
 accepts an integer seed in `[0, 16777215]` and returns a numeric map with
@@ -159,6 +168,34 @@ ordinary eager evaluation. Map assignment copies a stream, function parameters
 share it, and persistent/worker snapshots retain independent containers.
 A missing backend is an explicit runtime error; existing `randn` and tensor
 initialization keep their current streams. See [SAMPLING.md](../docs/SAMPLING.md).
+
+Numerical values use an independent optional `AM_NumericalBackend` table.
+`am_use_notorch()` registers both canonical NoTorch tables; the sampling-only
+registration keeps its existing contract. Registration copies the tables,
+survives initialization, and must finish before workers run. A missing or
+incomplete numerical table fails explicitly.
+
+| Expression | Fresh result |
+| --- | --- |
+| `nt_linear(w, b, x, rows, cols)` | `rows` outputs of row-major `W*x+b` |
+| `nt_linear_vjp(w, x, dy, rows, cols)` | Packed `[dW rows*cols, db rows, dx cols]` |
+| `nt_tanh(x)` | Elementwise tanh, preserving array shape |
+| `nt_tanh_vjp(y, dy)` | `dy*(1-y*y)`, preserving the saved output's shape |
+| `nt_mse_grad(pred, target)` | Packed `[mean squared loss, dpred n]` |
+| `nt_sgd(params, grad, lr)` | `params-lr*grad`, preserving parameter shape |
+| `rng_normal(state, n)` | `n` standard normal values from the owned stream |
+
+All numeric inputs and results must be finite; operand lengths must match the
+declared dimensions. Dimensions are positive integers and every input/output
+must fit the existing array limit. Saved tanh values lie in `[-1,1]`; learning
+rate is finite and nonnegative. Each call allocates an unpublished output before
+invoking the backend, checks its status and complete result, then returns the
+array. Arguments remain unchanged. Neither global autograd tape is involved.
+Normal draws consume exactly two PCG32 words per value without a spare cache;
+RNG limbs publish only after the whole result passes validation. Ordinary eager
+argument evaluation and preceding statements retain their effects on failure.
+[NUMERICAL_VALUES.md](../docs/NUMERICAL_VALUES.md) defines the C callback and
+arithmetic contracts.
 
 The numeric array queries `len`, `sum`, `rows`, and `cols` take exactly one typed
 argument; `dot` takes exactly two. Parenthesized and returned values retain
