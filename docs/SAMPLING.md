@@ -9,6 +9,8 @@ categorical selection. The optional `libaml_notorch.a` binding connects them.
 The required canonical APIs are introduced in
 [NoTorch PR #161](https://github.com/ariannamethod/notorch/pull/161), published
 as `ad7b53afa6b24fb40e22624d5967d7b80eb838bc`.
+AML v5.6's bridge also links the [numerical values](NUMERICAL_VALUES.md) APIs;
+build the NoTorch revision providing both operation families.
 
 ## Build and run
 
@@ -43,8 +45,9 @@ NoTorch-enabled AML`. An installation missing either the bridge or NoTorch
 keeps that explicit error. `--no-accel` keeps the existing standalone C path.
 
 For a manually compiled `amlc --emit-c` result, pass
-`-DAML_LINK_NOTORCH_SAMPLING` and those three archives, followed by `-lm -lpthread`
-and any required NoTorch acceleration libraries.
+`-DAML_LINK_NOTORCH` and those three archives, followed by `-lm -lpthread`
+and any required NoTorch acceleration libraries. Newly emitted C also accepts
+the older `AML_LINK_NOTORCH_SAMPLING` macro; both register the full bridge.
 
 ## AML contract
 

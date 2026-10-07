@@ -103,10 +103,16 @@ static _Thread_local char g_source_path[AML_MAX_SOURCE_PATH] = "";
 // Immutable execution-time configuration. Owned streams themselves are maps in
 // the execution context, so workers never advance a shared global RNG state.
 static AM_SamplingBackend g_sampling_backend;
+static AM_NumericalBackend g_numerical_backend;
 
 void am_set_sampling_backend(const AM_SamplingBackend* backend) {
     if (backend) g_sampling_backend = *backend;
     else memset(&g_sampling_backend, 0, sizeof(g_sampling_backend));
+}
+
+void am_set_numerical_backend(const AM_NumericalBackend* backend) {
+    if (backend) g_numerical_backend = *backend;
+    else memset(&g_numerical_backend, 0, sizeof(g_numerical_backend));
 }
 
 // Blood compiler globals (used by Level 0 dispatch + Blood API)
@@ -808,9 +814,9 @@ int am_set_var_array(const char* name, const float* data, int len) {
 }
 
 int am_set_var_matrix(const char* name, const float* data, int rows, int cols) {
-    if (!name || !data || rows <= 0 || cols <= 0) return 1;
+    if (!name || !data || rows <= 0 || cols <= 0 ||
+        rows > AM_MAX_ARRAY_SIZE / cols) return 1;
     int len = rows * cols;
-    if (len > AM_MAX_ARRAY_SIZE) return 1;
     g_persistent_enabled = 1;
     AM_Array* arr = am_array_new(len);
     if (!arr) return 2;
@@ -1279,9 +1285,8 @@ AM_Array* am_array_new(int len) {
 
 // Create a 2D matrix (flat array with shape tracking)
 static AM_Array* am_matrix_new(int rows, int cols) {
-    if (rows <= 0 || cols <= 0) return NULL;
+    if (rows <= 0 || cols <= 0 || rows > AM_MAX_ARRAY_SIZE / cols) return NULL;
     int total = rows * cols;
-    if (total > AM_MAX_ARRAY_SIZE) return NULL;
     AM_Array* arr = am_array_new(total);
     if (!arr) return NULL;
     arr->rows = rows;
@@ -3380,7 +3385,7 @@ static AML_Func* aml_value_function(AML_ExecCtx* ctx, const char* name) {
 
 static int aml_text_function(const char* name) {
     static const char* names[] = {"text_len", "text_bytes", "text_equal", "text_find",
-        "text_slice", "text_concat", "text_codepoint", "text_from_codepoint"};
+        "text_slice", "text_concat", "text_codepoint", "text_from_codepoint", "text_lower"};
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (strcasecmp(name, names[i]) == 0) return 1;
     return 0;
@@ -3403,12 +3408,21 @@ static int aml_map_function(const char* name) {
 }
 
 static int aml_scalar_intrinsic_function(const char* name) {
-    return strcasecmp(name, "assert") == 0 || strcasecmp(name, "floor") == 0;
+    return strcasecmp(name, "assert") == 0 || strcasecmp(name, "floor") == 0 ||
+           strcasecmp(name, "isfinite") == 0;
 }
 
 static int aml_sampling_function(const char* name) {
     static const char* names[] = {"rng_new", "rng_uniform", "rng_index",
         "rng_categorical", "categorical_at"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+        if (strcasecmp(name, names[i]) == 0) return 1;
+    return 0;
+}
+
+static int aml_numerical_function(const char* name) {
+    static const char* names[] = {"nt_linear", "nt_linear_vjp", "nt_tanh",
+        "nt_tanh_vjp", "nt_mse_grad", "nt_sgd", "rng_normal"};
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (strcasecmp(name, names[i]) == 0) return 1;
     return 0;
@@ -3458,7 +3472,7 @@ static int aml_text_dispatch(AML_ExecCtx* ctx, const char* name, AML_Var* args,
                              int nargs, AML_Var* out) {
     int need = 2;
     if (!strcasecmp(name, "text_len") || !strcasecmp(name, "text_bytes") ||
-        !strcasecmp(name, "text_from_codepoint")) need = 1;
+        !strcasecmp(name, "text_from_codepoint") || !strcasecmp(name, "text_lower")) need = 1;
     if (!strcasecmp(name, "text_slice")) need = 3;
     if (nargs != need) { set_error(ctx, "wrong number of text arguments"); return 1; }
     if (!strcasecmp(name, "text_from_codepoint")) {
@@ -3475,7 +3489,9 @@ static int aml_text_dispatch(AML_ExecCtx* ctx, const char* name, AML_Var* args,
     AM_String* s = args[0].string;
     if (!strcasecmp(name, "text_len")) { out->value = (float)s->len; return 0; }
     if (!strcasecmp(name, "text_bytes")) { out->value = (float)s->byte_len; return 0; }
-    if (!strcasecmp(name, "text_slice")) {
+    if (!strcasecmp(name, "text_lower")) {
+        out->string = am_string_lower(s);
+    } else if (!strcasecmp(name, "text_slice")) {
         int start, end;
         if (aml_text_integer(ctx, &args[1], &start) || aml_text_integer(ctx, &args[2], &end))
             return 1;
@@ -3642,6 +3658,14 @@ static int aml_map_dispatch(AML_ExecCtx* ctx, const char* name, AML_Var* args,
 
 static int aml_scalar_intrinsic_dispatch(AML_ExecCtx* ctx, const char* name,
                                          AML_Var* args, int nargs, AML_Var* out) {
+    if (!strcasecmp(name, "isfinite")) {
+        if (nargs != 1) { set_error(ctx, "isfinite requires exactly one argument"); return 1; }
+        if (args[0].type != AML_TYPE_FLOAT) {
+            set_error(ctx, "isfinite requires a scalar"); return 1;
+        }
+        out->value = isfinite(args[0].value) ? 1.0f : 0.0f;
+        return 0;
+    }
     if (!strcasecmp(name, "floor")) {
         if (nargs != 1) { set_error(ctx, "floor requires exactly one argument"); return 1; }
         if (args[0].type != AML_TYPE_FLOAT || !isfinite(args[0].value)) {
@@ -3814,6 +3838,136 @@ static int aml_sampling_dispatch(AML_ExecCtx* ctx, const char* name,
     return 0;
 }
 
+// Numerical values use a private output buffer and explicit gradients. They
+// neither borrow the global autograd tape nor change any operand array.
+static int aml_numerical_array(AML_ExecCtx* ctx, const AML_Var* value) {
+    if (value->type != AML_TYPE_ARRAY || !value->array ||
+        value->array->len < 1 || value->array->len > AM_MAX_ARRAY_SIZE ||
+        !value->array->data) {
+        set_error(ctx, "numerical operand must be a nonempty numeric array"); return 1;
+    }
+#ifdef USE_CUDA
+    ensure_cpu(value->array);
+#endif
+    for (int i = 0; i < value->array->len; i++) {
+        if (!isfinite(value->array->data[i])) {
+            set_error(ctx, "numerical operands must contain finite values"); return 1;
+        }
+    }
+    return 0;
+}
+
+static int aml_numerical_dimension(AML_ExecCtx* ctx, const AML_Var* value, int* out) {
+    if (value->type != AML_TYPE_FLOAT || !isfinite(value->value) ||
+        value->value < 1 || value->value > AM_MAX_ARRAY_SIZE ||
+        truncf(value->value) != value->value) {
+        set_error(ctx, "numerical dimension must be an integer in the array range"); return 1;
+    }
+    *out = (int)value->value;
+    return 0;
+}
+
+static int aml_numerical_dispatch(AML_ExecCtx* ctx, const char* name,
+                                  AML_Var* args, int nargs, AML_Var* out) {
+    int is_linear = !strcasecmp(name, "nt_linear");
+    int is_linear_vjp = !strcasecmp(name, "nt_linear_vjp");
+    int is_tanh = !strcasecmp(name, "nt_tanh");
+    int is_tanh_vjp = !strcasecmp(name, "nt_tanh_vjp");
+    int is_mse = !strcasecmp(name, "nt_mse_grad");
+    int is_sgd = !strcasecmp(name, "nt_sgd");
+    int is_normal = !strcasecmp(name, "rng_normal");
+    int need = (is_linear || is_linear_vjp) ? 5 : is_tanh ? 1 : is_sgd ? 3 : 2;
+    if (nargs != need) { set_error(ctx, "wrong number of numerical arguments"); return 1; }
+    const AM_NumericalBackend* backend = &g_numerical_backend;
+    if (!backend->linear || !backend->linear_vjp || !backend->tanh ||
+        !backend->tanh_vjp || !backend->mse_grad || !backend->sgd || !backend->normal) {
+        set_error(ctx, "numerical backend unavailable; use NoTorch-enabled AML"); return 1;
+    }
+
+    int rows = 0, cols = 0, len = 0, entries[4] = {0};
+    uint64_t state = 0;
+    if (is_normal) {
+        if (aml_rng_read(ctx, &args[0], &state, entries) ||
+            aml_numerical_dimension(ctx, &args[1], &len)) return 1;
+    } else {
+        int arrays = (is_linear || is_linear_vjp) ? 3 : is_tanh ? 1 : 2;
+        for (int i = 0; i < arrays; i++)
+            if (aml_numerical_array(ctx, &args[i])) return 1;
+        if (is_linear || is_linear_vjp) {
+            if (aml_numerical_dimension(ctx, &args[3], &rows) ||
+                aml_numerical_dimension(ctx, &args[4], &cols)) return 1;
+            if (rows > AM_MAX_ARRAY_SIZE / cols) {
+                set_error(ctx, "numerical matrix exceeds the array range"); return 1;
+            }
+            int weight_len = rows * cols;
+            int second_len = is_linear ? rows : cols;
+            int third_len = is_linear ? cols : rows;
+            if (args[0].array->len != weight_len || args[1].array->len != second_len ||
+                args[2].array->len != third_len) {
+                set_error(ctx, "numerical matrix dimensions do not match operands"); return 1;
+            }
+            len = is_linear ? rows : weight_len + rows + cols;
+        } else {
+            len = args[0].array->len;
+            if (!is_tanh && args[1].array->len != len) {
+                set_error(ctx, "numerical operand lengths must match"); return 1;
+            }
+            if (is_mse) len++;
+            if (is_tanh_vjp) {
+                for (int i = 0; i < len; i++) {
+                    if (args[0].array->data[i] < -1 || args[0].array->data[i] > 1) {
+                        set_error(ctx, "tanh saved values must lie in [-1, 1]"); return 1;
+                    }
+                }
+            }
+            if (is_sgd && (args[2].type != AML_TYPE_FLOAT || !isfinite(args[2].value) ||
+                           args[2].value < 0)) {
+                set_error(ctx, "numerical learning rate must be finite and nonnegative"); return 1;
+            }
+        }
+    }
+    if (len > AM_MAX_ARRAY_SIZE) {
+        set_error(ctx, "numerical output exceeds the array range"); return 1;
+    }
+    AM_Array* result = am_array_new(len);
+    if (!result) { set_error(ctx, "numerical output allocation failed"); return 1; }
+    if (is_tanh || is_tanh_vjp || is_sgd) {
+        result->rows = args[0].array->rows;
+        result->cols = args[0].array->cols;
+    }
+    int rc;
+    if (is_linear)
+        rc = backend->linear(args[0].array->data, args[1].array->data,
+                             args[2].array->data, rows, cols, result->data);
+    else if (is_linear_vjp)
+        rc = backend->linear_vjp(args[0].array->data, args[1].array->data,
+                                 args[2].array->data, rows, cols, result->data);
+    else if (is_tanh)
+        rc = backend->tanh(args[0].array->data, len, result->data);
+    else if (is_tanh_vjp)
+        rc = backend->tanh_vjp(args[0].array->data, args[1].array->data, len, result->data);
+    else if (is_mse)
+        rc = backend->mse_grad(args[0].array->data, args[1].array->data, len - 1, result->data);
+    else if (is_sgd)
+        rc = backend->sgd(args[0].array->data, args[1].array->data, len, args[2].value, result->data);
+    else
+        rc = backend->normal(&state, len, result->data);
+    if (rc) {
+        am_array_free(result);
+        set_error(ctx, "numerical backend rejected arguments"); return 1;
+    }
+    for (int i = 0; i < len; i++) {
+        if (!isfinite(result->data[i])) {
+            am_array_free(result);
+            set_error(ctx, "numerical backend returned nonfinite output"); return 1;
+        }
+    }
+    if (is_normal) aml_rng_publish(args[0].map, entries, state);
+    out->array = result;
+    out->type = AML_TYPE_ARRAY;
+    return 0;
+}
+
 static int aml_array_scalar_function(const char* name) {
     return !strcasecmp(name, "len") || !strcasecmp(name, "sum") ||
            !strcasecmp(name, "dot") || !strcasecmp(name, "rows") ||
@@ -3902,6 +4056,7 @@ static int aml_invoke_value(AML_ExecCtx* ctx, const char* name,
     else if (aml_map_function(name)) rc = aml_map_dispatch(ctx, name, args, nargs, out);
     else if (aml_scalar_intrinsic_function(name)) rc = aml_scalar_intrinsic_dispatch(ctx, name, args, nargs, out);
     else if (aml_sampling_function(name)) rc = aml_sampling_dispatch(ctx, name, args, nargs, out);
+    else if (aml_numerical_function(name)) rc = aml_numerical_dispatch(ctx, name, args, nargs, out);
     else if (aml_array_scalar_function(name)) rc = aml_array_scalar_dispatch(ctx, name, args, nargs, out);
     else {
         AML_Func* f = aml_value_function(ctx, name);
@@ -3992,7 +4147,7 @@ static float expr_primary(AML_Expr* e) {
         if (*e->p == '(') {
             if (e->ctx && (aml_text_function(name) || aml_list_function(name) ||
                            aml_map_function(name) || aml_scalar_intrinsic_function(name) ||
-                           aml_sampling_function(name) ||
+                           aml_sampling_function(name) || aml_numerical_function(name) ||
                            aml_array_scalar_function(name) ||
                            aml_value_function(e->ctx, name))) {
                 AML_Var result = {0};
@@ -4238,7 +4393,7 @@ static int aml_eval_value(AML_ExecCtx* ctx, const char* text, AML_Var* out) {
         }
         if (*p == '(' && (aml_text_function(name) || aml_list_function(name) ||
                           aml_map_function(name) || aml_scalar_intrinsic_function(name) ||
-                          aml_sampling_function(name) ||
+                          aml_sampling_function(name) || aml_numerical_function(name) ||
                           aml_array_scalar_function(name) ||
                           aml_value_function(ctx, name))) {
             const char* close = aml_value_close(p);
@@ -5929,12 +6084,13 @@ static int aml_reserved_function(const char* name) {
         "embedding_lookup", "row", "seq_embed", "seq_matvec", "seq_rmsnorm",
         "causal_attention", "multi_head_attention", "seq_cross_entropy",
         "text_len", "text_bytes", "text_equal", "text_find", "text_slice",
-        "text_concat", "text_codepoint", "text_from_codepoint",
+        "text_concat", "text_codepoint", "text_from_codepoint", "text_lower",
         "list_new", "list_len", "list_get", "list_push", "list_set", "list_find",
         "list_slice", "list_clone", "list_key",
         "map_new", "map_len", "map_has", "map_get", "map_set", "map_delete",
-        "map_keys", "map_clone", "assert", "floor", "rng_new", "rng_uniform",
-        "rng_index", "rng_categorical", "categorical_at"
+        "map_keys", "map_clone", "assert", "floor", "isfinite", "rng_new", "rng_uniform",
+        "rng_index", "rng_categorical", "categorical_at", "nt_linear", "nt_linear_vjp",
+        "nt_tanh", "nt_tanh_vjp", "nt_mse_grad", "nt_sgd", "rng_normal"
     };
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (strcasecmp(name, names[i]) == 0) return 1;
@@ -7640,7 +7796,7 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
         if (n && n < AML_MAX_NAME && *p == '(' &&
             (aml_value_function(ctx, name) || aml_text_function(name) || aml_list_function(name) ||
              aml_map_function(name) || aml_scalar_intrinsic_function(name) ||
-             aml_sampling_function(name))) {
+             aml_sampling_function(name) || aml_numerical_function(name))) {
             AML_Var value = {0};
             aml_eval_value(ctx, text, &value);
             aml_value_clear(&value);
@@ -10389,6 +10545,395 @@ AM_String* am_string_from_codepoint(int cp) {
     AM_String* text = am_string_alloc(width, 1);
     if (text) memcpy(text->data, bytes, (size_t)width);
     return text;
+}
+
+// Unicode 15.0.0 data, generated from https://www.unicode.org/Public/15.0.0/ucd/.
+// Unicode data license follows; AML implementation retains the repository license.
+/*
+UNICODE LICENSE V3
+
+COPYRIGHT AND PERMISSION NOTICE
+
+Copyright © 1991-2026 Unicode, Inc.
+
+NOTICE TO USER: Carefully read the following legal agreement. BY
+DOWNLOADING, INSTALLING, COPYING OR OTHERWISE USING DATA FILES, AND/OR
+SOFTWARE, YOU UNEQUIVOCALLY ACCEPT, AND AGREE TO BE BOUND BY, ALL OF THE
+TERMS AND CONDITIONS OF THIS AGREEMENT. IF YOU DO NOT AGREE, DO NOT
+DOWNLOAD, INSTALL, COPY, DISTRIBUTE OR USE THE DATA FILES OR SOFTWARE.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of data files and any associated documentation (the "Data Files") or
+software and any associated documentation (the "Software") to deal in the
+Data Files or Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, and/or sell
+copies of the Data Files or Software, and to permit persons to whom the
+Data Files or Software are furnished to do so, provided that either (a)
+this copyright and permission notice appear with all copies of the Data
+Files or Software, or (b) this copyright and permission notice appear in
+associated Documentation.
+
+THE DATA FILES AND SOFTWARE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF
+THIRD PARTY RIGHTS.
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS NOTICE
+BE LIABLE FOR ANY CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES,
+OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,
+WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THE DATA
+FILES OR SOFTWARE.
+
+Except as contained in this notice, the name of a copyright holder shall
+not be used in advertising or otherwise to promote the sale, use or other
+dealings in these Data Files or Software without prior written
+authorization of the copyright holder.
+
+*/
+
+// Generated from Unicode 15.0.0 UnicodeData, SpecialCasing, and
+// DerivedCoreProperties. Regenerate with generate_text_lower_tables.py.
+// Simple mappings use stride 1 or 2; unlisted scalars map to themselves.
+typedef struct { uint32_t first, last; int32_t delta; uint32_t stride; } AM_LowerRange;
+typedef struct { uint32_t first, last; } AM_UnicodeRange;
+static const AM_LowerRange am_lower_ranges[] = {
+    {0x41u, 0x5Au, 32, 1u}, {0xC0u, 0xD6u, 32, 1u}, {0xD8u, 0xDEu, 32, 1u},
+    {0x100u, 0x12Eu, 1, 2u}, {0x132u, 0x136u, 1, 2u}, {0x139u, 0x147u, 1, 2u},
+    {0x14Au, 0x176u, 1, 2u}, {0x178u, 0x178u, -121, 1u}, {0x179u, 0x17Du, 1, 2u},
+    {0x181u, 0x181u, 210, 1u}, {0x182u, 0x184u, 1, 2u}, {0x186u, 0x186u, 206, 1u},
+    {0x187u, 0x187u, 1, 1u}, {0x189u, 0x18Au, 205, 1u}, {0x18Bu, 0x18Bu, 1, 1u},
+    {0x18Eu, 0x18Eu, 79, 1u}, {0x18Fu, 0x18Fu, 202, 1u}, {0x190u, 0x190u, 203, 1u},
+    {0x191u, 0x191u, 1, 1u}, {0x193u, 0x193u, 205, 1u}, {0x194u, 0x194u, 207, 1u},
+    {0x196u, 0x196u, 211, 1u}, {0x197u, 0x197u, 209, 1u}, {0x198u, 0x198u, 1, 1u},
+    {0x19Cu, 0x19Cu, 211, 1u}, {0x19Du, 0x19Du, 213, 1u}, {0x19Fu, 0x19Fu, 214, 1u},
+    {0x1A0u, 0x1A4u, 1, 2u}, {0x1A6u, 0x1A6u, 218, 1u}, {0x1A7u, 0x1A7u, 1, 1u},
+    {0x1A9u, 0x1A9u, 218, 1u}, {0x1ACu, 0x1ACu, 1, 1u}, {0x1AEu, 0x1AEu, 218, 1u},
+    {0x1AFu, 0x1AFu, 1, 1u}, {0x1B1u, 0x1B2u, 217, 1u}, {0x1B3u, 0x1B5u, 1, 2u},
+    {0x1B7u, 0x1B7u, 219, 1u}, {0x1B8u, 0x1B8u, 1, 1u}, {0x1BCu, 0x1BCu, 1, 1u},
+    {0x1C4u, 0x1C4u, 2, 1u}, {0x1C5u, 0x1C5u, 1, 1u}, {0x1C7u, 0x1C7u, 2, 1u},
+    {0x1C8u, 0x1C8u, 1, 1u}, {0x1CAu, 0x1CAu, 2, 1u}, {0x1CBu, 0x1DBu, 1, 2u},
+    {0x1DEu, 0x1EEu, 1, 2u}, {0x1F1u, 0x1F1u, 2, 1u}, {0x1F2u, 0x1F4u, 1, 2u},
+    {0x1F6u, 0x1F6u, -97, 1u}, {0x1F7u, 0x1F7u, -56, 1u}, {0x1F8u, 0x21Eu, 1, 2u},
+    {0x220u, 0x220u, -130, 1u}, {0x222u, 0x232u, 1, 2u}, {0x23Au, 0x23Au, 10795, 1u},
+    {0x23Bu, 0x23Bu, 1, 1u}, {0x23Du, 0x23Du, -163, 1u}, {0x23Eu, 0x23Eu, 10792, 1u},
+    {0x241u, 0x241u, 1, 1u}, {0x243u, 0x243u, -195, 1u}, {0x244u, 0x244u, 69, 1u},
+    {0x245u, 0x245u, 71, 1u}, {0x246u, 0x24Eu, 1, 2u}, {0x370u, 0x372u, 1, 2u},
+    {0x376u, 0x376u, 1, 1u}, {0x37Fu, 0x37Fu, 116, 1u}, {0x386u, 0x386u, 38, 1u},
+    {0x388u, 0x38Au, 37, 1u}, {0x38Cu, 0x38Cu, 64, 1u}, {0x38Eu, 0x38Fu, 63, 1u},
+    {0x391u, 0x3A1u, 32, 1u}, {0x3A3u, 0x3ABu, 32, 1u}, {0x3CFu, 0x3CFu, 8, 1u},
+    {0x3D8u, 0x3EEu, 1, 2u}, {0x3F4u, 0x3F4u, -60, 1u}, {0x3F7u, 0x3F7u, 1, 1u},
+    {0x3F9u, 0x3F9u, -7, 1u}, {0x3FAu, 0x3FAu, 1, 1u}, {0x3FDu, 0x3FFu, -130, 1u},
+    {0x400u, 0x40Fu, 80, 1u}, {0x410u, 0x42Fu, 32, 1u}, {0x460u, 0x480u, 1, 2u},
+    {0x48Au, 0x4BEu, 1, 2u}, {0x4C0u, 0x4C0u, 15, 1u}, {0x4C1u, 0x4CDu, 1, 2u},
+    {0x4D0u, 0x52Eu, 1, 2u}, {0x531u, 0x556u, 48, 1u}, {0x10A0u, 0x10C5u, 7264, 1u},
+    {0x10C7u, 0x10C7u, 7264, 1u}, {0x10CDu, 0x10CDu, 7264, 1u}, {0x13A0u, 0x13EFu, 38864, 1u},
+    {0x13F0u, 0x13F5u, 8, 1u}, {0x1C90u, 0x1CBAu, -3008, 1u}, {0x1CBDu, 0x1CBFu, -3008, 1u},
+    {0x1E00u, 0x1E94u, 1, 2u}, {0x1E9Eu, 0x1E9Eu, -7615, 1u}, {0x1EA0u, 0x1EFEu, 1, 2u},
+    {0x1F08u, 0x1F0Fu, -8, 1u}, {0x1F18u, 0x1F1Du, -8, 1u}, {0x1F28u, 0x1F2Fu, -8, 1u},
+    {0x1F38u, 0x1F3Fu, -8, 1u}, {0x1F48u, 0x1F4Du, -8, 1u}, {0x1F59u, 0x1F5Fu, -8, 2u},
+    {0x1F68u, 0x1F6Fu, -8, 1u}, {0x1F88u, 0x1F8Fu, -8, 1u}, {0x1F98u, 0x1F9Fu, -8, 1u},
+    {0x1FA8u, 0x1FAFu, -8, 1u}, {0x1FB8u, 0x1FB9u, -8, 1u}, {0x1FBAu, 0x1FBBu, -74, 1u},
+    {0x1FBCu, 0x1FBCu, -9, 1u}, {0x1FC8u, 0x1FCBu, -86, 1u}, {0x1FCCu, 0x1FCCu, -9, 1u},
+    {0x1FD8u, 0x1FD9u, -8, 1u}, {0x1FDAu, 0x1FDBu, -100, 1u}, {0x1FE8u, 0x1FE9u, -8, 1u},
+    {0x1FEAu, 0x1FEBu, -112, 1u}, {0x1FECu, 0x1FECu, -7, 1u}, {0x1FF8u, 0x1FF9u, -128, 1u},
+    {0x1FFAu, 0x1FFBu, -126, 1u}, {0x1FFCu, 0x1FFCu, -9, 1u}, {0x2126u, 0x2126u, -7517, 1u},
+    {0x212Au, 0x212Au, -8383, 1u}, {0x212Bu, 0x212Bu, -8262, 1u}, {0x2132u, 0x2132u, 28, 1u},
+    {0x2160u, 0x216Fu, 16, 1u}, {0x2183u, 0x2183u, 1, 1u}, {0x24B6u, 0x24CFu, 26, 1u},
+    {0x2C00u, 0x2C2Fu, 48, 1u}, {0x2C60u, 0x2C60u, 1, 1u}, {0x2C62u, 0x2C62u, -10743, 1u},
+    {0x2C63u, 0x2C63u, -3814, 1u}, {0x2C64u, 0x2C64u, -10727, 1u}, {0x2C67u, 0x2C6Bu, 1, 2u},
+    {0x2C6Du, 0x2C6Du, -10780, 1u}, {0x2C6Eu, 0x2C6Eu, -10749, 1u}, {0x2C6Fu, 0x2C6Fu, -10783, 1u},
+    {0x2C70u, 0x2C70u, -10782, 1u}, {0x2C72u, 0x2C72u, 1, 1u}, {0x2C75u, 0x2C75u, 1, 1u},
+    {0x2C7Eu, 0x2C7Fu, -10815, 1u}, {0x2C80u, 0x2CE2u, 1, 2u}, {0x2CEBu, 0x2CEDu, 1, 2u},
+    {0x2CF2u, 0x2CF2u, 1, 1u}, {0xA640u, 0xA66Cu, 1, 2u}, {0xA680u, 0xA69Au, 1, 2u},
+    {0xA722u, 0xA72Eu, 1, 2u}, {0xA732u, 0xA76Eu, 1, 2u}, {0xA779u, 0xA77Bu, 1, 2u},
+    {0xA77Du, 0xA77Du, -35332, 1u}, {0xA77Eu, 0xA786u, 1, 2u}, {0xA78Bu, 0xA78Bu, 1, 1u},
+    {0xA78Du, 0xA78Du, -42280, 1u}, {0xA790u, 0xA792u, 1, 2u}, {0xA796u, 0xA7A8u, 1, 2u},
+    {0xA7AAu, 0xA7AAu, -42308, 1u}, {0xA7ABu, 0xA7ABu, -42319, 1u}, {0xA7ACu, 0xA7ACu, -42315, 1u},
+    {0xA7ADu, 0xA7ADu, -42305, 1u}, {0xA7AEu, 0xA7AEu, -42308, 1u}, {0xA7B0u, 0xA7B0u, -42258, 1u},
+    {0xA7B1u, 0xA7B1u, -42282, 1u}, {0xA7B2u, 0xA7B2u, -42261, 1u}, {0xA7B3u, 0xA7B3u, 928, 1u},
+    {0xA7B4u, 0xA7C2u, 1, 2u}, {0xA7C4u, 0xA7C4u, -48, 1u}, {0xA7C5u, 0xA7C5u, -42307, 1u},
+    {0xA7C6u, 0xA7C6u, -35384, 1u}, {0xA7C7u, 0xA7C9u, 1, 2u}, {0xA7D0u, 0xA7D0u, 1, 1u},
+    {0xA7D6u, 0xA7D8u, 1, 2u}, {0xA7F5u, 0xA7F5u, 1, 1u}, {0xFF21u, 0xFF3Au, 32, 1u},
+    {0x10400u, 0x10427u, 40, 1u}, {0x104B0u, 0x104D3u, 40, 1u}, {0x10570u, 0x1057Au, 39, 1u},
+    {0x1057Cu, 0x1058Au, 39, 1u}, {0x1058Cu, 0x10592u, 39, 1u}, {0x10594u, 0x10595u, 39, 1u},
+    {0x10C80u, 0x10CB2u, 64, 1u}, {0x118A0u, 0x118BFu, 32, 1u}, {0x16E40u, 0x16E5Fu, 32, 1u},
+    {0x1E900u, 0x1E921u, 34, 1u},
+};
+static const AM_UnicodeRange am_cased_ranges[] = {
+    {0x41u, 0x5Au}, {0x61u, 0x7Au}, {0xAAu, 0xAAu}, {0xB5u, 0xB5u},
+    {0xBAu, 0xBAu}, {0xC0u, 0xD6u}, {0xD8u, 0xF6u}, {0xF8u, 0x1BAu},
+    {0x1BCu, 0x1BFu}, {0x1C4u, 0x293u}, {0x295u, 0x2B8u}, {0x2C0u, 0x2C1u},
+    {0x2E0u, 0x2E4u}, {0x345u, 0x345u}, {0x370u, 0x373u}, {0x376u, 0x377u},
+    {0x37Au, 0x37Du}, {0x37Fu, 0x37Fu}, {0x386u, 0x386u}, {0x388u, 0x38Au},
+    {0x38Cu, 0x38Cu}, {0x38Eu, 0x3A1u}, {0x3A3u, 0x3F5u}, {0x3F7u, 0x481u},
+    {0x48Au, 0x52Fu}, {0x531u, 0x556u}, {0x560u, 0x588u}, {0x10A0u, 0x10C5u},
+    {0x10C7u, 0x10C7u}, {0x10CDu, 0x10CDu}, {0x10D0u, 0x10FAu}, {0x10FCu, 0x10FFu},
+    {0x13A0u, 0x13F5u}, {0x13F8u, 0x13FDu}, {0x1C80u, 0x1C88u}, {0x1C90u, 0x1CBAu},
+    {0x1CBDu, 0x1CBFu}, {0x1D00u, 0x1DBFu}, {0x1E00u, 0x1F15u}, {0x1F18u, 0x1F1Du},
+    {0x1F20u, 0x1F45u}, {0x1F48u, 0x1F4Du}, {0x1F50u, 0x1F57u}, {0x1F59u, 0x1F59u},
+    {0x1F5Bu, 0x1F5Bu}, {0x1F5Du, 0x1F5Du}, {0x1F5Fu, 0x1F7Du}, {0x1F80u, 0x1FB4u},
+    {0x1FB6u, 0x1FBCu}, {0x1FBEu, 0x1FBEu}, {0x1FC2u, 0x1FC4u}, {0x1FC6u, 0x1FCCu},
+    {0x1FD0u, 0x1FD3u}, {0x1FD6u, 0x1FDBu}, {0x1FE0u, 0x1FECu}, {0x1FF2u, 0x1FF4u},
+    {0x1FF6u, 0x1FFCu}, {0x2071u, 0x2071u}, {0x207Fu, 0x207Fu}, {0x2090u, 0x209Cu},
+    {0x2102u, 0x2102u}, {0x2107u, 0x2107u}, {0x210Au, 0x2113u}, {0x2115u, 0x2115u},
+    {0x2119u, 0x211Du}, {0x2124u, 0x2124u}, {0x2126u, 0x2126u}, {0x2128u, 0x2128u},
+    {0x212Au, 0x212Du}, {0x212Fu, 0x2134u}, {0x2139u, 0x2139u}, {0x213Cu, 0x213Fu},
+    {0x2145u, 0x2149u}, {0x214Eu, 0x214Eu}, {0x2160u, 0x217Fu}, {0x2183u, 0x2184u},
+    {0x24B6u, 0x24E9u}, {0x2C00u, 0x2CE4u}, {0x2CEBu, 0x2CEEu}, {0x2CF2u, 0x2CF3u},
+    {0x2D00u, 0x2D25u}, {0x2D27u, 0x2D27u}, {0x2D2Du, 0x2D2Du}, {0xA640u, 0xA66Du},
+    {0xA680u, 0xA69Du}, {0xA722u, 0xA787u}, {0xA78Bu, 0xA78Eu}, {0xA790u, 0xA7CAu},
+    {0xA7D0u, 0xA7D1u}, {0xA7D3u, 0xA7D3u}, {0xA7D5u, 0xA7D9u}, {0xA7F2u, 0xA7F6u},
+    {0xA7F8u, 0xA7FAu}, {0xAB30u, 0xAB5Au}, {0xAB5Cu, 0xAB69u}, {0xAB70u, 0xABBFu},
+    {0xFB00u, 0xFB06u}, {0xFB13u, 0xFB17u}, {0xFF21u, 0xFF3Au}, {0xFF41u, 0xFF5Au},
+    {0x10400u, 0x1044Fu}, {0x104B0u, 0x104D3u}, {0x104D8u, 0x104FBu}, {0x10570u, 0x1057Au},
+    {0x1057Cu, 0x1058Au}, {0x1058Cu, 0x10592u}, {0x10594u, 0x10595u}, {0x10597u, 0x105A1u},
+    {0x105A3u, 0x105B1u}, {0x105B3u, 0x105B9u}, {0x105BBu, 0x105BCu}, {0x10780u, 0x10780u},
+    {0x10783u, 0x10785u}, {0x10787u, 0x107B0u}, {0x107B2u, 0x107BAu}, {0x10C80u, 0x10CB2u},
+    {0x10CC0u, 0x10CF2u}, {0x118A0u, 0x118DFu}, {0x16E40u, 0x16E7Fu}, {0x1D400u, 0x1D454u},
+    {0x1D456u, 0x1D49Cu}, {0x1D49Eu, 0x1D49Fu}, {0x1D4A2u, 0x1D4A2u}, {0x1D4A5u, 0x1D4A6u},
+    {0x1D4A9u, 0x1D4ACu}, {0x1D4AEu, 0x1D4B9u}, {0x1D4BBu, 0x1D4BBu}, {0x1D4BDu, 0x1D4C3u},
+    {0x1D4C5u, 0x1D505u}, {0x1D507u, 0x1D50Au}, {0x1D50Du, 0x1D514u}, {0x1D516u, 0x1D51Cu},
+    {0x1D51Eu, 0x1D539u}, {0x1D53Bu, 0x1D53Eu}, {0x1D540u, 0x1D544u}, {0x1D546u, 0x1D546u},
+    {0x1D54Au, 0x1D550u}, {0x1D552u, 0x1D6A5u}, {0x1D6A8u, 0x1D6C0u}, {0x1D6C2u, 0x1D6DAu},
+    {0x1D6DCu, 0x1D6FAu}, {0x1D6FCu, 0x1D714u}, {0x1D716u, 0x1D734u}, {0x1D736u, 0x1D74Eu},
+    {0x1D750u, 0x1D76Eu}, {0x1D770u, 0x1D788u}, {0x1D78Au, 0x1D7A8u}, {0x1D7AAu, 0x1D7C2u},
+    {0x1D7C4u, 0x1D7CBu}, {0x1DF00u, 0x1DF09u}, {0x1DF0Bu, 0x1DF1Eu}, {0x1DF25u, 0x1DF2Au},
+    {0x1E030u, 0x1E06Du}, {0x1E900u, 0x1E943u}, {0x1F130u, 0x1F149u}, {0x1F150u, 0x1F169u},
+    {0x1F170u, 0x1F189u},
+};
+static const AM_UnicodeRange am_case_ignorable_ranges[] = {
+    {0x27u, 0x27u}, {0x2Eu, 0x2Eu}, {0x3Au, 0x3Au}, {0x5Eu, 0x5Eu},
+    {0x60u, 0x60u}, {0xA8u, 0xA8u}, {0xADu, 0xADu}, {0xAFu, 0xAFu},
+    {0xB4u, 0xB4u}, {0xB7u, 0xB8u}, {0x2B0u, 0x36Fu}, {0x374u, 0x375u},
+    {0x37Au, 0x37Au}, {0x384u, 0x385u}, {0x387u, 0x387u}, {0x483u, 0x489u},
+    {0x559u, 0x559u}, {0x55Fu, 0x55Fu}, {0x591u, 0x5BDu}, {0x5BFu, 0x5BFu},
+    {0x5C1u, 0x5C2u}, {0x5C4u, 0x5C5u}, {0x5C7u, 0x5C7u}, {0x5F4u, 0x5F4u},
+    {0x600u, 0x605u}, {0x610u, 0x61Au}, {0x61Cu, 0x61Cu}, {0x640u, 0x640u},
+    {0x64Bu, 0x65Fu}, {0x670u, 0x670u}, {0x6D6u, 0x6DDu}, {0x6DFu, 0x6E8u},
+    {0x6EAu, 0x6EDu}, {0x70Fu, 0x70Fu}, {0x711u, 0x711u}, {0x730u, 0x74Au},
+    {0x7A6u, 0x7B0u}, {0x7EBu, 0x7F5u}, {0x7FAu, 0x7FAu}, {0x7FDu, 0x7FDu},
+    {0x816u, 0x82Du}, {0x859u, 0x85Bu}, {0x888u, 0x888u}, {0x890u, 0x891u},
+    {0x898u, 0x89Fu}, {0x8C9u, 0x902u}, {0x93Au, 0x93Au}, {0x93Cu, 0x93Cu},
+    {0x941u, 0x948u}, {0x94Du, 0x94Du}, {0x951u, 0x957u}, {0x962u, 0x963u},
+    {0x971u, 0x971u}, {0x981u, 0x981u}, {0x9BCu, 0x9BCu}, {0x9C1u, 0x9C4u},
+    {0x9CDu, 0x9CDu}, {0x9E2u, 0x9E3u}, {0x9FEu, 0x9FEu}, {0xA01u, 0xA02u},
+    {0xA3Cu, 0xA3Cu}, {0xA41u, 0xA42u}, {0xA47u, 0xA48u}, {0xA4Bu, 0xA4Du},
+    {0xA51u, 0xA51u}, {0xA70u, 0xA71u}, {0xA75u, 0xA75u}, {0xA81u, 0xA82u},
+    {0xABCu, 0xABCu}, {0xAC1u, 0xAC5u}, {0xAC7u, 0xAC8u}, {0xACDu, 0xACDu},
+    {0xAE2u, 0xAE3u}, {0xAFAu, 0xAFFu}, {0xB01u, 0xB01u}, {0xB3Cu, 0xB3Cu},
+    {0xB3Fu, 0xB3Fu}, {0xB41u, 0xB44u}, {0xB4Du, 0xB4Du}, {0xB55u, 0xB56u},
+    {0xB62u, 0xB63u}, {0xB82u, 0xB82u}, {0xBC0u, 0xBC0u}, {0xBCDu, 0xBCDu},
+    {0xC00u, 0xC00u}, {0xC04u, 0xC04u}, {0xC3Cu, 0xC3Cu}, {0xC3Eu, 0xC40u},
+    {0xC46u, 0xC48u}, {0xC4Au, 0xC4Du}, {0xC55u, 0xC56u}, {0xC62u, 0xC63u},
+    {0xC81u, 0xC81u}, {0xCBCu, 0xCBCu}, {0xCBFu, 0xCBFu}, {0xCC6u, 0xCC6u},
+    {0xCCCu, 0xCCDu}, {0xCE2u, 0xCE3u}, {0xD00u, 0xD01u}, {0xD3Bu, 0xD3Cu},
+    {0xD41u, 0xD44u}, {0xD4Du, 0xD4Du}, {0xD62u, 0xD63u}, {0xD81u, 0xD81u},
+    {0xDCAu, 0xDCAu}, {0xDD2u, 0xDD4u}, {0xDD6u, 0xDD6u}, {0xE31u, 0xE31u},
+    {0xE34u, 0xE3Au}, {0xE46u, 0xE4Eu}, {0xEB1u, 0xEB1u}, {0xEB4u, 0xEBCu},
+    {0xEC6u, 0xEC6u}, {0xEC8u, 0xECEu}, {0xF18u, 0xF19u}, {0xF35u, 0xF35u},
+    {0xF37u, 0xF37u}, {0xF39u, 0xF39u}, {0xF71u, 0xF7Eu}, {0xF80u, 0xF84u},
+    {0xF86u, 0xF87u}, {0xF8Du, 0xF97u}, {0xF99u, 0xFBCu}, {0xFC6u, 0xFC6u},
+    {0x102Du, 0x1030u}, {0x1032u, 0x1037u}, {0x1039u, 0x103Au}, {0x103Du, 0x103Eu},
+    {0x1058u, 0x1059u}, {0x105Eu, 0x1060u}, {0x1071u, 0x1074u}, {0x1082u, 0x1082u},
+    {0x1085u, 0x1086u}, {0x108Du, 0x108Du}, {0x109Du, 0x109Du}, {0x10FCu, 0x10FCu},
+    {0x135Du, 0x135Fu}, {0x1712u, 0x1714u}, {0x1732u, 0x1733u}, {0x1752u, 0x1753u},
+    {0x1772u, 0x1773u}, {0x17B4u, 0x17B5u}, {0x17B7u, 0x17BDu}, {0x17C6u, 0x17C6u},
+    {0x17C9u, 0x17D3u}, {0x17D7u, 0x17D7u}, {0x17DDu, 0x17DDu}, {0x180Bu, 0x180Fu},
+    {0x1843u, 0x1843u}, {0x1885u, 0x1886u}, {0x18A9u, 0x18A9u}, {0x1920u, 0x1922u},
+    {0x1927u, 0x1928u}, {0x1932u, 0x1932u}, {0x1939u, 0x193Bu}, {0x1A17u, 0x1A18u},
+    {0x1A1Bu, 0x1A1Bu}, {0x1A56u, 0x1A56u}, {0x1A58u, 0x1A5Eu}, {0x1A60u, 0x1A60u},
+    {0x1A62u, 0x1A62u}, {0x1A65u, 0x1A6Cu}, {0x1A73u, 0x1A7Cu}, {0x1A7Fu, 0x1A7Fu},
+    {0x1AA7u, 0x1AA7u}, {0x1AB0u, 0x1ACEu}, {0x1B00u, 0x1B03u}, {0x1B34u, 0x1B34u},
+    {0x1B36u, 0x1B3Au}, {0x1B3Cu, 0x1B3Cu}, {0x1B42u, 0x1B42u}, {0x1B6Bu, 0x1B73u},
+    {0x1B80u, 0x1B81u}, {0x1BA2u, 0x1BA5u}, {0x1BA8u, 0x1BA9u}, {0x1BABu, 0x1BADu},
+    {0x1BE6u, 0x1BE6u}, {0x1BE8u, 0x1BE9u}, {0x1BEDu, 0x1BEDu}, {0x1BEFu, 0x1BF1u},
+    {0x1C2Cu, 0x1C33u}, {0x1C36u, 0x1C37u}, {0x1C78u, 0x1C7Du}, {0x1CD0u, 0x1CD2u},
+    {0x1CD4u, 0x1CE0u}, {0x1CE2u, 0x1CE8u}, {0x1CEDu, 0x1CEDu}, {0x1CF4u, 0x1CF4u},
+    {0x1CF8u, 0x1CF9u}, {0x1D2Cu, 0x1D6Au}, {0x1D78u, 0x1D78u}, {0x1D9Bu, 0x1DFFu},
+    {0x1FBDu, 0x1FBDu}, {0x1FBFu, 0x1FC1u}, {0x1FCDu, 0x1FCFu}, {0x1FDDu, 0x1FDFu},
+    {0x1FEDu, 0x1FEFu}, {0x1FFDu, 0x1FFEu}, {0x200Bu, 0x200Fu}, {0x2018u, 0x2019u},
+    {0x2024u, 0x2024u}, {0x2027u, 0x2027u}, {0x202Au, 0x202Eu}, {0x2060u, 0x2064u},
+    {0x2066u, 0x206Fu}, {0x2071u, 0x2071u}, {0x207Fu, 0x207Fu}, {0x2090u, 0x209Cu},
+    {0x20D0u, 0x20F0u}, {0x2C7Cu, 0x2C7Du}, {0x2CEFu, 0x2CF1u}, {0x2D6Fu, 0x2D6Fu},
+    {0x2D7Fu, 0x2D7Fu}, {0x2DE0u, 0x2DFFu}, {0x2E2Fu, 0x2E2Fu}, {0x3005u, 0x3005u},
+    {0x302Au, 0x302Du}, {0x3031u, 0x3035u}, {0x303Bu, 0x303Bu}, {0x3099u, 0x309Eu},
+    {0x30FCu, 0x30FEu}, {0xA015u, 0xA015u}, {0xA4F8u, 0xA4FDu}, {0xA60Cu, 0xA60Cu},
+    {0xA66Fu, 0xA672u}, {0xA674u, 0xA67Du}, {0xA67Fu, 0xA67Fu}, {0xA69Cu, 0xA69Fu},
+    {0xA6F0u, 0xA6F1u}, {0xA700u, 0xA721u}, {0xA770u, 0xA770u}, {0xA788u, 0xA78Au},
+    {0xA7F2u, 0xA7F4u}, {0xA7F8u, 0xA7F9u}, {0xA802u, 0xA802u}, {0xA806u, 0xA806u},
+    {0xA80Bu, 0xA80Bu}, {0xA825u, 0xA826u}, {0xA82Cu, 0xA82Cu}, {0xA8C4u, 0xA8C5u},
+    {0xA8E0u, 0xA8F1u}, {0xA8FFu, 0xA8FFu}, {0xA926u, 0xA92Du}, {0xA947u, 0xA951u},
+    {0xA980u, 0xA982u}, {0xA9B3u, 0xA9B3u}, {0xA9B6u, 0xA9B9u}, {0xA9BCu, 0xA9BDu},
+    {0xA9CFu, 0xA9CFu}, {0xA9E5u, 0xA9E6u}, {0xAA29u, 0xAA2Eu}, {0xAA31u, 0xAA32u},
+    {0xAA35u, 0xAA36u}, {0xAA43u, 0xAA43u}, {0xAA4Cu, 0xAA4Cu}, {0xAA70u, 0xAA70u},
+    {0xAA7Cu, 0xAA7Cu}, {0xAAB0u, 0xAAB0u}, {0xAAB2u, 0xAAB4u}, {0xAAB7u, 0xAAB8u},
+    {0xAABEu, 0xAABFu}, {0xAAC1u, 0xAAC1u}, {0xAADDu, 0xAADDu}, {0xAAECu, 0xAAEDu},
+    {0xAAF3u, 0xAAF4u}, {0xAAF6u, 0xAAF6u}, {0xAB5Bu, 0xAB5Fu}, {0xAB69u, 0xAB6Bu},
+    {0xABE5u, 0xABE5u}, {0xABE8u, 0xABE8u}, {0xABEDu, 0xABEDu}, {0xFB1Eu, 0xFB1Eu},
+    {0xFBB2u, 0xFBC2u}, {0xFE00u, 0xFE0Fu}, {0xFE13u, 0xFE13u}, {0xFE20u, 0xFE2Fu},
+    {0xFE52u, 0xFE52u}, {0xFE55u, 0xFE55u}, {0xFEFFu, 0xFEFFu}, {0xFF07u, 0xFF07u},
+    {0xFF0Eu, 0xFF0Eu}, {0xFF1Au, 0xFF1Au}, {0xFF3Eu, 0xFF3Eu}, {0xFF40u, 0xFF40u},
+    {0xFF70u, 0xFF70u}, {0xFF9Eu, 0xFF9Fu}, {0xFFE3u, 0xFFE3u}, {0xFFF9u, 0xFFFBu},
+    {0x101FDu, 0x101FDu}, {0x102E0u, 0x102E0u}, {0x10376u, 0x1037Au}, {0x10780u, 0x10785u},
+    {0x10787u, 0x107B0u}, {0x107B2u, 0x107BAu}, {0x10A01u, 0x10A03u}, {0x10A05u, 0x10A06u},
+    {0x10A0Cu, 0x10A0Fu}, {0x10A38u, 0x10A3Au}, {0x10A3Fu, 0x10A3Fu}, {0x10AE5u, 0x10AE6u},
+    {0x10D24u, 0x10D27u}, {0x10EABu, 0x10EACu}, {0x10EFDu, 0x10EFFu}, {0x10F46u, 0x10F50u},
+    {0x10F82u, 0x10F85u}, {0x11001u, 0x11001u}, {0x11038u, 0x11046u}, {0x11070u, 0x11070u},
+    {0x11073u, 0x11074u}, {0x1107Fu, 0x11081u}, {0x110B3u, 0x110B6u}, {0x110B9u, 0x110BAu},
+    {0x110BDu, 0x110BDu}, {0x110C2u, 0x110C2u}, {0x110CDu, 0x110CDu}, {0x11100u, 0x11102u},
+    {0x11127u, 0x1112Bu}, {0x1112Du, 0x11134u}, {0x11173u, 0x11173u}, {0x11180u, 0x11181u},
+    {0x111B6u, 0x111BEu}, {0x111C9u, 0x111CCu}, {0x111CFu, 0x111CFu}, {0x1122Fu, 0x11231u},
+    {0x11234u, 0x11234u}, {0x11236u, 0x11237u}, {0x1123Eu, 0x1123Eu}, {0x11241u, 0x11241u},
+    {0x112DFu, 0x112DFu}, {0x112E3u, 0x112EAu}, {0x11300u, 0x11301u}, {0x1133Bu, 0x1133Cu},
+    {0x11340u, 0x11340u}, {0x11366u, 0x1136Cu}, {0x11370u, 0x11374u}, {0x11438u, 0x1143Fu},
+    {0x11442u, 0x11444u}, {0x11446u, 0x11446u}, {0x1145Eu, 0x1145Eu}, {0x114B3u, 0x114B8u},
+    {0x114BAu, 0x114BAu}, {0x114BFu, 0x114C0u}, {0x114C2u, 0x114C3u}, {0x115B2u, 0x115B5u},
+    {0x115BCu, 0x115BDu}, {0x115BFu, 0x115C0u}, {0x115DCu, 0x115DDu}, {0x11633u, 0x1163Au},
+    {0x1163Du, 0x1163Du}, {0x1163Fu, 0x11640u}, {0x116ABu, 0x116ABu}, {0x116ADu, 0x116ADu},
+    {0x116B0u, 0x116B5u}, {0x116B7u, 0x116B7u}, {0x1171Du, 0x1171Fu}, {0x11722u, 0x11725u},
+    {0x11727u, 0x1172Bu}, {0x1182Fu, 0x11837u}, {0x11839u, 0x1183Au}, {0x1193Bu, 0x1193Cu},
+    {0x1193Eu, 0x1193Eu}, {0x11943u, 0x11943u}, {0x119D4u, 0x119D7u}, {0x119DAu, 0x119DBu},
+    {0x119E0u, 0x119E0u}, {0x11A01u, 0x11A0Au}, {0x11A33u, 0x11A38u}, {0x11A3Bu, 0x11A3Eu},
+    {0x11A47u, 0x11A47u}, {0x11A51u, 0x11A56u}, {0x11A59u, 0x11A5Bu}, {0x11A8Au, 0x11A96u},
+    {0x11A98u, 0x11A99u}, {0x11C30u, 0x11C36u}, {0x11C38u, 0x11C3Du}, {0x11C3Fu, 0x11C3Fu},
+    {0x11C92u, 0x11CA7u}, {0x11CAAu, 0x11CB0u}, {0x11CB2u, 0x11CB3u}, {0x11CB5u, 0x11CB6u},
+    {0x11D31u, 0x11D36u}, {0x11D3Au, 0x11D3Au}, {0x11D3Cu, 0x11D3Du}, {0x11D3Fu, 0x11D45u},
+    {0x11D47u, 0x11D47u}, {0x11D90u, 0x11D91u}, {0x11D95u, 0x11D95u}, {0x11D97u, 0x11D97u},
+    {0x11EF3u, 0x11EF4u}, {0x11F00u, 0x11F01u}, {0x11F36u, 0x11F3Au}, {0x11F40u, 0x11F40u},
+    {0x11F42u, 0x11F42u}, {0x13430u, 0x13440u}, {0x13447u, 0x13455u}, {0x16AF0u, 0x16AF4u},
+    {0x16B30u, 0x16B36u}, {0x16B40u, 0x16B43u}, {0x16F4Fu, 0x16F4Fu}, {0x16F8Fu, 0x16F9Fu},
+    {0x16FE0u, 0x16FE1u}, {0x16FE3u, 0x16FE4u}, {0x1AFF0u, 0x1AFF3u}, {0x1AFF5u, 0x1AFFBu},
+    {0x1AFFDu, 0x1AFFEu}, {0x1BC9Du, 0x1BC9Eu}, {0x1BCA0u, 0x1BCA3u}, {0x1CF00u, 0x1CF2Du},
+    {0x1CF30u, 0x1CF46u}, {0x1D167u, 0x1D169u}, {0x1D173u, 0x1D182u}, {0x1D185u, 0x1D18Bu},
+    {0x1D1AAu, 0x1D1ADu}, {0x1D242u, 0x1D244u}, {0x1DA00u, 0x1DA36u}, {0x1DA3Bu, 0x1DA6Cu},
+    {0x1DA75u, 0x1DA75u}, {0x1DA84u, 0x1DA84u}, {0x1DA9Bu, 0x1DA9Fu}, {0x1DAA1u, 0x1DAAFu},
+    {0x1E000u, 0x1E006u}, {0x1E008u, 0x1E018u}, {0x1E01Bu, 0x1E021u}, {0x1E023u, 0x1E024u},
+    {0x1E026u, 0x1E02Au}, {0x1E030u, 0x1E06Du}, {0x1E08Fu, 0x1E08Fu}, {0x1E130u, 0x1E13Du},
+    {0x1E2AEu, 0x1E2AEu}, {0x1E2ECu, 0x1E2EFu}, {0x1E4EBu, 0x1E4EFu}, {0x1E8D0u, 0x1E8D6u},
+    {0x1E944u, 0x1E94Bu}, {0x1F3FBu, 0x1F3FFu}, {0xE0001u, 0xE0001u}, {0xE0020u, 0xE007Fu},
+    {0xE0100u, 0xE01EFu},
+};
+
+// Default Unicode 15 lowercasing: U+0130 expands; U+03A3 uses original context.
+// UTF-8 input and output are locale-independent. All tables are immutable.
+static int am_unicode_in_ranges(uint32_t cp, const AM_UnicodeRange* ranges, size_t count) {
+    size_t lo = 0, hi = count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (cp < ranges[mid].first) hi = mid;
+        else if (cp > ranges[mid].last) lo = mid + 1;
+        else return 1;
+    }
+    return 0;
+}
+
+static int am_unicode_is_cased(uint32_t cp) {
+    return am_unicode_in_ranges(cp, am_cased_ranges,
+        sizeof(am_cased_ranges) / sizeof(am_cased_ranges[0]));
+}
+
+static int am_unicode_is_case_ignorable(uint32_t cp) {
+    return am_unicode_in_ranges(cp, am_case_ignorable_ranges,
+        sizeof(am_case_ignorable_ranges) / sizeof(am_case_ignorable_ranges[0]));
+}
+
+static int am_unicode_simple_lower(int cp) {
+    size_t lo = 0, hi = sizeof(am_lower_ranges) / sizeof(am_lower_ranges[0]);
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        const AM_LowerRange* range = &am_lower_ranges[mid];
+        if ((uint32_t)cp < range->first) hi = mid;
+        else if ((uint32_t)cp > range->last) lo = mid + 1;
+        else return ((uint32_t)cp - range->first) % range->stride == 0
+            ? cp + range->delta : cp;
+    }
+    return cp;
+}
+
+// Called after the first pass validates the entire source. Each ignorable run
+// is visited by at most one sigma lookahead, keeping both passes linear.
+static int am_unicode_following_cased(const AM_String* text, int pos) {
+    while (pos < text->byte_len) {
+        int cp;
+        int width = am_string_decode_utf8((const unsigned char*)text->data + pos,
+                                          text->byte_len - pos, &cp);
+        if (width < 0) return 0;
+        if (!am_unicode_is_case_ignorable((uint32_t)cp))
+            return am_unicode_is_cased((uint32_t)cp);
+        pos += width;
+    }
+    return 0;
+}
+
+static int am_unicode_encoded_width(int cp) {
+    return cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+}
+
+static int am_unicode_encode(char* dst, int cp) {
+    if (cp < 0x80) {
+        dst[0] = (char)cp;
+        return 1;
+    }
+    if (cp < 0x800) {
+        dst[0] = (char)(0xC0 | (cp >> 6));
+        dst[1] = (char)(0x80 | (cp & 0x3F));
+        return 2;
+    }
+    if (cp < 0x10000) {
+        dst[0] = (char)(0xE0 | (cp >> 12));
+        dst[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        dst[2] = (char)(0x80 | (cp & 0x3F));
+        return 3;
+    }
+    dst[0] = (char)(0xF0 | (cp >> 18));
+    dst[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+    dst[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+    dst[3] = (char)(0x80 | (cp & 0x3F));
+    return 4;
+}
+
+AM_String* am_string_lower(const AM_String* text) {
+    if (!text || !text->data || text->byte_len < 0 ||
+        text->byte_len > AM_MAX_STRING_BYTES) return NULL;
+    int source_pos = 0, byte_len = 0, len = 0;
+    while (source_pos < text->byte_len) {
+        int cp;
+        int width = am_string_decode_utf8((const unsigned char*)text->data + source_pos,
+                                          text->byte_len - source_pos, &cp);
+        if (width < 0) return NULL;
+        source_pos += width;
+        // Final sigma and ordinary sigma occupy the same two UTF-8 bytes.
+        int produced = cp == 0x130 ? 3 : am_unicode_encoded_width(am_unicode_simple_lower(cp));
+        if (produced > AM_MAX_STRING_BYTES - byte_len) return NULL;
+        byte_len += produced;
+        len += cp == 0x130 ? 2 : 1;
+    }
+    AM_String* out = am_string_alloc(byte_len, len);
+    if (!out) return NULL;
+    source_pos = 0;
+    int destination_pos = 0, preceding_cased = 0;
+    while (source_pos < text->byte_len) {
+        int cp;
+        int width = am_string_decode_utf8((const unsigned char*)text->data + source_pos,
+                                          text->byte_len - source_pos, &cp);
+        if (width < 0) { am_string_free(out); return NULL; }
+        source_pos += width;
+        int mapped = am_unicode_simple_lower(cp);
+        if (cp == 0x3A3 && preceding_cased &&
+            !am_unicode_following_cased(text, source_pos)) mapped = 0x3C2;
+        if (cp == 0x130) {
+            destination_pos += am_unicode_encode(out->data + destination_pos, 0x69);
+            destination_pos += am_unicode_encode(out->data + destination_pos, 0x307);
+        } else {
+            destination_pos += am_unicode_encode(out->data + destination_pos, mapped);
+        }
+        // A codepoint may be both Cased and Case_Ignorable (for example U+0345).
+        // Ignorable takes priority in the original-string sigma context.
+        if (!am_unicode_is_case_ignorable((uint32_t)cp))
+            preceding_cased = am_unicode_is_cased((uint32_t)cp);
+    }
+    return out;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

@@ -39,7 +39,7 @@ int main(int argc, char **argv) {
     }
 
 #ifdef AML_WITH_NOTORCH
-    am_use_notorch_sampling();
+    am_use_notorch();
 #endif
     int rc = am_exec_file(argv[1]);
     if (rc != 0)

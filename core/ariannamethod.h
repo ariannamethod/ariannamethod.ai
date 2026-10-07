@@ -332,6 +332,9 @@ AM_String* am_string_slice(const AM_String* text, int start, int end);
 int am_string_find(const AM_String* text, const AM_String* needle);
 int am_string_codepoint(const AM_String* text, int index);
 AM_String* am_string_from_codepoint(int codepoint);
+// Unicode 15.0 default lowercase, including expansions and contextual sigma.
+// Returns a fresh owned string, or NULL on invalid input, limit, or allocation.
+AM_String* am_string_lower(const AM_String* text);
 
 // Mutable string container. Items are immutable retained strings. List refs
 // are atomic; mutation belongs to one execution context or a synchronized host.
@@ -407,6 +410,31 @@ typedef struct {
 void am_set_sampling_backend(const AM_SamplingBackend* backend);
 // Supplied by optional libaml_notorch.a; link it with libaml.a and libnotorch.a.
 void am_use_notorch_sampling(void);
+
+// Optional allocation-free numerical values backend. Registration copies the
+// table and survives am_init()/worker initialization, as above. All callbacks
+// are required; configure before execution and keep callback code loaded.
+// Inputs are borrowed and must not be changed or retained. Outputs are separate
+// caller-owned buffers. Each callback returns 0 on success, -1 on failure; the
+// runtime checks every returned value before exposing the fresh AML array.
+// Matrices are row-major. linear_vjp packs [dW rows*cols, db rows, dx cols];
+// mse_grad packs [mean loss, dpred n]. normal advances its supplied local state;
+// the runtime publishes its RNG map only after validating the whole output.
+typedef struct {
+    int (*linear)(const float* w, const float* b, const float* x,
+                  int rows, int cols, float* out);
+    int (*linear_vjp)(const float* w, const float* x, const float* dy,
+                      int rows, int cols, float* out);
+    int (*tanh)(const float* x, int n, float* out);
+    int (*tanh_vjp)(const float* y, const float* dy, int n, float* out);
+    int (*mse_grad)(const float* pred, const float* target, int n, float* out);
+    int (*sgd)(const float* params, const float* grad, int n, float lr, float* out);
+    int (*normal)(uint64_t* state, int n, float* out);
+} AM_NumericalBackend;
+
+void am_set_numerical_backend(const AM_NumericalBackend* backend);
+// Optional NoTorch bridge: register both owned sampling and numerical values.
+void am_use_notorch(void);
 
 typedef struct {
     float* data;

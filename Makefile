@@ -21,7 +21,7 @@ ifdef BLAS
   endif
 endif
 
-.PHONY: all test test-amlc test-imports test-text test-lists test-maps test-sampling test-janus janus clean test-all test-blas amlc runner install notorch install-notorch
+.PHONY: all test test-amlc test-imports test-text test-text-lower test-lists test-maps test-sampling test-numerical test-janus janus clean test-all test-blas amlc runner install notorch install-notorch
 
 # ═══ Core AML ═══
 all: libaml.a runner amlc
@@ -44,7 +44,7 @@ runner: runner/aml
 runner/aml: runner/am.c libaml.a
 	$(CC) $(CFLAGS) -Icore runner/am.c libaml.a -o $@ $(LDFLAGS)
 
-# Canonical NoTorch sampling is an explicit optional binding. The core archive
+# Canonical NoTorch sampling and numerical values use an optional binding. The core archive
 # stays usable on its own; build NoTorch's archive before invoking this target.
 NOTORCH_ROOT ?= ../notorch
 NOTORCH_INCLUDE ?= $(NOTORCH_ROOT)
@@ -119,6 +119,9 @@ test-imports: all
 test-text: all
 	bash tests/test_aml_text_runtime.sh
 
+test-text-lower: all
+	bash tests/test_aml_text_lower.sh
+
 test-lists: all
 	bash tests/test_aml_lists.sh
 
@@ -127,6 +130,9 @@ test-maps: all
 
 test-sampling: notorch
 	NOTORCH_LIB="$(abspath $(NOTORCH_LIB))" NOTORCH_INCLUDE="$(abspath $(NOTORCH_INCLUDE))" NOTORCH_LDFLAGS="$(NOTORCH_LDFLAGS)" bash tests/test_aml_sampling.sh
+
+test-numerical: notorch
+	NOTORCH_LIB="$(abspath $(NOTORCH_LIB))" NOTORCH_INCLUDE="$(abspath $(NOTORCH_INCLUDE))" NOTORCH_LDFLAGS="$(NOTORCH_LDFLAGS)" bash tests/test_aml_numerical.sh
 
 core/test_aml: core/test_aml.c core/ariannamethod.c core/ariannamethod.h
 	$(CC) $(CFLAGS) core/test_aml.c core/ariannamethod.c -o $@ $(LDFLAGS)
