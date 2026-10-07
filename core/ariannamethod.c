@@ -730,8 +730,11 @@ static AML_Var* symtab_get_var(AML_Symtab* tab, const char* name);
 static int      symtab_set(AML_Symtab* tab, const char* name, float value);
 static int      symtab_set_array(AML_Symtab* tab, const char* name, AM_Array* arr);
 static int      symtab_set_string(AML_Symtab* tab, const char* name, AM_String* str);
+static int      symtab_set_list(AML_Symtab* tab, const char* name, AM_List* list);
 static void     symtab_clear_arrays(AML_Symtab* tab);
 static int      symtab_snapshot(AML_Symtab* dst, const AML_Symtab* src);
+static int      symtab_copy_value(AML_Symtab* dst, const AML_Var* value);
+static void     set_error(AML_ExecCtx* ctx, const char* msg);
 
 void am_persistent_mode(int enable) {
     if (!enable && g_persistent_enabled) {
@@ -747,27 +750,11 @@ void am_persistent_clear(void) {
 }
 
 // Restore persistent globals into execution context
-static void persistent_restore(AML_Symtab* dst) {
-    if (!g_persistent_enabled) return;
-    for (int i = 0; i < g_persistent_globals.count; i++) {
-        AML_Var* pv = &g_persistent_globals.vars[i];
-        if (pv->type == AML_TYPE_ARRAY && pv->array) {
-            // Clone array: exec ctx gets its own copy, persistent keeps original
-            AM_Array* clone = am_array_new(pv->array->len);
-            if (clone) {
-                memcpy(clone->data, pv->array->data,
-                       pv->array->len * sizeof(float));
-                clone->rows = pv->array->rows;
-                clone->cols = pv->array->cols;
-                symtab_set_array(dst, pv->name, clone);
-            }
-        } else if (pv->type == AML_TYPE_STRING && pv->string) {
-            am_string_ref(pv->string);
-            if (symtab_set_string(dst, pv->name, pv->string)) am_string_free(pv->string);
-        } else {
-            symtab_set(dst, pv->name, pv->value);
-        }
-    }
+static int persistent_restore(AML_Symtab* dst) {
+    if (!g_persistent_enabled) return 0;
+    if (!symtab_snapshot(dst, &g_persistent_globals)) return 0;
+    set_error(NULL, "persistent globals allocation failed");
+    return 1;
 }
 
 // Save execution context globals back to persistent storage.
@@ -777,82 +764,27 @@ static void persistent_restore(AML_Symtab* dst) {
 // This means the first am_exec creates persistent vars, and subsequent calls
 // update them. Intermediates created by later scripts get saved once (unavoidable)
 // but since they have fixed names, the count stabilizes.
-static void persistent_save(AML_Symtab* src) {
-    if (!g_persistent_enabled) return;
-
-    // Phase 1: Update existing persistent variables from exec ctx
+static int persistent_save(AML_Symtab* src) {
+    if (!g_persistent_enabled) return 0;
+    // Build the complete replacement first. Failed allocation leaves every
+    // previous persistent binding intact, including mutable list containers.
+    AML_Symtab next = {0};
     for (int i = 0; i < g_persistent_globals.count; i++) {
-        AML_Var* pv = &g_persistent_globals.vars[i];
-        AML_Var* sv = NULL;
-        for (int j = 0; j < src->count; j++) {
-            if (strcmp(src->vars[j].name, pv->name) == 0) {
-                sv = &src->vars[j];
-                break;
-            }
-        }
-        if (!sv) continue;
-
-        if (sv->type == AML_TYPE_ARRAY && sv->array) {
-            AM_Array* clone = am_array_new(sv->array->len);
-            if (clone) {
-                memcpy(clone->data, sv->array->data,
-                       sv->array->len * sizeof(float));
-                clone->rows = sv->array->rows;
-                clone->cols = sv->array->cols;
-                if (pv->type == AML_TYPE_ARRAY && pv->array) {
-                    am_array_free(pv->array);
-                }
-                if (pv->type == AML_TYPE_STRING) am_string_free(pv->string);
-                pv->string = NULL;
-                pv->type = AML_TYPE_ARRAY;
-                pv->array = clone;
-                pv->value = 0;
-            }
-        } else if (sv->type == AML_TYPE_STRING && sv->string) {
-            am_string_ref(sv->string);
-            if (symtab_set_string(&g_persistent_globals, sv->name, sv->string))
-                am_string_free(sv->string);
-        } else {
-            if (pv->type == AML_TYPE_ARRAY && pv->array) {
-                am_array_free(pv->array);
-                pv->array = NULL;
-            }
-            if (pv->type == AML_TYPE_STRING) am_string_free(pv->string);
-            pv->string = NULL;
-            pv->type = AML_TYPE_FLOAT;
-            pv->value = sv->value;
-        }
+        AML_Var* old = &g_persistent_globals.vars[i];
+        AML_Var* current = symtab_get_var(src, old->name);
+        if (symtab_copy_value(&next, current ? current : old)) goto failed;
     }
-
-    // Phase 2: Add NEW variables from exec ctx that aren't in persistent yet
-    for (int j = 0; j < src->count; j++) {
-        AML_Var* sv = &src->vars[j];
-        int found = 0;
-        for (int i = 0; i < g_persistent_globals.count; i++) {
-            if (strcmp(g_persistent_globals.vars[i].name, sv->name) == 0) {
-                found = 1;
-                break;
-            }
-        }
-        if (found) continue;
-
-        if (sv->type == AML_TYPE_ARRAY && sv->array) {
-            AM_Array* clone = am_array_new(sv->array->len);
-            if (clone) {
-                memcpy(clone->data, sv->array->data,
-                       sv->array->len * sizeof(float));
-                clone->rows = sv->array->rows;
-                clone->cols = sv->array->cols;
-                symtab_set_array(&g_persistent_globals, sv->name, clone);
-            }
-        } else if (sv->type == AML_TYPE_STRING && sv->string) {
-            am_string_ref(sv->string);
-            if (symtab_set_string(&g_persistent_globals, sv->name, sv->string))
-                am_string_free(sv->string);
-        } else {
-            symtab_set(&g_persistent_globals, sv->name, sv->value);
-        }
+    for (int i = 0; i < src->count; i++) {
+        AML_Var* value = &src->vars[i];
+        if (!symtab_get_var(&next, value->name) && symtab_copy_value(&next, value))
+            goto failed;
     }
+    symtab_clear_arrays(&g_persistent_globals);
+    g_persistent_globals = next;
+    return 0;
+failed:
+    symtab_clear_arrays(&next);
+    return 1;
 }
 
 int am_set_var_array(const char* name, const float* data, int len) {
@@ -916,6 +848,27 @@ const char* am_get_var_text(const char* name) {
     if (!name) return NULL;
     AML_Var* v = symtab_get_var(&g_persistent_globals, name);
     return v && v->type == AML_TYPE_STRING && v->string ? v->string->data : NULL;
+}
+
+int am_set_var_list(const char* name, const AM_List* list) {
+    if (!name || !*name || strlen(name) >= AML_MAX_NAME || !list) return 1;
+    if (!(isalpha((unsigned char)*name) || *name == '_')) return 1;
+    for (const char* p = name + 1; *p; p++)
+        if (!(isalnum((unsigned char)*p) || *p == '_')) return 1;
+    AM_List* copy = am_list_clone(list);
+    if (!copy) return 1;
+    if (symtab_set_list(&g_persistent_globals, name, copy)) {
+        am_list_free(copy);
+        return 1;
+    }
+    g_persistent_enabled = 1;
+    return 0;
+}
+
+const AM_List* am_get_var_list(const char* name) {
+    if (!name) return NULL;
+    AML_Var* v = symtab_get_var(&g_persistent_globals, name);
+    return v && v->type == AML_TYPE_LIST ? v->list : NULL;
 }
 
 // enable/disable packs
@@ -3172,6 +3125,8 @@ static int symtab_set(AML_Symtab* tab, const char* name, float value) {
             }
             if (tab->vars[i].type == AML_TYPE_STRING) am_string_free(tab->vars[i].string);
             tab->vars[i].string = NULL;
+            if (tab->vars[i].type == AML_TYPE_LIST) am_list_free(tab->vars[i].list);
+            tab->vars[i].list = NULL;
             tab->vars[i].type = AML_TYPE_FLOAT;
             tab->vars[i].value = value;
             return 0;
@@ -3183,6 +3138,7 @@ static int symtab_set(AML_Symtab* tab, const char* name, float value) {
     tab->vars[tab->count].value = value;
     tab->vars[tab->count].array = NULL;
     tab->vars[tab->count].string = NULL;
+    tab->vars[tab->count].list = NULL;
     tab->count++;
     return 0;
 }
@@ -3197,6 +3153,8 @@ static int symtab_set_array(AML_Symtab* tab, const char* name, AM_Array* arr) {
             }
             if (tab->vars[i].type == AML_TYPE_STRING) am_string_free(tab->vars[i].string);
             tab->vars[i].string = NULL;
+            if (tab->vars[i].type == AML_TYPE_LIST) am_list_free(tab->vars[i].list);
+            tab->vars[i].list = NULL;
             tab->vars[i].type = AML_TYPE_ARRAY;
             tab->vars[i].value = 0;
             tab->vars[i].array = arr;
@@ -3209,6 +3167,7 @@ static int symtab_set_array(AML_Symtab* tab, const char* name, AM_Array* arr) {
     tab->vars[tab->count].value = 0;
     tab->vars[tab->count].array = arr;
     tab->vars[tab->count].string = NULL;
+    tab->vars[tab->count].list = NULL;
     tab->count++;
     return 0;
 }
@@ -3222,7 +3181,17 @@ static int symtab_set_string(AML_Symtab* tab, const char* name, AM_String* str) 
     return 0;
 }
 
-// Free all owned arrays and strings in a symbol table.
+// Takes ownership of one list reference. Parameter binding retains first;
+// assignments and persistent copies provide a fresh container.
+static int symtab_set_list(AML_Symtab* tab, const char* name, AM_List* list) {
+    if (symtab_set(tab, name, 0)) return 1;
+    AML_Var* v = symtab_get_var(tab, name);
+    v->type = AML_TYPE_LIST;
+    v->list = list;
+    return 0;
+}
+
+// Free all owned arrays, strings, and lists in a symbol table.
 static void symtab_clear_arrays(AML_Symtab* tab) {
     for (int i = 0; i < tab->count; i++) {
         if (tab->vars[i].type == AML_TYPE_ARRAY && tab->vars[i].array) {
@@ -3233,31 +3202,46 @@ static void symtab_clear_arrays(AML_Symtab* tab) {
             am_string_free(tab->vars[i].string);
             tab->vars[i].string = NULL;
         }
+        if (tab->vars[i].type == AML_TYPE_LIST) {
+            am_list_free(tab->vars[i].list);
+            tab->vars[i].list = NULL;
+        }
     }
 }
 
-// Mutable arrays are copied; immutable strings retain an atomic reference.
+// Copy one binding without sharing mutable arrays or list containers.
+static int symtab_copy_value(AML_Symtab* dst, const AML_Var* v) {
+    if (v->type == AML_TYPE_ARRAY) {
+#ifdef USE_CUDA
+        ensure_cpu(v->array);
+#endif
+        AM_Array* array = am_array_clone(v->array);
+        if (!array) return 1;
+        if (!symtab_set_array(dst, v->name, array)) return 0;
+        am_array_free(array);
+        return 1;
+    }
+    if (v->type == AML_TYPE_STRING) {
+        am_string_ref(v->string);
+        if (!symtab_set_string(dst, v->name, v->string)) return 0;
+        am_string_free(v->string);
+        return 1;
+    }
+    if (v->type == AML_TYPE_LIST) {
+        AM_List* list = am_list_clone(v->list);
+        if (!list) return 1;
+        if (!symtab_set_list(dst, v->name, list)) return 0;
+        am_list_free(list);
+        return 1;
+    }
+    return symtab_set(dst, v->name, v->value);
+}
+
+// Mutable containers are copied; immutable strings retain atomic references.
 static int symtab_snapshot(AML_Symtab* dst, const AML_Symtab* src) {
     memset(dst, 0, sizeof(*dst));
     for (int i = 0; i < src->count; i++) {
-        const AML_Var* v = &src->vars[i];
-        int rc = 0;
-        if (v->type == AML_TYPE_ARRAY) {
-#ifdef USE_CUDA
-            ensure_cpu(v->array);
-#endif
-            AM_Array* array = am_array_clone(v->array);
-            if (!array) rc = 1;
-            else if (symtab_set_array(dst, v->name, array)) {
-                am_array_free(array); rc = 1;
-            }
-        } else if (v->type == AML_TYPE_STRING) {
-            am_string_ref(v->string);
-            if (symtab_set_string(dst, v->name, v->string)) {
-                am_string_free(v->string); rc = 1;
-            }
-        } else rc = symtab_set(dst, v->name, v->value);
-        if (rc) {
+        if (symtab_copy_value(dst, &src->vars[i])) {
             symtab_clear_arrays(dst);
             dst->count = 0;
             return 1;
@@ -3278,8 +3262,9 @@ static AML_Var* resolve_var_full(AML_ExecCtx* ctx, const char* name) {
 // Resolve variable: locals → globals → field map
 static int resolve_var(AML_ExecCtx* ctx, const char* name, float* out) {
     AML_Var* value = resolve_var_full(ctx, name);
-    if (value && value->type == AML_TYPE_STRING) {
-        set_error(ctx, "string used as a scalar expression");
+    if (value && (value->type == AML_TYPE_STRING || value->type == AML_TYPE_LIST)) {
+        set_error(ctx, value->type == AML_TYPE_LIST
+            ? "list used as a scalar expression" : "string used as a scalar expression");
         *out = 0;
         return 1;
     }
@@ -3300,18 +3285,21 @@ static int resolve_var(AML_ExecCtx* ctx, const char* name, float* out) {
 // Precedence: or < and < comparison < add/sub < mul/div < unary < primary
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// Expression values own their array/string reference until consumed.
+// Expression values own their container/string reference until consumed.
 static void aml_value_clear(AML_Var* v) {
     if (v->type == AML_TYPE_ARRAY) am_array_free(v->array);
     if (v->type == AML_TYPE_STRING) am_string_free(v->string);
+    if (v->type == AML_TYPE_LIST) am_list_free(v->list);
     memset(v, 0, sizeof(*v));
 }
 
 static void aml_clear_return(AML_ExecCtx* ctx) {
     am_array_free(ctx->return_array);
     am_string_free(ctx->return_string);
+    am_list_free(ctx->return_list);
     ctx->return_array = NULL;
     ctx->return_string = NULL;
+    ctx->return_list = NULL;
     ctx->return_type = AML_TYPE_FLOAT;
     ctx->return_value = 0;
     ctx->has_return = 0;
@@ -3332,6 +3320,14 @@ static AML_Func* aml_value_function(AML_ExecCtx* ctx, const char* name) {
 static int aml_text_function(const char* name) {
     static const char* names[] = {"text_len", "text_bytes", "text_equal", "text_find",
         "text_slice", "text_concat", "text_codepoint", "text_from_codepoint"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+        if (strcasecmp(name, names[i]) == 0) return 1;
+    return 0;
+}
+
+static int aml_list_function(const char* name) {
+    static const char* names[] = {"list_new", "list_len", "list_get", "list_push",
+        "list_set", "list_find", "list_slice", "list_clone"};
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (strcasecmp(name, names[i]) == 0) return 1;
     return 0;
@@ -3429,6 +3425,123 @@ static int aml_text_dispatch(AML_ExecCtx* ctx, const char* name, AML_Var* args,
     return 0;
 }
 
+static int aml_list_integer(AML_ExecCtx* ctx, const AML_Var* v, int* out) {
+    if (v->type != AML_TYPE_FLOAT || !isfinite(v->value) ||
+        v->value < -2147483648.0f || v->value >= 2147483648.0f ||
+        truncf(v->value) != v->value) {
+        set_error(ctx, "list index must be an integer");
+        return 1;
+    }
+    *out = (int)v->value;
+    return 0;
+}
+
+static int aml_list_dispatch(AML_ExecCtx* ctx, const char* name, AML_Var* args,
+                             int nargs, AML_Var* out) {
+    int need = 2;
+    if (!strcasecmp(name, "list_new")) need = 0;
+    else if (!strcasecmp(name, "list_len") || !strcasecmp(name, "list_clone")) need = 1;
+    else if (!strcasecmp(name, "list_set") || !strcasecmp(name, "list_slice")) need = 3;
+    if (nargs != need) { set_error(ctx, "wrong number of list arguments"); return 1; }
+    if (!strcasecmp(name, "list_new")) {
+        out->list = am_list_new();
+    } else {
+        if (args[0].type != AML_TYPE_LIST || !args[0].list) {
+            set_error(ctx, "list operation requires a list"); return 1;
+        }
+        AM_List* list = args[0].list;
+        if (!strcasecmp(name, "list_len")) {
+            out->value = (float)list->len;
+            return 0;
+        }
+        if (!strcasecmp(name, "list_clone")) out->list = am_list_clone(list);
+        else if (!strcasecmp(name, "list_slice")) {
+            int start, end;
+            if (aml_list_integer(ctx, &args[1], &start) || aml_list_integer(ctx, &args[2], &end))
+                return 1;
+            out->list = am_list_slice(list, start, end);
+        } else if (!strcasecmp(name, "list_get")) {
+            int index;
+            if (aml_list_integer(ctx, &args[1], &index)) return 1;
+            out->string = am_list_get(list, index);
+            if (!out->string) { set_error(ctx, "list index out of range"); return 1; }
+            out->type = AML_TYPE_STRING;
+            return 0;
+        } else {
+            int position = 1, index = 0;
+            if (!strcasecmp(name, "list_set")) {
+                if (aml_list_integer(ctx, &args[1], &index)) return 1;
+                position = 2;
+            }
+            if (args[position].type != AML_TYPE_STRING || !args[position].string) {
+                set_error(ctx, "list item must be a string"); return 1;
+            }
+            AM_String* item = args[position].string;
+            if (!strcasecmp(name, "list_find")) {
+                out->value = (float)am_list_find(list, item);
+            } else if (!strcasecmp(name, "list_push")) {
+                int len = am_list_push(list, item);
+                if (len < 0) { set_error(ctx, "list limit exceeded or allocation failed"); return 1; }
+                out->value = (float)len;
+            } else {
+                if (am_list_set(list, index, item)) {
+                    set_error(ctx, "list index out of range"); return 1;
+                }
+                am_string_ref(item);
+                out->string = item;
+                out->type = AML_TYPE_STRING;
+            }
+            return 0;
+        }
+    }
+    if (!out->list) { set_error(ctx, "list allocation failed"); return 1; }
+    out->type = AML_TYPE_LIST;
+    return 0;
+}
+
+static int aml_array_scalar_function(const char* name) {
+    return !strcasecmp(name, "len") || !strcasecmp(name, "sum") ||
+           !strcasecmp(name, "dot") || !strcasecmp(name, "rows") ||
+           !strcasecmp(name, "cols");
+}
+
+// Preserve numeric/undefined zero results while rejecting text and lists.
+// The shared typed parser handles parentheses and returned values exactly once.
+static int aml_array_scalar_dispatch(AML_ExecCtx* ctx, const char* name,
+                                      AML_Var* args, int nargs, AML_Var* out) {
+    int need = !strcasecmp(name, "dot") ? 2 : 1;
+    if (nargs != need) {
+        set_error(ctx, "wrong number of array arguments"); return 1;
+    }
+    for (int i = 0; i < nargs; i++) {
+        if (args[i].type == AML_TYPE_STRING || args[i].type == AML_TYPE_LIST) {
+            set_error(ctx, "array operation requires an array"); return 1;
+        }
+    }
+    AM_Array* a = args[0].type == AML_TYPE_ARRAY ? args[0].array : NULL;
+    if (!a) return 0;
+    if (!strcasecmp(name, "len")) out->value = (float)a->len;
+    else if (!strcasecmp(name, "rows")) out->value = (float)a->rows;
+    else if (!strcasecmp(name, "cols")) out->value = (float)a->cols;
+    else {
+#ifdef USE_CUDA
+        ensure_cpu(a);
+#endif
+        if (!strcasecmp(name, "sum")) {
+            for (int i = 0; i < a->len; i++) out->value += a->data[i];
+        } else {
+            AM_Array* b = args[1].type == AML_TYPE_ARRAY ? args[1].array : NULL;
+            if (!b) return 0;
+#ifdef USE_CUDA
+            ensure_cpu(b);
+#endif
+            int n = a->len < b->len ? a->len : b->len;
+            for (int i = 0; i < n; i++) out->value += a->data[i] * b->data[i];
+        }
+    }
+    return 0;
+}
+
 // Parse mixed arguments without splitting commas/parentheses inside strings.
 // cursor starts at '(' and advances past the matching ')'.
 static int aml_invoke_value(AML_ExecCtx* ctx, const char* name,
@@ -3470,6 +3583,8 @@ static int aml_invoke_value(AML_ExecCtx* ctx, const char* name,
     if (*p != ')') { set_error(ctx, "missing closing parenthesis"); goto done; }
     *cursor = p + 1;
     if (aml_text_function(name)) rc = aml_text_dispatch(ctx, name, args, nargs, out);
+    else if (aml_list_function(name)) rc = aml_list_dispatch(ctx, name, args, nargs, out);
+    else if (aml_array_scalar_function(name)) rc = aml_array_scalar_dispatch(ctx, name, args, nargs, out);
     else {
         AML_Func* f = aml_value_function(ctx, name);
         if (f) rc = aml_call_value(ctx, f, args, nargs, 0, out);
@@ -3536,8 +3651,10 @@ static float expr_primary(AML_Expr* e) {
 
             if (e->ctx) {
                 AML_Var* var = resolve_var_full(e->ctx, name);
-                if (var && var->type == AML_TYPE_STRING) {
-                    set_error(e->ctx, "array indexing requires an array; use text_codepoint/text_slice for text");
+                if (var && (var->type == AML_TYPE_STRING || var->type == AML_TYPE_LIST)) {
+                    set_error(e->ctx, var->type == AML_TYPE_LIST
+                        ? "array indexing requires an array; use list_get for lists"
+                        : "array indexing requires an array; use text_codepoint/text_slice for text");
                     e->error = 1;
                     return 0;
                 }
@@ -3554,7 +3671,9 @@ static float expr_primary(AML_Expr* e) {
 
         // function call
         if (*e->p == '(') {
-            if (e->ctx && (aml_text_function(name) || aml_value_function(e->ctx, name))) {
+            if (e->ctx && (aml_text_function(name) || aml_list_function(name) ||
+                           aml_array_scalar_function(name) ||
+                           aml_value_function(e->ctx, name))) {
                 AML_Var result = {0};
                 if (aml_invoke_value(e->ctx, name, &e->p, &result)) {
                     e->error = 1;
@@ -3562,87 +3681,12 @@ static float expr_primary(AML_Expr* e) {
                 }
                 if (result.type != AML_TYPE_FLOAT) {
                     aml_value_clear(&result);
-                    set_error(e->ctx, "string/array value used as a scalar expression");
+                    set_error(e->ctx, "string/array/list value used as a scalar expression");
                     e->error = 1;
                     return 0;
                 }
                 return result.value;
             }
-            // v4.0: array scalar-returning builtins need raw arg names
-            // Parse them BEFORE evaluating args as expressions
-            if (e->ctx && (strcasecmp(name, "len") == 0 ||
-                           strcasecmp(name, "sum") == 0 ||
-                           strcasecmp(name, "dot") == 0 ||
-                           strcasecmp(name, "rows") == 0 ||
-                           strcasecmp(name, "cols") == 0)) {
-                // Parse argument names (identifiers), not evaluated expressions
-                e->p++; // skip '('
-                char arg_names[AML_MAX_PARAMS][AML_MAX_NAME];
-                int n_arg_names = 0;
-                expr_skip_ws(e);
-                while (*e->p != ')' && *e->p && n_arg_names < AML_MAX_PARAMS) {
-                    int ai = 0;
-                    while ((isalnum((unsigned char)*e->p) || *e->p == '_') && ai < AML_MAX_NAME - 1)
-                        arg_names[n_arg_names][ai++] = *e->p++;
-                    arg_names[n_arg_names][ai] = 0;
-                    n_arg_names++;
-                    expr_skip_ws(e);
-                    if (*e->p == ',') { e->p++; expr_skip_ws(e); }
-                }
-                if (*e->p == ')') e->p++;
-
-                for (int ai = 0; ai < n_arg_names; ai++) {
-                    AML_Var* v = resolve_var_full(e->ctx, arg_names[ai]);
-                    if (v && v->type == AML_TYPE_STRING) {
-                        set_error(e->ctx, "array operation requires an array");
-                        e->error = 1;
-                        return 0;
-                    }
-                }
-
-                if (strcasecmp(name, "len") == 0 && n_arg_names >= 1) {
-                    AML_Var* v = resolve_var_full(e->ctx, arg_names[0]);
-                    if (v && v->type == AML_TYPE_ARRAY && v->array)
-                        return (float)v->array->len;
-                    return 0;
-                }
-                if (strcasecmp(name, "sum") == 0 && n_arg_names >= 1) {
-                    AML_Var* v = resolve_var_full(e->ctx, arg_names[0]);
-                    if (v && v->type == AML_TYPE_ARRAY && v->array) {
-                        float s = 0;
-                        for (int j = 0; j < v->array->len; j++) s += v->array->data[j];
-                        return s;
-                    }
-                    return 0;
-                }
-                if (strcasecmp(name, "dot") == 0 && n_arg_names >= 2) {
-                    AML_Var* va = resolve_var_full(e->ctx, arg_names[0]);
-                    AML_Var* vb = resolve_var_full(e->ctx, arg_names[1]);
-                    if (va && va->type == AML_TYPE_ARRAY && va->array &&
-                        vb && vb->type == AML_TYPE_ARRAY && vb->array) {
-                        int n = va->array->len < vb->array->len ? va->array->len : vb->array->len;
-                        float d = 0;
-                        for (int j = 0; j < n; j++) d += va->array->data[j] * vb->array->data[j];
-                        return d;
-                    }
-                    return 0;
-                }
-                // Phase 2: rows(M), cols(M)
-                if (strcasecmp(name, "rows") == 0 && n_arg_names >= 1) {
-                    AML_Var* v = resolve_var_full(e->ctx, arg_names[0]);
-                    if (v && v->type == AML_TYPE_ARRAY && v->array)
-                        return (float)v->array->rows;
-                    return 0;
-                }
-                if (strcasecmp(name, "cols") == 0 && n_arg_names >= 1) {
-                    AML_Var* v = resolve_var_full(e->ctx, arg_names[0]);
-                    if (v && v->type == AML_TYPE_ARRAY && v->array)
-                        return (float)v->array->cols;
-                    return 0;
-                }
-                return 0;
-            }
-
             e->p++;
             float args[AML_MAX_PARAMS];
             int nargs = 0;
@@ -3866,10 +3910,13 @@ static int aml_eval_value(AML_ExecCtx* ctx, const char* text, AML_Var* out) {
                 *out = *v;
                 if (v->type == AML_TYPE_ARRAY) am_array_ref(out->array);
                 if (v->type == AML_TYPE_STRING) am_string_ref(out->string);
+                if (v->type == AML_TYPE_LIST) am_list_ref(out->list);
                 return 0;
             }
         }
-        if (*p == '(' && (aml_text_function(name) || aml_value_function(ctx, name))) {
+        if (*p == '(' && (aml_text_function(name) || aml_list_function(name) ||
+                          aml_array_scalar_function(name) ||
+                          aml_value_function(ctx, name))) {
             const char* close = aml_value_close(p);
             if (close == expr + len - 1) return aml_invoke_value(ctx, name, &p, out);
         }
@@ -5043,6 +5090,10 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
         sscanf(rest, "%31s", vname);
         if (vname[0] && ctx) {
           AML_Var* v = resolve_var_full(ctx, vname);
+          if (v && v->type == AML_TYPE_LIST) {
+            set_error(ctx, "TAPE requires a numeric array");
+            return;
+          }
           if (v && v->type == AML_TYPE_ARRAY && v->array) {
             int tidx = tape_find_entry(v->array);
             if (tidx >= 0) am_tape_backward(tidx);
@@ -5132,6 +5183,10 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
         sscanf(rest, "%31s", vname);
         if (vname[0] && ctx) {
           AML_Var* v = resolve_var_full(ctx, vname);
+          if (v && v->type == AML_TYPE_LIST) {
+            set_error(ctx, "TAPE requires a numeric array");
+            return;
+          }
           if (v && v->type == AML_TYPE_ARRAY && v->array) {
             int idx = am_tape_record_param(v->array);
             if (nd && idx >= 0) g_tape.entries[idx].no_decay = 1;
@@ -5550,7 +5605,9 @@ static int aml_reserved_function(const char* name) {
         "embedding_lookup", "row", "seq_embed", "seq_matvec", "seq_rmsnorm",
         "causal_attention", "multi_head_attention", "seq_cross_entropy",
         "text_len", "text_bytes", "text_equal", "text_find", "text_slice",
-        "text_concat", "text_codepoint", "text_from_codepoint"
+        "text_concat", "text_codepoint", "text_from_codepoint",
+        "list_new", "list_len", "list_get", "list_push", "list_set", "list_find",
+        "list_slice", "list_clone"
     };
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (strcasecmp(name, names[i]) == 0) return 1;
@@ -5685,6 +5742,7 @@ static int aml_call_value(AML_ExecCtx* ctx, AML_Func* f, AML_Var* args,
     float saved_return_value = ctx->return_value;
     AM_Array* saved_return_array = ctx->return_array;
     AM_String* saved_return_string = ctx->return_string;
+    AM_List* saved_return_list = ctx->return_list;
     int saved_return_type = ctx->return_type;
 
     // push local scope
@@ -5700,6 +5758,9 @@ static int aml_call_value(AML_ExecCtx* ctx, AML_Func* f, AML_Var* args,
         } else if (args[i].type == AML_TYPE_STRING) {
             am_string_ref(args[i].string);
             symtab_set_string(locals, f->params[i], args[i].string);
+        } else if (args[i].type == AML_TYPE_LIST) {
+            am_list_ref(args[i].list);
+            symtab_set_list(locals, f->params[i], args[i].list);
         } else {
             symtab_set(locals, f->params[i], args[i].value);
         }
@@ -5710,6 +5771,7 @@ static int aml_call_value(AML_ExecCtx* ctx, AML_Func* f, AML_Var* args,
     ctx->return_value = 0;
     ctx->return_array = NULL;
     ctx->return_string = NULL;
+    ctx->return_list = NULL;
     ctx->return_type = AML_TYPE_FLOAT;
 
     // execute body
@@ -5719,6 +5781,7 @@ static int aml_call_value(AML_ExecCtx* ctx, AML_Func* f, AML_Var* args,
         out->value = ctx->return_value;
         out->array = ctx->return_array;
         out->string = ctx->return_string;
+        out->list = ctx->return_list;
     }
     // Return expressions already own their references, including local aliases.
     symtab_clear_arrays(locals);
@@ -5730,6 +5793,7 @@ static int aml_call_value(AML_ExecCtx* ctx, AML_Func* f, AML_Var* args,
     ctx->return_value = saved_return_value;
     ctx->return_array = saved_return_array;
     ctx->return_string = saved_return_string;
+    ctx->return_list = saved_return_list;
     ctx->return_type = saved_return_type;
     return ctx->error[0] != 0;
 }
@@ -5834,8 +5898,53 @@ static AM_Array* aml_try_array_expr(AML_ExecCtx* ctx, const char* rhs) {
     return aml_array_dispatch(ctx, fname, arg_strs, nargs);
 }
 
+// Evaluate an optional numeric array once. Scalar values (including the legacy
+// undefined-name zero) still mean "no array"; string/list values are errors.
+// A returned array reference is owned by the caller.
+static int aml_optional_array(AML_ExecCtx* ctx, const char* expression, AM_Array** out) {
+    AML_Var value = {0};
+    *out = NULL;
+    if (aml_eval_value(ctx, expression, &value)) {
+        aml_value_clear(&value); return 1;
+    }
+    if (value.type == AML_TYPE_STRING || value.type == AML_TYPE_LIST) {
+        aml_value_clear(&value);
+        set_error(ctx, "optional argument requires a numeric array"); return 1;
+    }
+    if (value.type == AML_TYPE_ARRAY) {
+        *out = value.array;
+#ifdef USE_CUDA
+        ensure_cpu(*out);
+#endif
+        value.array = NULL;
+    }
+    aml_value_clear(&value);
+    return 0;
+}
+
 // Dispatch pre-parsed array function call (called from both interpreter and bytecode)
 static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char arg_strs[][AML_MAX_LINE_LEN], int nargs) {
+    // Numeric array intrinsics cannot consume string containers, including in
+    // optional gamma/beta/bias positions that otherwise permit absent arrays.
+    // Leave scalar/text/list/user calls to their own evaluator without effects.
+    static const char* array_names[] = {
+        "zeros", "randn", "add", "mul", "scale", "matrix", "matrix_zeros",
+        "matvec", "matmul", "softmax", "rmsnorm", "silu", "gelu", "dropout",
+        "layernorm", "seq_layernorm", "spa_embed", "spa_connectedness", "relu",
+        "cross_entropy", "embedding_lookup", "row", "seq_embed", "seq_matvec",
+        "seq_rmsnorm", "causal_attention", "multi_head_attention", "seq_cross_entropy"
+    };
+    for (size_t fi = 0; fi < sizeof(array_names) / sizeof(array_names[0]); fi++) {
+        if (strcasecmp(fname, array_names[fi])) continue;
+        for (int i = 0; i < nargs; i++) {
+            AML_Var* v = resolve_var_full(ctx, arg_strs[i]);
+            if (v && v->type == AML_TYPE_LIST) {
+                set_error(ctx, "numeric array operation cannot consume a list");
+                return NULL;
+            }
+        }
+        break;
+    }
     // zeros(n) — create zero-initialized array
     if (strcasecmp(fname, "zeros") == 0 && nargs >= 1) {
         int n = (int)aml_eval(ctx, arg_strs[0]);
@@ -6191,44 +6300,53 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
     if (strcasecmp(fname, "layernorm") == 0 && nargs >= 1) {
         AML_Var* vx = resolve_var_full(ctx, arg_strs[0]);
         if (!vx || vx->type != AML_TYPE_ARRAY || !vx->array) return NULL;
-        int n = vx->array->len;
+        AM_Array* input = vx->array;
+        am_array_ref(input);
+#ifdef USE_CUDA
+        ensure_cpu(input);
+#endif
+        AM_Array *gamma = NULL, *beta = NULL;
+        if ((nargs >= 2 && aml_optional_array(ctx, arg_strs[1], &gamma)) ||
+            (nargs >= 3 && aml_optional_array(ctx, arg_strs[2], &beta))) {
+            am_array_free(input); am_array_free(gamma); am_array_free(beta);
+            return NULL;
+        }
+        int n = input->len;
         AM_Array* out = am_array_new(n);
-        if (!out) return NULL;
+        if (!out) {
+            am_array_free(input); am_array_free(gamma); am_array_free(beta);
+            set_error(ctx, "array allocation failed"); return NULL;
+        }
 
         float mean = 0;
-        for (int i = 0; i < n; i++) mean += vx->array->data[i];
+        for (int i = 0; i < n; i++) mean += input->data[i];
         mean /= n;
         float var = 0;
         for (int i = 0; i < n; i++) {
-            float d = vx->array->data[i] - mean;
+            float d = input->data[i] - mean;
             var += d * d;
         }
         var /= n;
         float inv_std = 1.0f / sqrtf(var + 1e-5f);
 
         for (int i = 0; i < n; i++)
-            out->data[i] = (vx->array->data[i] - mean) * inv_std;
+            out->data[i] = (input->data[i] - mean) * inv_std;
 
         int gamma_idx = -1, beta_idx = -1;
-        if (nargs >= 2) {
-            AML_Var* vg = resolve_var_full(ctx, arg_strs[1]);
-            if (vg && vg->type == AML_TYPE_ARRAY && vg->array) {
-                int gn = vg->array->len < n ? vg->array->len : n;
-                for (int i = 0; i < gn; i++) out->data[i] *= vg->array->data[i];
-                gamma_idx = tape_ensure_entry(vg->array);
-            }
+        if (gamma) {
+            int gn = gamma->len < n ? gamma->len : n;
+            for (int i = 0; i < gn; i++) out->data[i] *= gamma->data[i];
+            gamma_idx = tape_ensure_entry(gamma);
         }
-        if (nargs >= 3) {
-            AML_Var* vb = resolve_var_full(ctx, arg_strs[2]);
-            if (vb && vb->type == AML_TYPE_ARRAY && vb->array) {
-                int bn = vb->array->len < n ? vb->array->len : n;
-                for (int i = 0; i < bn; i++) out->data[i] += vb->array->data[i];
-                beta_idx = tape_ensure_entry(vb->array);
-            }
+        if (beta) {
+            int bn = beta->len < n ? beta->len : n;
+            for (int i = 0; i < bn; i++) out->data[i] += beta->data[i];
+            beta_idx = tape_ensure_entry(beta);
         }
         if (am_tape_is_active())
             am_tape_record3(out, AM_OP_LAYERNORM,
-                            tape_ensure_entry(vx->array), gamma_idx, beta_idx, 0, 0);
+                            tape_ensure_entry(input), gamma_idx, beta_idx, 0, 0);
+        am_array_free(input); am_array_free(gamma); am_array_free(beta);
         return out;
     }
 
@@ -6240,12 +6358,26 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
         if (ctx->error[0]) return NULL;
         int D = (int)ctx_float(ctx, arg_strs[4]);
         if (ctx->error[0]) return NULL;
-        if (T <= 0 || D <= 0 || T * D > vx->array->len) return NULL;
+        if (T <= 0 || D <= 0 || (size_t)T * D > (size_t)vx->array->len) return NULL;
+        AM_Array* input = vx->array;
+        am_array_ref(input);
+#ifdef USE_CUDA
+        ensure_cpu(input);
+#endif
+        AM_Array *gamma = NULL, *beta = NULL;
+        if (aml_optional_array(ctx, arg_strs[1], &gamma) ||
+            aml_optional_array(ctx, arg_strs[2], &beta)) {
+            am_array_free(input); am_array_free(gamma); am_array_free(beta);
+            return NULL;
+        }
         AM_Array* out = am_array_new(T * D);
-        if (!out) return NULL;
+        if (!out) {
+            am_array_free(input); am_array_free(gamma); am_array_free(beta);
+            set_error(ctx, "array allocation failed"); return NULL;
+        }
 
         for (int t = 0; t < T; t++) {
-            float* x_t = vx->array->data + t * D;
+            float* x_t = input->data + t * D;
             float* o_t = out->data + t * D;
             float mean = 0;
             for (int d = 0; d < D; d++) mean += x_t[d];
@@ -6258,24 +6390,23 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
         }
 
         int gamma_idx = -1, beta_idx = -1;
-        AML_Var* vg = resolve_var_full(ctx, arg_strs[1]);
-        if (vg && vg->type == AML_TYPE_ARRAY && vg->array && vg->array->len >= D) {
+        if (gamma && gamma->len >= D) {
             for (int t = 0; t < T; t++)
                 for (int d = 0; d < D; d++)
-                    out->data[t * D + d] *= vg->array->data[d];
-            gamma_idx = tape_ensure_entry(vg->array);
+                    out->data[t * D + d] *= gamma->data[d];
+            gamma_idx = tape_ensure_entry(gamma);
         }
-        AML_Var* vb = resolve_var_full(ctx, arg_strs[2]);
-        if (vb && vb->type == AML_TYPE_ARRAY && vb->array && vb->array->len >= D) {
+        if (beta && beta->len >= D) {
             for (int t = 0; t < T; t++)
                 for (int d = 0; d < D; d++)
-                    out->data[t * D + d] += vb->array->data[d];
-            beta_idx = tape_ensure_entry(vb->array);
+                    out->data[t * D + d] += beta->data[d];
+            beta_idx = tape_ensure_entry(beta);
         }
         if (am_tape_is_active())
             am_tape_record3(out, AM_OP_SEQ_LAYERNORM,
-                            tape_ensure_entry(vx->array), gamma_idx, beta_idx,
+                            tape_ensure_entry(input), gamma_idx, beta_idx,
                             (float)T, (float)D);
+        am_array_free(input); am_array_free(gamma); am_array_free(beta);
         return out;
     }
 
@@ -6326,21 +6457,28 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
         int D = (int)ctx_float(ctx, arg_strs[2]);
         if (ctx->error[0]) return NULL;
         if (!vE || vE->type != AML_TYPE_ARRAY || !vE->array) return NULL;
-        if (S <= 0 || D <= 0 || S * D > vE->array->len) return NULL;
+        if (S <= 0 || D <= 0 || (size_t)S * D > (size_t)vE->array->len) return NULL;
+        AM_Array* input = vE->array;
+        am_array_ref(input);
+#ifdef USE_CUDA
+        ensure_cpu(input);
+#endif
         AM_Array* bias_arr = NULL;
-        if (nargs >= 4) {
-            AML_Var* vb = resolve_var_full(ctx, arg_strs[3]);
-            if (vb && vb->type == AML_TYPE_ARRAY && vb->array) bias_arr = vb->array;
+        if (nargs >= 4 && aml_optional_array(ctx, arg_strs[3], &bias_arr)) {
+            am_array_free(input); return NULL;
         }
         AM_Array* out = am_array_new(S);
-        if (!out) return NULL;
+        if (!out) {
+            am_array_free(input); am_array_free(bias_arr);
+            set_error(ctx, "array allocation failed"); return NULL;
+        }
         float inv_sd = 1.0f / sqrtf((float)D);
         for (int i = 0; i < S; i++) {
-            const float* ei = vE->array->data + (size_t)i * D;
+            const float* ei = input->data + (size_t)i * D;
             float total_attn = 0;
             for (int j = 0; j < S; j++) {
                 if (i == j) continue;
-                const float* ej = vE->array->data + (size_t)j * D;
+                const float* ej = input->data + (size_t)j * D;
                 float dot = 0;
                 for (int d = 0; d < D; d++) dot += ei[d] * ej[d];
                 dot *= inv_sd;
@@ -6350,6 +6488,7 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
             }
             out->data[i] = total_attn;
         }
+        am_array_free(input); am_array_free(bias_arr);
         return out;
     }
 
@@ -6804,6 +6943,21 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
     return NULL;
 }
 
+// Emit a precise JSON string without allocating an intermediate escape buffer.
+static void aml_print_json_string(const AM_String* value) {
+    putchar('"');
+    for (int i = 0; i < value->byte_len; i++) {
+        unsigned char c = (unsigned char)value->data[i];
+        if (c == '"' || c == '\\') { putchar('\\'); putchar(c); }
+        else if (c == '\n') fputs("\\n", stdout);
+        else if (c == '\r') fputs("\\r", stdout);
+        else if (c == '\t') fputs("\\t", stdout);
+        else if (c < 0x20) printf("\\u%04x", (unsigned int)c);
+        else putchar(c);
+    }
+    putchar('"');
+}
+
 // Execute a single line in Level 2 context
 static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
     char* text = ctx->lines[idx].text;
@@ -6832,6 +6986,7 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
         ctx->return_value = value.value;
         ctx->return_array = value.array;
         ctx->return_string = value.string;
+        ctx->return_list = value.list;
         return ctx->nlines;
     }
 
@@ -6842,6 +6997,13 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
         if (!aml_eval_value(ctx, text + 5, &value)) {
             if (value.type == AML_TYPE_STRING) {
                 fwrite(value.string->data, 1, (size_t)value.string->byte_len, stdout);
+            } else if (value.type == AML_TYPE_LIST) {
+                putchar('[');
+                for (int i = 0; i < value.list->len; i++) {
+                    if (i) fputs(", ", stdout);
+                    aml_print_json_string(value.list->items[i]);
+                }
+                putchar(']');
             } else if (value.type == AML_TYPE_ARRAY) {
                 putchar('[');
                 for (int i = 0; i < value.array->len; i++)
@@ -6872,7 +7034,8 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
         int else_end = body_end;
         if (body_end < ctx->nlines) {
             char* next = ctx->lines[body_end].text;
-            if (strcmp(next, "else:") == 0 || strncmp(next, "else:", 5) == 0) {
+            if (ctx->lines[body_end].indent == ctx->lines[idx].indent &&
+                (strcmp(next, "else:") == 0 || strncmp(next, "else:", 5) == 0)) {
                 has_else = 1;
                 else_end = aml_find_block_end(ctx->lines, ctx->nlines, body_end);
             }
@@ -7043,6 +7206,10 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
 
                         // Find the array variable and write to it
                         AML_Var* var = resolve_var_full(ctx, varname);
+                        if (var && var->type == AML_TYPE_LIST) {
+                            set_error(ctx, "array element write requires an array; use list_set for lists");
+                            return idx + 1;
+                        }
                         if (var && var->type == AML_TYPE_ARRAY && var->array) {
                             if (index >= 0 && index < var->array->len)
                                 var->array->data[index] = val;
@@ -7091,11 +7258,21 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
                     return idx + 1;
                 }
             }
+            if (value.type == AML_TYPE_LIST) {
+                AM_List* copy = am_list_clone(value.list);
+                am_list_free(value.list);
+                value.list = copy;
+                if (!copy) {
+                    set_error_at(ctx, ctx->lines[idx].lineno, "list allocation failed");
+                    return idx + 1;
+                }
+            }
             AML_Symtab* tab = ctx->call_depth > 0
                 ? &ctx->locals[ctx->call_depth - 1] : &ctx->globals;
             int rc;
             if (value.type == AML_TYPE_STRING) rc = symtab_set_string(tab, name, value.string);
             else if (value.type == AML_TYPE_ARRAY) rc = symtab_set_array(tab, name, value.array);
+            else if (value.type == AML_TYPE_LIST) rc = symtab_set_list(tab, name, value.list);
             else rc = symtab_set(tab, name, value.value);
             if (rc) {
                 aml_value_clear(&value);
@@ -7104,7 +7281,7 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
             return idx + 1;
         }
         if (n && n < AML_MAX_NAME && *p == '(' &&
-            (aml_value_function(ctx, name) || aml_text_function(name))) {
+            (aml_value_function(ctx, name) || aml_text_function(name) || aml_list_function(name))) {
             AML_Var value = {0};
             aml_eval_value(ctx, text, &value);
             aml_value_clear(&value);
@@ -7240,7 +7417,7 @@ int am_exec(const char* script) {
 
     // preprocess into lines
     AML_Line* lines = (AML_Line*)malloc(AML_MAX_LINES * sizeof(AML_Line));
-    if (!lines) return 2;
+    if (!lines) { set_error(NULL, "program allocation failed"); return 2; }
 
     int nlines = aml_preprocess(script, lines, AML_MAX_LINES);
     if (nlines <= 0) { free(lines); return nlines < 0 ? 1 : 0; }
@@ -7260,13 +7437,14 @@ int am_exec(const char* script) {
     if (ctx.error[0]) { free(lines); return 1; }
 
     // Restore only after the entire prepared program has passed validation.
-    persistent_restore(&ctx.globals);
+    if (persistent_restore(&ctx.globals)) { free(lines); return 1; }
 
     // second pass: execute top-level block
     aml_exec_block(&ctx, 0, nlines);
 
     // v4.0: save globals to persistent storage, then clean up
-    persistent_save(&ctx.globals);
+    if (persistent_save(&ctx.globals) && !ctx.error[0])
+        set_error(&ctx, "persistent globals allocation failed");
     symtab_clear_arrays(&ctx.globals);
     aml_clear_return(&ctx);
 
@@ -7309,10 +7487,10 @@ void* am_program_open(const char* script) {
     g_error[0] = 0;
 
     AM_Program* p = (AM_Program*)calloc(1, sizeof(AM_Program));
-    if (!p) return NULL;
+    if (!p) { set_error(NULL, "program allocation failed"); return NULL; }
 
     p->lines = (AML_Line*)malloc(AML_MAX_LINES * sizeof(AML_Line));
-    if (!p->lines) { free(p); return NULL; }
+    if (!p->lines) { set_error(NULL, "program allocation failed"); free(p); return NULL; }
 
     p->ctx.nlines = aml_preprocess(script, p->lines, AML_MAX_LINES);
     if (p->ctx.nlines <= 0) { free(p->lines); free(p); return NULL; }
@@ -7322,7 +7500,7 @@ void* am_program_open(const char* script) {
     aml_register_builtins(&p->ctx);
     aml_register_funcs(&p->ctx);
     if (p->ctx.error[0]) { free(p->lines); free(p); return NULL; }
-    persistent_restore(&p->ctx.globals);
+    if (persistent_restore(&p->ctx.globals)) { free(p->lines); free(p); return NULL; }
     return p;
 }
 
@@ -7349,7 +7527,8 @@ int am_program_close(void* handle) {
     if (!handle) return 0;
     AM_Program* p = (AM_Program*)handle;
 
-    persistent_save(&p->ctx.globals);
+    if (persistent_save(&p->ctx.globals) && !p->ctx.error[0])
+        set_error(&p->ctx, "persistent globals allocation failed");
     symtab_clear_arrays(&p->ctx.globals);
     aml_clear_return(&p->ctx);
 
@@ -7586,10 +7765,10 @@ void* am_compile(const char* script) {
     g_error[0] = 0;
 
     AM_Compiled* c = (AM_Compiled*)calloc(1, sizeof(AM_Compiled));
-    if (!c) return NULL;
+    if (!c) { set_error(NULL, "program allocation failed"); return NULL; }
 
     c->lines = (AML_Line*)malloc(AML_MAX_LINES * sizeof(AML_Line));
-    if (!c->lines) { free(c); return NULL; }
+    if (!c->lines) { set_error(NULL, "program allocation failed"); free(c); return NULL; }
 
     c->nlines = aml_preprocess(script, c->lines, AML_MAX_LINES);
     if (c->nlines <= 0) { free(c->lines); free(c); return NULL; }
@@ -7606,7 +7785,7 @@ void* am_compile(const char* script) {
 
     // Compile to bytecode
     c->ops = (AML_BytecodeOp*)malloc(c->nlines * sizeof(AML_BytecodeOp));
-    if (!c->ops) { free(c->lines); free(c); return NULL; }
+    if (!c->ops) { set_error(NULL, "bytecode allocation failed"); free(c->lines); free(c); return NULL; }
     c->nops = c->nlines;
     for (int i = 0; i < c->nlines; i++)
         bc_compile_line(&c->ops[i], c->lines[i].text, i);
@@ -7619,6 +7798,10 @@ void* am_compile(const char* script) {
 // Helper: resolve var to array (inlined, frequent operation)
 static inline AM_Array* bc_get_array(AML_ExecCtx* ctx, const char* name) {
     AML_Var* v = resolve_var_full(ctx, name);
+    if (v && v->type == AML_TYPE_LIST) {
+        set_error(ctx, "TAPE requires a numeric array");
+        return NULL;
+    }
     return (v && v->type == AML_TYPE_ARRAY) ? v->array : NULL;
 }
 
@@ -7660,7 +7843,7 @@ int am_exec_compiled(void* handle) {
     ctx.lines = c->lines;
     ctx.nlines = c->nlines;
     memcpy(&ctx.funcs, &c->funcs, sizeof(AML_Functab));
-    persistent_restore(&ctx.globals);
+    if (persistent_restore(&ctx.globals)) return 1;
     for (int i = 0; i < c->nops && !ctx.has_return && !ctx.error[0]; i++) {
         AML_BytecodeOp* op = &c->ops[i];
         AML_SourceScope saved;
@@ -7846,7 +8029,8 @@ int am_exec_compiled(void* handle) {
         if (ctx.error[0]) break;
     }
 
-    persistent_save(&ctx.globals);
+    if (persistent_save(&ctx.globals) && !ctx.error[0])
+        set_error(&ctx, "persistent globals allocation failed");
     symtab_clear_arrays(&ctx.globals);
     aml_clear_return(&ctx);
 
@@ -9846,4 +10030,96 @@ AM_String* am_string_from_codepoint(int cp) {
     AM_String* text = am_string_alloc(width, 1);
     if (text) memcpy(text->data, bytes, (size_t)width);
     return text;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MUTABLE STRING LISTS — copied containers, retained immutable UTF-8 items
+// ═══════════════════════════════════════════════════════════════════════════════
+
+AM_List* am_list_new(void) {
+    AM_List* list = (AM_List*)malloc(sizeof(*list));
+    if (!list) return NULL;
+    memset(list, 0, sizeof(*list));
+    list->refcount = 1;
+    return list;
+}
+
+void am_list_ref(AM_List* list) {
+    if (list) __atomic_add_fetch(&list->refcount, 1, __ATOMIC_RELAXED);
+}
+
+void am_list_free(AM_List* list) {
+    if (!list || __atomic_sub_fetch(&list->refcount, 1, __ATOMIC_ACQ_REL) > 0) return;
+    for (int i = 0; i < list->len; i++) am_string_free(list->items[i]);
+    free(list->items);
+    free(list);
+}
+
+static int am_list_index(const AM_List* list, int index) {
+    if (!list) return -1;
+    if (index < 0) index += list->len;
+    return index >= 0 && index < list->len ? index : -1;
+}
+
+int am_list_push(AM_List* list, AM_String* item) {
+    if (!list || !item || list->len >= AM_MAX_LIST_ITEMS) return -1;
+    if (list->len == list->capacity) {
+        int capacity = list->capacity ? list->capacity * 2 : 8;
+        if (capacity > AM_MAX_LIST_ITEMS) capacity = AM_MAX_LIST_ITEMS;
+        AM_String** items = (AM_String**)malloc((size_t)capacity * sizeof(*items));
+        if (!items) return -1;
+        if (list->len) memcpy(items, list->items, (size_t)list->len * sizeof(*items));
+        free(list->items);
+        list->items = items;
+        list->capacity = capacity;
+    }
+    am_string_ref(item);
+    list->items[list->len++] = item;
+    return list->len;
+}
+
+AM_String* am_list_get(const AM_List* list, int index) {
+    index = am_list_index(list, index);
+    if (index < 0) return NULL;
+    AM_String* item = list->items[index];
+    am_string_ref(item);
+    return item;
+}
+
+int am_list_set(AM_List* list, int index, AM_String* item) {
+    index = am_list_index(list, index);
+    if (index < 0 || !item) return -1;
+    // Retain before releasing: replacing an item by itself is valid.
+    am_string_ref(item);
+    am_string_free(list->items[index]);
+    list->items[index] = item;
+    return 0;
+}
+
+int am_list_find(const AM_List* list, const AM_String* item) {
+    if (!list || !item) return -1;
+    for (int i = 0; i < list->len; i++)
+        if (strcmp(list->items[i]->data, item->data) == 0) return i;
+    return -1;
+}
+
+AM_List* am_list_slice(const AM_List* list, int start, int end) {
+    if (!list) return NULL;
+    start = am_string_clamp_index(start, list->len);
+    end = am_string_clamp_index(end, list->len);
+    AM_List* out = am_list_new();
+    if (!out || end <= start) return out;
+    int count = end - start;
+    out->items = (AM_String**)malloc((size_t)count * sizeof(*out->items));
+    if (!out->items) { am_list_free(out); return NULL; }
+    out->capacity = count;
+    for (int i = start; i < end; i++) {
+        am_string_ref(list->items[i]);
+        out->items[out->len++] = list->items[i];
+    }
+    return out;
+}
+
+AM_List* am_list_clone(const AM_List* list) {
+    return list ? am_list_slice(list, 0, list->len) : NULL;
 }

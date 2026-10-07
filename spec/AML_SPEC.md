@@ -1,6 +1,6 @@
 # AML — Arianna Method Language
 
-**Version:** 5.2.0 (Modules and text)
+**Version:** 5.3.0 (String collections)
 **Extension:** `.aml`
 **Status:** Living specification
 
@@ -69,7 +69,7 @@ args           = value { "," value } ;
 
 ---
 
-### 1.4 Shared modules and UTF-8 values
+### 1.4 Shared modules and typed values
 
 `IMPORT "path"` expands a canonical source once into the current program's
 function/global scope before execution. It preserves the originating directory
@@ -81,9 +81,10 @@ limits, and compiled-program file requirements.
 
 Strings are immutable validated UTF-8, with at most 1 MiB of content and no
 embedded NUL. Variables, arguments, and returns carry their actual scalar,
-array, or string type. User functions require exactly their declared arity.
+array, string, or string-list type. User functions require exactly their declared arity.
 `PRINT value` writes UTF-8 strings, numeric scalars, or bracketed numeric arrays,
-then a newline. `ECHO` keeps its literal command semantics.
+then a newline. String lists print as JSON arrays of UTF-8 strings with escaped
+quotes, backslashes, and control bytes. `ECHO` keeps its literal command semantics.
 
 The eight expression intrinsics are `text_len`, `text_bytes`, `text_equal`,
 `text_find`, `text_slice`, `text_concat`, `text_codepoint`, and
@@ -92,6 +93,30 @@ clusters; slicing has an exclusive end and clamps negative indices.
 [TEXT.md](../docs/TEXT.md) defines their signatures, errors, escapes, ownership,
 and C API. Numeric operators require scalar values; use the text intrinsics
 for string operations.
+
+String lists are ordered mutable containers of immutable text, with a maximum
+of 65,536 items. Their eight intrinsics are `list_new`, `list_len`, `list_get`,
+`list_push`, `list_set`, `list_find`, `list_slice`, and `list_clone`. Indexes must
+be finite integers; negative indexes count from the end. Get/set reject an
+out-of-range index; slices clamp exclusive endpoints. Lookup uses exact UTF-8
+content and returns the first index or `-1`. Push returns the new length; set
+returns the stored string. Wrong types, invalid indexes, capacity exhaustion,
+and allocation failure stop the current operation. Failed push/set leave the
+container unchanged.
+
+Every list assignment clones the container; function parameters retain a
+shared reference so a callee can mutate its caller's list. Clones and slices
+retain their immutable string elements. Worker and persistent-global snapshots
+clone containers too. [LISTS.md](../docs/LISTS.md) defines the full AML/C ownership
+contract. Lists require `list_*` operations; scalar and numeric-array operators
+reject them.
+
+The numeric array queries `len`, `sum`, `rows`, and `cols` take exactly one typed
+argument; `dot` takes exactly two. Parenthesized and returned values retain
+their type. Optional gamma/beta/bias array arguments are evaluated once and
+reject text/list values before the numeric operation updates output or tape.
+Existing scalar and undefined-name placeholders retain their absent-array
+behavior.
 
 A loop may execute 10,000 iterations; if its condition remains true, it fails
 explicitly. This bound applies to text-processing loops as to other AML loops.
@@ -1140,7 +1165,7 @@ TAPE CLEAR
 
 ## 20. Async — SPAWN / AWAIT / CHANNEL
 
-Parallel execution via pthreads (verified core:4517-4591, 5889-5922; header:822-848). Each `SPAWN` block runs in its own thread with a launch-time snapshot of global variables and shared global field state. Arrays are copied; immutable strings retain atomic references. Persistent host variables belong to the calling thread; worker changes remain in that worker and its store is released at exit. Threads communicate through thread-safe bounded float queues (CHANNEL). Disableable at compile time with `#define AM_ASYNC_DISABLED`.
+Parallel execution via pthreads. Each `SPAWN` block runs in its own thread with a launch-time snapshot of global variables and shared global field state. Arrays and string-list containers are copied; immutable strings retain atomic references. Persistent host variables belong to the calling thread; worker changes remain in that worker and its store is released at exit. Threads communicate through thread-safe bounded float queues (CHANNEL). Disableable at compile time with `#define AM_ASYNC_DISABLED`.
 
 ```aml
 SPAWN <name>:

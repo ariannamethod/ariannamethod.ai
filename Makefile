@@ -21,7 +21,7 @@ ifdef BLAS
   endif
 endif
 
-.PHONY: all test test-amlc test-imports test-text test-janus janus clean test-all test-blas amlc runner install
+.PHONY: all test test-amlc test-imports test-text test-lists test-janus janus clean test-all test-blas amlc runner install
 
 # ═══ Core AML ═══
 all: libaml.a runner amlc
@@ -94,6 +94,9 @@ test-imports: all
 
 test-text: all
 	bash tests/test_aml_text_runtime.sh
+
+test-lists: all
+	bash tests/test_aml_lists.sh
 
 core/test_aml: core/test_aml.c core/ariannamethod.c core/ariannamethod.h
 	$(CC) $(CFLAGS) core/test_aml.c core/ariannamethod.c -o $@ $(LDFLAGS)

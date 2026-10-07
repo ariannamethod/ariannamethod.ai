@@ -12,6 +12,63 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-10-07 — string collections carry Haiku's word overlap (v5.3.0)
+
+`AM_List` adds ordered mutable containers of immutable UTF-8 strings. Eight
+`list_*` intrinsics expose construction, length, checked get/set, append,
+exact lookup, slicing, and cloning. Assignment copies each container; function
+parameters retain it so an AML organ can append words. Returns, discarded
+values, mixed parameters, and scope teardown carry explicit ownership.
+`PRINT` writes JSON string arrays. The cap is 65,536 items; numeric operations
+reject lists, and indices must be finite integer scalars.
+
+Worker launch and persistent storage clone the container while retaining its
+immutable text. Reference counts are atomic; mutation stays with the owning
+execution context. Persistent saving now prepares the whole replacement before
+publishing it, so allocation failure preserves the previous table. Host list
+setters have the same replacement guarantee. Failed program statements still
+leave earlier completed effects in their execution context.
+
+The lexical Haiku fixtures exposed a pre-existing nested-branch defect: a
+false inner `if` could consume an outer `else`. Else pairing now requires equal
+indentation. The minimal `if 1` / nested `if 0` program previously printed
+`WRONG_OUTER`; after the repair it reaches only `GOOD`. The common evaluator
+carries the repair through interpreted, resumable, bytecode, runner, and
+compiled execution.
+
+Review also reproduced numeric type bypasses: `len(list_new())` returned zero,
+and `layernorm(x, (words), 0)` silently ignored the list. Scalar array queries
+now use typed arguments; optional gamma/beta/bias values are evaluated once,
+retained for the operation, and checked before output/tape updates. Existing
+scalar and undefined-name placeholders still mean an absent optional array.
+Allocation failures during preparation now provide an error diagnostic too.
+
+Haiku's new `lexicon.aml` feeds actual word/trigram sets into Harmonix. Its
+**324 numerical and 92 ordered-list reference results** match direct calls to
+the pinned Python source. Together with the earlier organs, **828 reference
+results** pass interpreted and compiled scalar execution. Six malformed triple
+lists fail explicitly in both paths. The language work adds no dependency.
+
+Proof on Linux x86_64:
+
+- `make test`: **550/550**; all three compiler suites and **1017** import checks
+  pass. Existing text gates pass **483 API / 515 allocation-fault / 1122 runtime**
+  checks and their 41 invalid programs across five execution paths.
+- `make test-lists`: **173 API / 978 allocation-fault / 2817 runtime** checks;
+  exact JSON/control-flow output and **66 invalid programs** across all five paths.
+- The allocation sweep rejects **19 / 20 / 21** consecutive budgets for
+  interpreter / resumable / bytecode execution before complete saving succeeds.
+  Every failed replacement retains the previous store; tracked live allocations
+  return to zero after cleanup.
+- ASan/UBSan pass both full list API/runtime suites, including **12 workers /
+  120,000 copy cycles**. LeakSanitizer is disabled under ptrace; the separate
+  allocation wrapper checks ownership accounting.
+- CUDA mirror synchronization is included for the new retained optional-array
+  paths; CUDA execution was not tested here.
+
+See [LISTS](docs/LISTS.md) for the AML/C contract and `make test-lists` for the
+ownership, allocation-fault, worker, and five-path execution gates.
+
 ## 2026-10-07 — bound the module test's source builder
 
 CodeQL review of PR #27 flagged three fixture-building loops that accumulated
