@@ -20,6 +20,9 @@
 // POSIX for strtok_r (not needed for Emscripten/WASM)
 #ifndef __EMSCRIPTEN__
 #define _POSIX_C_SOURCE 200809L
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 700
+#endif
 #endif
 
 #include "ariannamethod.h"
@@ -32,6 +35,7 @@
 #include <stddef.h>  // for offsetof
 #include <stdint.h>  // for uint32_t (Chuck RNG)
 #include <time.h>    // for real calendar computation
+#include <sys/stat.h> // regular AML source files, including with AM_IO_DISABLED
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -94,6 +98,7 @@ static int g_am_initialized = 0;   // A-4: field auto-inits on first am_exec; ke
 static _Thread_local char g_base_dir[256] = ".";  // directory of this thread's source; seeds
                                    // ctx.base_dir so relative INCLUDEs resolve against the
                                    // including file, not the filesystem root.
+static _Thread_local char g_source_path[AML_MAX_SOURCE_PATH] = "";
 
 // Blood compiler globals (used by Level 0 dispatch + Blood API)
 static AM_BloodModule g_blood_modules[AM_BLOOD_MAX_MODULES];
@@ -539,8 +544,8 @@ static void am_channel_reset(void);
 #endif
 
 // Forward declarations for persistent globals (defined after am_init)
-static int g_persistent_enabled;
-static AML_Symtab g_persistent_globals;
+static _Thread_local int g_persistent_enabled;
+static _Thread_local AML_Symtab g_persistent_globals;
 void am_persistent_clear(void);
 
 void am_init(void) {
@@ -724,6 +729,9 @@ static float*   symtab_get(AML_Symtab* tab, const char* name);
 static AML_Var* symtab_get_var(AML_Symtab* tab, const char* name);
 static int      symtab_set(AML_Symtab* tab, const char* name, float value);
 static int      symtab_set_array(AML_Symtab* tab, const char* name, AM_Array* arr);
+static int      symtab_set_string(AML_Symtab* tab, const char* name, AM_String* str);
+static void     symtab_clear_arrays(AML_Symtab* tab);
+static int      symtab_snapshot(AML_Symtab* dst, const AML_Symtab* src);
 
 void am_persistent_mode(int enable) {
     if (!enable && g_persistent_enabled) {
@@ -734,13 +742,7 @@ void am_persistent_mode(int enable) {
 }
 
 void am_persistent_clear(void) {
-    for (int i = 0; i < g_persistent_globals.count; i++) {
-        if (g_persistent_globals.vars[i].type == AML_TYPE_ARRAY &&
-            g_persistent_globals.vars[i].array) {
-            am_array_free(g_persistent_globals.vars[i].array);
-            g_persistent_globals.vars[i].array = NULL;
-        }
-    }
+    symtab_clear_arrays(&g_persistent_globals);
     g_persistent_globals.count = 0;
 }
 
@@ -759,6 +761,9 @@ static void persistent_restore(AML_Symtab* dst) {
                 clone->cols = pv->array->cols;
                 symtab_set_array(dst, pv->name, clone);
             }
+        } else if (pv->type == AML_TYPE_STRING && pv->string) {
+            am_string_ref(pv->string);
+            if (symtab_set_string(dst, pv->name, pv->string)) am_string_free(pv->string);
         } else {
             symtab_set(dst, pv->name, pv->value);
         }
@@ -797,15 +802,23 @@ static void persistent_save(AML_Symtab* src) {
                 if (pv->type == AML_TYPE_ARRAY && pv->array) {
                     am_array_free(pv->array);
                 }
+                if (pv->type == AML_TYPE_STRING) am_string_free(pv->string);
+                pv->string = NULL;
                 pv->type = AML_TYPE_ARRAY;
                 pv->array = clone;
                 pv->value = 0;
             }
+        } else if (sv->type == AML_TYPE_STRING && sv->string) {
+            am_string_ref(sv->string);
+            if (symtab_set_string(&g_persistent_globals, sv->name, sv->string))
+                am_string_free(sv->string);
         } else {
             if (pv->type == AML_TYPE_ARRAY && pv->array) {
                 am_array_free(pv->array);
                 pv->array = NULL;
             }
+            if (pv->type == AML_TYPE_STRING) am_string_free(pv->string);
+            pv->string = NULL;
             pv->type = AML_TYPE_FLOAT;
             pv->value = sv->value;
         }
@@ -832,6 +845,10 @@ static void persistent_save(AML_Symtab* src) {
                 clone->cols = sv->array->cols;
                 symtab_set_array(&g_persistent_globals, sv->name, clone);
             }
+        } else if (sv->type == AML_TYPE_STRING && sv->string) {
+            am_string_ref(sv->string);
+            if (symtab_set_string(&g_persistent_globals, sv->name, sv->string))
+                am_string_free(sv->string);
         } else {
             symtab_set(&g_persistent_globals, sv->name, sv->value);
         }
@@ -878,6 +895,27 @@ float am_get_var_float(const char* name) {
     if (v->type == AML_TYPE_ARRAY && v->array && v->array->len >= 1)
         return v->array->data[0];
     return 0.0f;
+}
+
+int am_set_var_text(const char* name, const char* utf8) {
+    if (!name || !*name || strlen(name) >= AML_MAX_NAME) return 1;
+    if (!(isalpha((unsigned char)*name) || *name == '_')) return 1;
+    for (const char* p = name + 1; *p; p++)
+        if (!(isalnum((unsigned char)*p) || *p == '_')) return 1;
+    AM_String* str = am_string_new(utf8);
+    if (!str) return 1;
+    if (symtab_set_string(&g_persistent_globals, name, str)) {
+        am_string_free(str);
+        return 1;
+    }
+    g_persistent_enabled = 1;
+    return 0;
+}
+
+const char* am_get_var_text(const char* name) {
+    if (!name) return NULL;
+    AML_Var* v = symtab_get_var(&g_persistent_globals, name);
+    return v && v->type == AML_TYPE_STRING && v->string ? v->string->data : NULL;
 }
 
 // enable/disable packs
@@ -1100,7 +1138,22 @@ const char* am_get_error(void) { return g_error; }
 // lineno <= 0 means no line number (Level 0 or internal error)
 static void set_error_at(AML_ExecCtx* ctx, int lineno, const char* msg) {
     char buf[256];
-    if (lineno > 0) {
+    // INCLUDE/AWAIT propagate the original source diagnostic. Repeated prefixes
+    // would fill the fixed buffer and erase the error at the end of the chain.
+    int located = 0;
+    if (msg[0] == '/') {
+        const char* colon = msg;
+        while ((colon = strchr(colon, ':')) != NULL) {
+            const char* number = ++colon;
+            while (isdigit((unsigned char)*colon)) colon++;
+            if (colon > number && colon[0] == ':' && colon[1] == ' ') { located = 1; break; }
+        }
+    }
+    if (located) {
+        snprintf(buf, sizeof(buf), "%s", msg);
+    } else if (lineno > 0 && g_source_path[0]) {
+        snprintf(buf, sizeof(buf), "%.112s:%d: %.120s", g_source_path, lineno, msg);
+    } else if (lineno > 0) {
         snprintf(buf, sizeof(buf), "line %d: %s", lineno, msg);
     } else {
         snprintf(buf, sizeof(buf), "%s", msg);
@@ -2820,6 +2873,8 @@ typedef struct {
     char* script;       // heap-allocated AML script text
     int   slot_idx;     // index into g_spawns
     char  base_dir[256]; // source origin travels with the worker
+    char  source_path[AML_MAX_SOURCE_PATH];
+    AML_Symtab globals; // launch-time snapshot; worker takes ownership
 } AM_SpawnArg;
 
 // Thread entry point: runs an AML script in its own context
@@ -2828,7 +2883,12 @@ static void* am_spawn_thread_fn(void* arg) {
 
     // Execute the script with the caller's source origin in this thread.
     snprintf(g_base_dir, sizeof(g_base_dir), "%s", sa->base_dir);
+    snprintf(g_source_path, sizeof(g_source_path), "%s", sa->source_path);
+    g_persistent_globals = sa->globals;
+    memset(&sa->globals, 0, sizeof(sa->globals));
+    g_persistent_enabled = 1;
     int rc = am_exec(sa->script);
+    am_persistent_mode(0);
 
     // Mark slot as done
     pthread_mutex_lock(&g_spawn_mutex);
@@ -2846,35 +2906,52 @@ static void* am_spawn_thread_fn(void* arg) {
 }
 
 // Launch a spawn: create thread running the given AML script
-int am_spawn_launch(const char* name, const char* script) {
-    if (g_spawn_count >= AM_MAX_SPAWNS) return -1;
+static int am_spawn_launch_globals(const char* name, const char* script,
+                                   const AML_Symtab* globals) {
+    if (!name || !script) return -1;
+    if (!g_am_initialized) am_init();
+    AM_SpawnArg* arg = (AM_SpawnArg*)calloc(1, sizeof(AM_SpawnArg));
+    if (!arg) return -1;
+    arg->script = strdup(script);
+    if (!arg->script) { free(arg); return -1; }
+    if (globals && symtab_snapshot(&arg->globals, globals)) {
+        free(arg->script); free(arg); return -1;
+    }
+    snprintf(arg->base_dir, sizeof(arg->base_dir), "%s", g_base_dir);
+    snprintf(arg->source_path, sizeof(arg->source_path), "%s", g_source_path);
 
+    pthread_mutex_lock(&g_spawn_mutex);
+    if (g_spawn_count >= AM_MAX_SPAWNS) {
+        pthread_mutex_unlock(&g_spawn_mutex);
+        symtab_clear_arrays(&arg->globals);
+        free(arg->script); free(arg); return -1;
+    }
     int idx = g_spawn_count;
+    arg->slot_idx = idx;
     snprintf(g_spawns[idx].name, AM_SPAWN_NAME_LEN, "%s", name);
     g_spawns[idx].active = 1;
     g_spawns[idx].joined = 0;
     g_spawns[idx].result = 0;
     g_spawn_errors[idx][0] = 0;
-
-    AM_SpawnArg* arg = (AM_SpawnArg*)malloc(sizeof(AM_SpawnArg));
-    if (!arg) return -1;
-    arg->script = strdup(script);
-    if (!arg->script) { free(arg); return -1; }
-    arg->slot_idx = idx;
-    snprintf(arg->base_dir, sizeof(arg->base_dir), "%s", g_base_dir);
-
     int err = pthread_create(&g_spawn_threads[idx], NULL, am_spawn_thread_fn, arg);
     if (err != 0) {
+        symtab_clear_arrays(&arg->globals);
         free(arg->script);
         free(arg);
         g_spawns[idx].active = 0;
+        pthread_mutex_unlock(&g_spawn_mutex);
         return -1;
     }
 
     g_spawn_count++;
+    pthread_mutex_unlock(&g_spawn_mutex);
     return idx;
 }
 
+int am_spawn_launch(const char* name, const char* script) {
+    return am_spawn_launch_globals(name, script,
+                                   g_persistent_enabled ? &g_persistent_globals : NULL);
+}
 // Join transfers the completed worker's diagnostic to the awaiting thread.
 static int am_spawn_join(int i) {
     int err = pthread_join(g_spawn_threads[i], NULL);
@@ -3093,6 +3170,8 @@ static int symtab_set(AML_Symtab* tab, const char* name, float value) {
                 am_array_free(tab->vars[i].array);
                 tab->vars[i].array = NULL;
             }
+            if (tab->vars[i].type == AML_TYPE_STRING) am_string_free(tab->vars[i].string);
+            tab->vars[i].string = NULL;
             tab->vars[i].type = AML_TYPE_FLOAT;
             tab->vars[i].value = value;
             return 0;
@@ -3103,6 +3182,7 @@ static int symtab_set(AML_Symtab* tab, const char* name, float value) {
     tab->vars[tab->count].type = AML_TYPE_FLOAT;
     tab->vars[tab->count].value = value;
     tab->vars[tab->count].array = NULL;
+    tab->vars[tab->count].string = NULL;
     tab->count++;
     return 0;
 }
@@ -3115,6 +3195,8 @@ static int symtab_set_array(AML_Symtab* tab, const char* name, AM_Array* arr) {
             if (tab->vars[i].type == AML_TYPE_ARRAY && tab->vars[i].array) {
                 am_array_free(tab->vars[i].array);
             }
+            if (tab->vars[i].type == AML_TYPE_STRING) am_string_free(tab->vars[i].string);
+            tab->vars[i].string = NULL;
             tab->vars[i].type = AML_TYPE_ARRAY;
             tab->vars[i].value = 0;
             tab->vars[i].array = arr;
@@ -3126,18 +3208,62 @@ static int symtab_set_array(AML_Symtab* tab, const char* name, AM_Array* arr) {
     tab->vars[tab->count].type = AML_TYPE_ARRAY;
     tab->vars[tab->count].value = 0;
     tab->vars[tab->count].array = arr;
+    tab->vars[tab->count].string = NULL;
     tab->count++;
     return 0;
 }
 
-// Free all arrays in a symbol table (for scope cleanup)
+// Takes ownership of one reference, like symtab_set_array.
+static int symtab_set_string(AML_Symtab* tab, const char* name, AM_String* str) {
+    if (symtab_set(tab, name, 0)) return 1;
+    AML_Var* v = symtab_get_var(tab, name);
+    v->type = AML_TYPE_STRING;
+    v->string = str;
+    return 0;
+}
+
+// Free all owned arrays and strings in a symbol table.
 static void symtab_clear_arrays(AML_Symtab* tab) {
     for (int i = 0; i < tab->count; i++) {
         if (tab->vars[i].type == AML_TYPE_ARRAY && tab->vars[i].array) {
             am_array_free(tab->vars[i].array);
             tab->vars[i].array = NULL;
         }
+        if (tab->vars[i].type == AML_TYPE_STRING) {
+            am_string_free(tab->vars[i].string);
+            tab->vars[i].string = NULL;
+        }
     }
+}
+
+// Mutable arrays are copied; immutable strings retain an atomic reference.
+static int symtab_snapshot(AML_Symtab* dst, const AML_Symtab* src) {
+    memset(dst, 0, sizeof(*dst));
+    for (int i = 0; i < src->count; i++) {
+        const AML_Var* v = &src->vars[i];
+        int rc = 0;
+        if (v->type == AML_TYPE_ARRAY) {
+#ifdef USE_CUDA
+            ensure_cpu(v->array);
+#endif
+            AM_Array* array = am_array_clone(v->array);
+            if (!array) rc = 1;
+            else if (symtab_set_array(dst, v->name, array)) {
+                am_array_free(array); rc = 1;
+            }
+        } else if (v->type == AML_TYPE_STRING) {
+            am_string_ref(v->string);
+            if (symtab_set_string(dst, v->name, v->string)) {
+                am_string_free(v->string); rc = 1;
+            }
+        } else rc = symtab_set(dst, v->name, v->value);
+        if (rc) {
+            symtab_clear_arrays(dst);
+            dst->count = 0;
+            return 1;
+        }
+    }
+    return 0;
 }
 
 // Resolve full variable (AML_Var*): locals → globals
@@ -3151,6 +3277,12 @@ static AML_Var* resolve_var_full(AML_ExecCtx* ctx, const char* name) {
 
 // Resolve variable: locals → globals → field map
 static int resolve_var(AML_ExecCtx* ctx, const char* name, float* out) {
+    AML_Var* value = resolve_var_full(ctx, name);
+    if (value && value->type == AML_TYPE_STRING) {
+        set_error(ctx, "string used as a scalar expression");
+        *out = 0;
+        return 1;
+    }
     // local scope first
     if (ctx->call_depth > 0) {
         float* v = symtab_get(&ctx->locals[ctx->call_depth - 1], name);
@@ -3168,6 +3300,187 @@ static int resolve_var(AML_ExecCtx* ctx, const char* name, float* out) {
 // Precedence: or < and < comparison < add/sub < mul/div < unary < primary
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// Expression values own their array/string reference until consumed.
+static void aml_value_clear(AML_Var* v) {
+    if (v->type == AML_TYPE_ARRAY) am_array_free(v->array);
+    if (v->type == AML_TYPE_STRING) am_string_free(v->string);
+    memset(v, 0, sizeof(*v));
+}
+
+static void aml_clear_return(AML_ExecCtx* ctx) {
+    am_array_free(ctx->return_array);
+    am_string_free(ctx->return_string);
+    ctx->return_array = NULL;
+    ctx->return_string = NULL;
+    ctx->return_type = AML_TYPE_FLOAT;
+    ctx->return_value = 0;
+    ctx->has_return = 0;
+}
+
+static int aml_eval_value(AML_ExecCtx* ctx, const char* text, AML_Var* out);
+static int aml_call_value(AML_ExecCtx* ctx, AML_Func* f, AML_Var* args,
+                          int nargs, int lineno, AML_Var* out);
+static AM_Array* aml_try_array_expr(AML_ExecCtx* ctx, const char* rhs);
+
+static AML_Func* aml_value_function(AML_ExecCtx* ctx, const char* name) {
+    if (!ctx) return NULL;
+    for (int i = 0; i < ctx->funcs.count; i++)
+        if (strcmp(ctx->funcs.funcs[i].name, name) == 0) return &ctx->funcs.funcs[i];
+    return NULL;
+}
+
+static int aml_text_function(const char* name) {
+    static const char* names[] = {"text_len", "text_bytes", "text_equal", "text_find",
+        "text_slice", "text_concat", "text_codepoint", "text_from_codepoint"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+        if (strcasecmp(name, names[i]) == 0) return 1;
+    return 0;
+}
+
+// Decode quoted source into UTF-8. Escapes are explicit and never insert NUL.
+static AM_String* aml_string_literal(AML_ExecCtx* ctx, const char** cursor) {
+    const char* p = *cursor;
+    char quote = *p++;
+    char bytes[AML_MAX_LINE_LEN];
+    size_t n = 0;
+    while (*p && *p != quote) {
+        unsigned char c = (unsigned char)*p++;
+        if (c == '\\') {
+            c = (unsigned char)*p++;
+            if (c == 'n') c = '\n';
+            else if (c == 'r') c = '\r';
+            else if (c == 't') c = '\t';
+            else if (c != '\\' && c != '"' && c != '\'') {
+                set_error(ctx, "invalid string escape");
+                return NULL;
+            }
+        }
+        if (n + 1 >= sizeof(bytes)) { set_error(ctx, "string literal too long"); return NULL; }
+        bytes[n++] = (char)c;
+    }
+    if (*p != quote) { set_error(ctx, "unterminated string literal"); return NULL; }
+    bytes[n] = 0;
+    *cursor = p + 1;
+    AM_String* str = am_string_new(bytes);
+    if (!str) set_error(ctx, "invalid UTF-8 string or string allocation failed");
+    return str;
+}
+
+static int aml_text_integer(AML_ExecCtx* ctx, const AML_Var* v, int* out) {
+    if (v->type != AML_TYPE_FLOAT || !isfinite(v->value) ||
+        v->value < -2147483648.0f || v->value >= 2147483648.0f ||
+        truncf(v->value) != v->value) {
+        set_error(ctx, "text index/codepoint must be an integer");
+        return 1;
+    }
+    *out = (int)v->value;
+    return 0;
+}
+
+static int aml_text_dispatch(AML_ExecCtx* ctx, const char* name, AML_Var* args,
+                             int nargs, AML_Var* out) {
+    int need = 2;
+    if (!strcasecmp(name, "text_len") || !strcasecmp(name, "text_bytes") ||
+        !strcasecmp(name, "text_from_codepoint")) need = 1;
+    if (!strcasecmp(name, "text_slice")) need = 3;
+    if (nargs != need) { set_error(ctx, "wrong number of text arguments"); return 1; }
+    if (!strcasecmp(name, "text_from_codepoint")) {
+        int cp;
+        if (aml_text_integer(ctx, &args[0], &cp)) return 1;
+        out->string = am_string_from_codepoint(cp);
+        if (!out->string) { set_error(ctx, "invalid Unicode codepoint or string allocation failed"); return 1; }
+        out->type = AML_TYPE_STRING;
+        return 0;
+    }
+    if (args[0].type != AML_TYPE_STRING || !args[0].string) {
+        set_error(ctx, "text operation requires a string"); return 1;
+    }
+    AM_String* s = args[0].string;
+    if (!strcasecmp(name, "text_len")) { out->value = (float)s->len; return 0; }
+    if (!strcasecmp(name, "text_bytes")) { out->value = (float)s->byte_len; return 0; }
+    if (!strcasecmp(name, "text_slice")) {
+        int start, end;
+        if (aml_text_integer(ctx, &args[1], &start) || aml_text_integer(ctx, &args[2], &end))
+            return 1;
+        out->string = am_string_slice(s, start, end);
+    } else if (!strcasecmp(name, "text_codepoint")) {
+        int index;
+        if (aml_text_integer(ctx, &args[1], &index)) return 1;
+        int cp = am_string_codepoint(s, index);
+        if (cp < 0) { set_error(ctx, "text index out of range"); return 1; }
+        out->value = (float)cp;
+        return 0;
+    } else {
+        if (args[1].type != AML_TYPE_STRING || !args[1].string) {
+            set_error(ctx, "text operation requires a string"); return 1;
+        }
+        if (!strcasecmp(name, "text_equal")) {
+            out->value = strcmp(s->data, args[1].string->data) == 0;
+            return 0;
+        }
+        if (!strcasecmp(name, "text_find")) {
+            out->value = (float)am_string_find(s, args[1].string);
+            return 0;
+        }
+        out->string = am_string_concat(s, args[1].string);
+    }
+    if (!out->string) { set_error(ctx, "string limit exceeded or allocation failed"); return 1; }
+    out->type = AML_TYPE_STRING;
+    return 0;
+}
+
+// Parse mixed arguments without splitting commas/parentheses inside strings.
+// cursor starts at '(' and advances past the matching ')'.
+static int aml_invoke_value(AML_ExecCtx* ctx, const char* name,
+                            const char** cursor, AML_Var* out) {
+    AML_Var args[AML_MAX_PARAMS] = {0};
+    int nargs = 0, rc = 1;
+    const char* p = *cursor + 1;
+    while (isspace((unsigned char)*p)) p++;
+    while (*p && *p != ')') {
+        if (nargs == AML_MAX_PARAMS) { set_error(ctx, "too many function arguments"); goto done; }
+        const char* start = p;
+        int depth = 0;
+        char quote = 0;
+        while (*p) {
+            if (quote) {
+                if (*p == '\\' && p[1]) { p += 2; continue; }
+                if (*p == quote) quote = 0;
+            } else {
+                if (*p == '"' || *p == '\'') quote = *p;
+                else if (*p == '(' || *p == '[') depth++;
+                else if (*p == ')' || *p == ']') { if (!depth) break; depth--; }
+                else if (*p == ',' && !depth) break;
+            }
+            p++;
+        }
+        size_t len = (size_t)(p - start);
+        if (!len || len >= AML_MAX_LINE_LEN || quote || depth) {
+            set_error(ctx, "invalid function argument"); goto done;
+        }
+        char expression[AML_MAX_LINE_LEN];
+        memcpy(expression, start, len); expression[len] = 0;
+        int slot = nargs++;
+        if (aml_eval_value(ctx, expression, &args[slot])) goto done;
+        if (*p != ',') break;
+        p++;
+        while (isspace((unsigned char)*p)) p++;
+        if (*p == ')') { set_error(ctx, "empty function argument"); goto done; }
+    }
+    if (*p != ')') { set_error(ctx, "missing closing parenthesis"); goto done; }
+    *cursor = p + 1;
+    if (aml_text_function(name)) rc = aml_text_dispatch(ctx, name, args, nargs, out);
+    else {
+        AML_Func* f = aml_value_function(ctx, name);
+        if (f) rc = aml_call_value(ctx, f, args, nargs, 0, out);
+        else set_error(ctx, "unknown function");
+    }
+done:
+    for (int i = 0; i < nargs; i++) aml_value_clear(&args[i]);
+    if (rc) aml_value_clear(out);
+    return rc;
+}
+
 // Expression parser state
 typedef struct {
     const char* p;
@@ -3180,9 +3493,6 @@ static float expr_or(AML_Expr* e);  // forward
 static void expr_skip_ws(AML_Expr* e) {
     while (*e->p && isspace((unsigned char)*e->p)) e->p++;
 }
-
-// Forward declarations for user function calls from expressions
-static int aml_call_func(AML_ExecCtx* ctx, AML_Func* f, float* args, int nargs, int lineno);
 
 static float expr_primary(AML_Expr* e) {
     expr_skip_ws(e);
@@ -3226,6 +3536,11 @@ static float expr_primary(AML_Expr* e) {
 
             if (e->ctx) {
                 AML_Var* var = resolve_var_full(e->ctx, name);
+                if (var && var->type == AML_TYPE_STRING) {
+                    set_error(e->ctx, "array indexing requires an array; use text_codepoint/text_slice for text");
+                    e->error = 1;
+                    return 0;
+                }
                 if (var && var->type == AML_TYPE_ARRAY && var->array) {
 #ifdef USE_CUDA
                     if (var->array->gpu_valid && var->array->d_data) ensure_cpu(var->array);
@@ -3239,6 +3554,20 @@ static float expr_primary(AML_Expr* e) {
 
         // function call
         if (*e->p == '(') {
+            if (e->ctx && (aml_text_function(name) || aml_value_function(e->ctx, name))) {
+                AML_Var result = {0};
+                if (aml_invoke_value(e->ctx, name, &e->p, &result)) {
+                    e->error = 1;
+                    return 0;
+                }
+                if (result.type != AML_TYPE_FLOAT) {
+                    aml_value_clear(&result);
+                    set_error(e->ctx, "string/array value used as a scalar expression");
+                    e->error = 1;
+                    return 0;
+                }
+                return result.value;
+            }
             // v4.0: array scalar-returning builtins need raw arg names
             // Parse them BEFORE evaluating args as expressions
             if (e->ctx && (strcasecmp(name, "len") == 0 ||
@@ -3261,6 +3590,15 @@ static float expr_primary(AML_Expr* e) {
                     if (*e->p == ',') { e->p++; expr_skip_ws(e); }
                 }
                 if (*e->p == ')') e->p++;
+
+                for (int ai = 0; ai < n_arg_names; ai++) {
+                    AML_Var* v = resolve_var_full(e->ctx, arg_names[ai]);
+                    if (v && v->type == AML_TYPE_STRING) {
+                        set_error(e->ctx, "array operation requires an array");
+                        e->error = 1;
+                        return 0;
+                    }
+                }
 
                 if (strcasecmp(name, "len") == 0 && n_arg_names >= 1) {
                     AML_Var* v = resolve_var_full(e->ctx, arg_names[0]);
@@ -3318,27 +3656,6 @@ static float expr_primary(AML_Expr* e) {
             }
             expr_skip_ws(e);
             if (*e->p == ')') e->p++;
-
-            // look up user-defined function — v4.0: actually call it and return value
-            if (e->ctx) {
-                for (int fi = 0; fi < e->ctx->funcs.count; fi++) {
-                    if (strcmp(e->ctx->funcs.funcs[fi].name, name) == 0) {
-                        AML_Func* fn = &e->ctx->funcs.funcs[fi];
-                        aml_call_func(e->ctx, fn, args, nargs, 0);
-                        if (e->ctx->has_return) {
-                            float rv = e->ctx->return_value;
-                            // Only reset has_return for scalar returns.
-                            // Array returns stay flagged so the assignment handler
-                            // can pick them up from ctx->return_array.
-                            if (!e->ctx->return_array) {
-                                e->ctx->has_return = 0;
-                            }
-                            return rv;
-                        }
-                        return 0;
-                    }
-                }
-            }
 
             // built-in functions
             if (strcasecmp(name, "abs") == 0 && nargs >= 1)
@@ -3473,9 +3790,102 @@ static float expr_or(AML_Expr* e) {
 
 // Evaluate expression string, returns float
 static float aml_eval(AML_ExecCtx* ctx, const char* text) {
+    if (ctx && ctx->error[0]) return 0;
     AML_Expr e = { .p = text, .ctx = ctx, .error = 0 };
     float result = expr_or(&e);
+    if (e.error && ctx && !ctx->error[0]) set_error(ctx, "invalid scalar expression");
     return e.error ? 0.0f : result;
+}
+
+// Find a complete call/parenthesized expression without reading quoted brackets.
+static const char* aml_value_close(const char* p) {
+    int depth = 0;
+    char quote = 0;
+    char open = *p;
+    char closing = open == '[' ? ']' : ')';
+    for (; *p; p++) {
+        if (quote) {
+            if (*p == '\\' && p[1]) { p++; continue; }
+            if (*p == quote) quote = 0;
+        } else if (*p == '"' || *p == '\'') quote = *p;
+        else if (*p == open) depth++;
+        else if (*p == closing && --depth == 0) return p;
+    }
+    return NULL;
+}
+
+static int aml_eval_value(AML_ExecCtx* ctx, const char* text, AML_Var* out) {
+    memset(out, 0, sizeof(*out));
+    while (isspace((unsigned char)*text)) text++;
+    // Comments start outside quotes; '#' within a string is ordinary text.
+    const char* end = text;
+    char quote = 0;
+    while (*end) {
+        if (quote) {
+            if (*end == '\\' && end[1]) { end += 2; continue; }
+            if (*end == quote) quote = 0;
+        } else if (*end == '"' || *end == '\'') quote = *end;
+        else if (*end == '#') break;
+        end++;
+    }
+    size_t len = (size_t)(end - text);
+    while (len && isspace((unsigned char)text[len - 1])) len--;
+    if (!len || len >= AML_MAX_LINE_LEN) {
+        set_error(ctx, "empty or oversized value expression"); return 1;
+    }
+    char expr[AML_MAX_LINE_LEN];
+    memcpy(expr, text, len); expr[len] = 0;
+    const char* p = expr;
+    if (*p == '(') {
+        const char* close = aml_value_close(p);
+        if (close == expr + len - 1) {
+            expr[len - 1] = 0;
+            return aml_eval_value(ctx, expr + 1, out);
+        }
+    }
+    if (*p == '"' || *p == '\'') {
+        out->string = aml_string_literal(ctx, &p);
+        out->type = AML_TYPE_STRING;
+        if (!out->string) return 1;
+        while (isspace((unsigned char)*p)) p++;
+        if (*p) {
+            aml_value_clear(out);
+            set_error(ctx, "unexpected text after string literal"); return 1;
+        }
+        return 0;
+    }
+    char name[AML_MAX_NAME] = {0};
+    int n = 0;
+    if (isalpha((unsigned char)*p) || *p == '_') {
+        while ((isalnum((unsigned char)*p) || *p == '_') && n < AML_MAX_NAME - 1)
+            name[n++] = *p++;
+        while (isspace((unsigned char)*p)) p++;
+        if (!*p) {
+            AML_Var* v = resolve_var_full(ctx, name);
+            if (v) {
+                *out = *v;
+                if (v->type == AML_TYPE_ARRAY) am_array_ref(out->array);
+                if (v->type == AML_TYPE_STRING) am_string_ref(out->string);
+                return 0;
+            }
+        }
+        if (*p == '(' && (aml_text_function(name) || aml_value_function(ctx, name))) {
+            const char* close = aml_value_close(p);
+            if (close == expr + len - 1) return aml_invoke_value(ctx, name, &p, out);
+        }
+    }
+    AM_Array* arr = aml_try_array_expr(ctx, expr);
+    if (ctx->error[0]) {
+        am_array_free(arr);
+        return 1;
+    }
+    if (arr) {
+        out->type = AML_TYPE_ARRAY;
+        out->array = arr;
+        return 0;
+    }
+    out->value = aml_eval(ctx, expr);
+    return ctx->error[0] != 0;
 }
 
 // Try to parse as plain number; if not, evaluate as expression
@@ -3679,10 +4089,14 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
 
     // PROPHECY PHYSICS — numeric args use ctx_float/ctx_int for expression support
     if (!strcmp(t, "PROPHECY")) {
-      G.prophecy = clampi(ctx_int(ctx, arg), 1, 64);
+      int numeric_arg_1 = ctx_int(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.prophecy = clampi(numeric_arg_1, 1, 64);
     }
     else if (!strcmp(t, "DESTINY")) {
-      G.destiny = clamp01(ctx_float(ctx, arg));
+      float numeric_arg_2 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.destiny = clamp01(numeric_arg_2);
     }
     else if (!strcmp(t, "FIELD")) {
       // FIELD ON|OFF — gate the field overlay on logits. A-7: honour the §1.1
@@ -3698,14 +4112,20 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
       // this level. Stored in resonance_set and enforced in am_step's recompute
       // (raw_resonance = max(computed, set)); without the floor am_step would
       // overwrite the set value on the first tick. 0 = no floor (default).
-      G.resonance_set = clamp01(ctx_float(ctx, arg));
+      float numeric_arg_3 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.resonance_set = clamp01(numeric_arg_3);
       G.resonance = fmaxf(G.resonance, G.resonance_set);
     }
     else if (!strcmp(t, "WORMHOLE")) {
-      G.wormhole = clamp01(ctx_float(ctx, arg));
+      float numeric_arg_4 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.wormhole = clamp01(numeric_arg_4);
     }
     else if (!strcmp(t, "CALENDAR_DRIFT")) {
-      G.calendar_drift = clampf(ctx_float(ctx, arg), 0.0f, 30.0f);
+      float numeric_arg_5 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.calendar_drift = clampf(numeric_arg_5, 0.0f, 30.0f);
     }
     else if (!strcmp(t, "BIRTH")) {
       // MetaJanus: fix the origin ONCE. arg = days from the calendar epoch to this organism's
@@ -3713,7 +4133,9 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
       // of WHEN it began. The fulcrum cannot be moved: a second BIRTH is ignored, so no prompt
       // (/aml BIRTH from the REPL) can drag the origin. Self-LOCATION, not agency.
       if (!g_birth_set) {
-        g_birth_days = (long)ctx_float(ctx, arg);
+        float numeric_arg_6 = ctx_float(ctx, arg);
+        if (ctx && ctx->error[0]) return;
+        g_birth_days = (long)numeric_arg_6;
         G.birth_drift = calendar_cumulative_drift((int)g_birth_days);
         g_birth_set = 1;
       }
@@ -3722,7 +4144,9 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
       // MetaJanus test-door: scrub the SELF clock (pd's "now") WITHOUT touching the world
       // calendar, so the pd trajectory (birth-quakes, drift-anniversaries) can be verified. It
       // moves NOW, never the origin (birth_drift stays latched). A negative arg = back to real clock.
-      int d = (int)ctx_float(ctx, arg);
+      float numeric_arg_7 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      int d = (int)numeric_arg_7;
       if (d < 0) { g_self_now_manual = 0; }
       else { g_self_now_days = d; g_self_now_manual = 1; }
     }
@@ -3731,45 +4155,67 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
       // janus_temporal_alpha (HIGH-2), leaning the inner seed harvest — a first INDIRECT speech influence
       // via limpha recall (HIGH-3), receipted, not inert. Default OFF is bit-for-bit current (D-2 reads the
       // neutral 0.5, HIGH-1); the generic temporal_alpha is never touched by Janus.
-      g_temporal_key_on = (ctx_float(ctx, arg) != 0.0f) ? 1 : 0;
+      float numeric_arg_8 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      g_temporal_key_on = (numeric_arg_8 != 0.0f) ? 1 : 0;
     }
 
     // ATTENTION PHYSICS
     else if (!strcmp(t, "ATTEND_FOCUS")) {
-      G.attend_focus = clamp01(ctx_float(ctx, arg));
+      float numeric_arg_9 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.attend_focus = clamp01(numeric_arg_9);
     }
     else if (!strcmp(t, "ATTEND_SPREAD")) {
-      G.attend_spread = clamp01(ctx_float(ctx, arg));
+      float numeric_arg_10 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.attend_spread = clamp01(numeric_arg_10);
     }
 
     // TUNNELING
     else if (!strcmp(t, "TUNNEL_THRESHOLD")) {
-      G.tunnel_threshold = clamp01(ctx_float(ctx, arg));
+      float numeric_arg_11 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.tunnel_threshold = clamp01(numeric_arg_11);
     }
     else if (!strcmp(t, "TUNNEL_CHANCE")) {
-      G.tunnel_chance = clamp01(ctx_float(ctx, arg));
+      float numeric_arg_12 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.tunnel_chance = clamp01(numeric_arg_12);
     }
     else if (!strcmp(t, "TUNNEL_SKIP_MAX")) {
-      G.tunnel_skip_max = clampi(ctx_int(ctx, arg), 1, 24);
+      int numeric_arg_13 = ctx_int(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.tunnel_skip_max = clampi(numeric_arg_13, 1, 24);
     }
 
     // SUFFERING
     else if (!strcmp(t, "PAIN")) {
-      G.pain = clamp01(ctx_float(ctx, arg));
+      float numeric_arg_14 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.pain = clamp01(numeric_arg_14);
     }
     else if (!strcmp(t, "TENSION")) {
-      G.tension = clamp01(ctx_float(ctx, arg));
+      float numeric_arg_15 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.tension = clamp01(numeric_arg_15);
     }
     else if (!strcmp(t, "DISSONANCE")) {
-      G.dissonance = clamp01(ctx_float(ctx, arg));
+      float numeric_arg_16 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.dissonance = clamp01(numeric_arg_16);
     }
 
     // PROPHECY DEBT — direct set/configure
     else if (!strcmp(t, "PROPHECY_DEBT")) {
-      G.debt = clampf(ctx_float(ctx, arg), 0.0f, 100.0f);
+      float numeric_arg_17 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.debt = clampf(numeric_arg_17, 0.0f, 100.0f);
     }
     else if (!strcmp(t, "PROPHECY_DEBT_DECAY")) {
-      G.debt_decay = clampf(ctx_float(ctx, arg), 0.9f, 0.9999f);
+      float numeric_arg_18 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.debt_decay = clampf(numeric_arg_18, 0.9f, 0.9999f);
     }
 
     // MOVEMENT
@@ -3807,14 +4253,20 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
     // (SCAR / dark_gravity), not reinvent it: ASK with no argument voices the field's own gap.
     else if (!strcmp(t, "BE")) {
       // BE [x] — speak from the body this strongly (default full). "я есть [тело]".
-      G.be_voice = (arg && *arg) ? clamp01(ctx_float(ctx, arg)) : 1.0f;
+      float numeric_arg_19 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.be_voice = (arg && *arg) ? clamp01(numeric_arg_19) : 1.0f;
     }
     else if (!strcmp(t, "ASK")) {
       // ASK [x] — voice the not-knowing this strongly; no arg = the field's darkmatter.
-      G.ask_voice = (arg && *arg) ? clamp01(ctx_float(ctx, arg)) : G.dark_gravity;
+      float numeric_arg_20 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.ask_voice = (arg && *arg) ? clamp01(numeric_arg_20) : G.dark_gravity;
     }
     else if (!strcmp(t, "BASE_TEMP")) {
-      G.base_temperature = clampf(ctx_float(ctx, arg), 0.1f, 3.0f);
+      float numeric_arg_21 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.base_temperature = clampf(numeric_arg_21, 0.1f, 3.0f);
       update_effective_temp();
     }
 
@@ -3860,7 +4312,9 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
       char valexpr[128] = {0};
       if (sscanf(arg, "%63s %127[^\n]", lawname, valexpr) >= 2) {
         upcase(lawname);
-        float lawval = ctx_float(ctx, valexpr);
+        float numeric_arg_22 = ctx_float(ctx, valexpr);
+        if (ctx && ctx->error[0]) return;
+        float lawval = numeric_arg_22;
         if (!strcmp(lawname, "ENTROPY_FLOOR")) {
           G.entropy_floor = clampf(lawval, 0.0f, 2.0f);
         }
@@ -3939,10 +4393,14 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
         G.chirality_on = (!strcmp(mode, "ON") || !strcmp(mode, "1"));
       }
       else if (!strcmp(subcmd, "TEMPO")) {
-        G.tempo = clampi(ctx_int(ctx, arg), 2, 47);
+        int numeric_arg_23 = ctx_int(ctx, arg);
+        if (ctx && ctx->error[0]) return;
+        G.tempo = clampi(numeric_arg_23, 2, 47);
       }
       else if (!strcmp(subcmd, "PAS_THRESHOLD")) {
-        G.pas_threshold = clamp01(ctx_float(ctx, arg));
+        float numeric_arg_24 = ctx_float(ctx, arg);
+        if (ctx && ctx->error[0]) return;
+        G.pas_threshold = clamp01(numeric_arg_24);
       }
     }
 
@@ -3968,12 +4426,16 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
     }
     else if (!strcmp(t, "TEMPO")) {
       if (G.packs_enabled & AM_PACK_CODES_RIC) {
-        G.tempo = clampi(ctx_int(ctx, arg), 2, 47);
+        int numeric_arg_25 = ctx_int(ctx, arg);
+        if (ctx && ctx->error[0]) return;
+        G.tempo = clampi(numeric_arg_25, 2, 47);
       }
     }
     else if (!strcmp(t, "PAS_THRESHOLD")) {
       if (G.packs_enabled & AM_PACK_CODES_RIC) {
-        G.pas_threshold = clamp01(ctx_float(ctx, arg));
+        float numeric_arg_26 = ctx_float(ctx, arg);
+        if (ctx && ctx->error[0]) return;
+        G.pas_threshold = clamp01(numeric_arg_26);
       }
     }
     else if (!strcmp(t, "ANCHOR")) {
@@ -4023,14 +4485,20 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
     // ─────────────────────────────────────────────────────────────────────────
 
     else if (!strcmp(t, "SCHUMANN")) {
-      G.schumann_hz = clampf(ctx_float(ctx, arg), 7.0f, 8.5f);
+      float numeric_arg_27 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.schumann_hz = clampf(numeric_arg_27, 7.0f, 8.5f);
       G.schumann_coherence = compute_schumann_coherence(G.schumann_hz);
     }
     else if (!strcmp(t, "SCHUMANN_MODULATION")) {
-      G.schumann_modulation = clamp01(ctx_float(ctx, arg));
+      float numeric_arg_28 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.schumann_modulation = clamp01(numeric_arg_28);
     }
     else if (!strcmp(t, "COSMIC_COHERENCE")) {
-      G.schumann_coherence = clamp01(ctx_float(ctx, arg));
+      float numeric_arg_29 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.schumann_coherence = clamp01(numeric_arg_29);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -4038,13 +4506,19 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
     // ─────────────────────────────────────────────────────────────────────────
 
     else if (!strcmp(t, "LORA_ALPHA")) {
-      G.lora_alpha = clamp01(ctx_float(ctx, arg));
+      float numeric_arg_30 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.lora_alpha = clamp01(numeric_arg_30);
     }
     else if (!strcmp(t, "NOTORCH_LR")) {
-      G.notorch_lr = clampf(ctx_float(ctx, arg), 0.001f, 0.5f);
+      float numeric_arg_31 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.notorch_lr = clampf(numeric_arg_31, 0.001f, 0.5f);
     }
     else if (!strcmp(t, "NOTORCH_DECAY")) {
-      G.notorch_decay = clampf(ctx_float(ctx, arg), 0.9f, 0.9999f);
+      float numeric_arg_32 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.notorch_decay = clampf(numeric_arg_32, 0.9f, 0.9999f);
     }
     else if (!strcmp(t, "RESONANCE_BOOST")) {
       // RESONANCE_BOOST <word> <float> — boosts resonance metric
@@ -4069,7 +4543,9 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
       G.season_phase = 0.0f;
     }
     else if (!strcmp(t, "SEASON_INTENSITY")) {
-      G.season_intensity = clamp01(ctx_float(ctx, arg));
+      float numeric_arg_33 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.season_intensity = clamp01(numeric_arg_33);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -4092,7 +4568,9 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
     }
     else if (!strcmp(t, "ESSENCE")) {
       // ESSENCE alpha — overall gamma injection strength
-      G.essence_alpha = clamp01(ctx_float(ctx, arg));
+      float numeric_arg_34 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.essence_alpha = clamp01(numeric_arg_34);
     }
     else if (!strcmp(t, "JANUS")) {
       // JANUS name_a name_b — dual-facing field
@@ -4108,10 +4586,14 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
       }
     }
     else if (!strcmp(t, "JANUS_BLEND")) {
-      G.janus_blend = clamp01(ctx_float(ctx, arg));
+      float numeric_arg_35 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.janus_blend = clamp01(numeric_arg_35);
     }
     else if (!strcmp(t, "GAMMA_DRIFT")) {
-      G.gamma_drift = clampf(ctx_float(ctx, arg), 0.0f, 0.1f);
+      float numeric_arg_36 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.gamma_drift = clampf(numeric_arg_36, 0.0f, 0.1f);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -4133,7 +4615,9 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
       else if (!strcmp(mode, "SYMMETRIC") || !strcmp(mode, "2")) G.temporal_mode = AM_TEMPORAL_SYMMETRIC;
     }
     else if (!strcmp(t, "TEMPORAL_ALPHA")) {
-      G.temporal_alpha = clamp01(ctx_float(ctx, arg));
+      float numeric_arg_37 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.temporal_alpha = clamp01(numeric_arg_37);
     }
     else if (!strcmp(t, "RTL_MODE")) {
       char mode[16] = {0}; snprintf(mode, sizeof(mode), "%.15s", arg); upcase(mode);
@@ -4153,16 +4637,24 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
     // ─────────────────────────────────────────────────────────────────────────
 
     else if (!strcmp(t, "EXPERT_STRUCTURAL")) {
-      G.expert_structural = clamp01(ctx_float(ctx, arg));
+      float numeric_arg_38 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.expert_structural = clamp01(numeric_arg_38);
     }
     else if (!strcmp(t, "EXPERT_SEMANTIC")) {
-      G.expert_semantic = clamp01(ctx_float(ctx, arg));
+      float numeric_arg_39 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.expert_semantic = clamp01(numeric_arg_39);
     }
     else if (!strcmp(t, "EXPERT_CREATIVE")) {
-      G.expert_creative = clamp01(ctx_float(ctx, arg));
+      float numeric_arg_40 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.expert_creative = clamp01(numeric_arg_40);
     }
     else if (!strcmp(t, "EXPERT_PRECISE")) {
-      G.expert_precise = clamp01(ctx_float(ctx, arg));
+      float numeric_arg_41 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.expert_precise = clamp01(numeric_arg_41);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -4170,7 +4662,9 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
     // ─────────────────────────────────────────────────────────────────────────
 
     else if (!strcmp(t, "PRESENCE_DECAY")) {
-      G.presence_decay = clamp01(ctx_float(ctx, arg));
+      float numeric_arg_42 = ctx_float(ctx, arg);
+      if (ctx && ctx->error[0]) return;
+      G.presence_decay = clamp01(numeric_arg_42);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -4558,7 +5052,9 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
       else if (!strcmp(subcmd, "ADAM_STEP") || !strcmp(subcmd, "ADAM")) {
         // TAPE ADAM_STEP <lr> or TAPE ADAM <lr>
         float lr = 0.001f;
-        if (rest[0]) lr = ctx_float(ctx, rest);
+        float numeric_arg_43 = ctx_float(ctx, rest);
+        if (ctx && ctx->error[0]) return;
+        if (rest[0]) lr = numeric_arg_43;
         am_tape_adam_step(lr);
       }
       else if (!strcmp(subcmd, "CHUCK_STEP") || !strcmp(subcmd, "CHUCK")) {
@@ -4569,8 +5065,12 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
         sscanf(rest, "%31s %31s", arg1, arg2);
         float lr = 0.001f;
         float loss_val = 0.0f;
-        if (arg1[0]) lr = ctx_float(ctx, arg1);
-        if (arg2[0] && ctx) loss_val = ctx_float(ctx, arg2);
+        float numeric_arg_44 = ctx_float(ctx, arg1);
+        if (ctx && ctx->error[0]) return;
+        if (arg1[0]) lr = numeric_arg_44;
+        float numeric_arg_45 = ctx_float(ctx, arg2);
+        if (ctx && ctx->error[0]) return;
+        if (arg2[0] && ctx) loss_val = numeric_arg_45;
         am_tape_chuck_step(lr, loss_val);
       }
       else if (!strcmp(subcmd, "ADAMW_STEP") || !strcmp(subcmd, "ADAMW")) {
@@ -4578,10 +5078,18 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
         // TAPE ADAMW <lr> [weight_decay] [beta1] [beta2]
         char a1[32]={0}, a2[32]={0}, a3[32]={0}, a4[32]={0};
         sscanf(rest, "%31s %31s %31s %31s", a1, a2, a3, a4);
-        float lr = a1[0] ? ctx_float(ctx, a1) : 0.001f;
-        float wd = a2[0] ? ctx_float(ctx, a2) : 0.1f;
-        float b1 = a3[0] ? ctx_float(ctx, a3) : 0.9f;
-        float b2 = a4[0] ? ctx_float(ctx, a4) : 0.95f;
+        float numeric_arg_46 = ctx_float(ctx, a1);
+        if (ctx && ctx->error[0]) return;
+        float lr = a1[0] ? numeric_arg_46 : 0.001f;
+        float numeric_arg_47 = ctx_float(ctx, a2);
+        if (ctx && ctx->error[0]) return;
+        float wd = a2[0] ? numeric_arg_47 : 0.1f;
+        float numeric_arg_48 = ctx_float(ctx, a3);
+        if (ctx && ctx->error[0]) return;
+        float b1 = a3[0] ? numeric_arg_48 : 0.9f;
+        float numeric_arg_49 = ctx_float(ctx, a4);
+        if (ctx && ctx->error[0]) return;
+        float b2 = a4[0] ? numeric_arg_49 : 0.95f;
         am_tape_adamw_step(lr, wd, b1, b2);
 #ifdef USE_CUDA
         for (int pi = 0; pi < g_tape.count; pi++) {
@@ -4593,7 +5101,9 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
       else if (!strcmp(subcmd, "CLIP_GRADS") || !strcmp(subcmd, "CLIP")) {
         // TAPE CLIP_GRADS <max_norm> — gradient clipping by global norm
         float max_norm = 1.0f;
-        if (rest[0]) max_norm = ctx_float(ctx, rest);
+        float numeric_arg_50 = ctx_float(ctx, rest);
+        if (ctx && ctx->error[0]) return;
+        if (rest[0]) max_norm = numeric_arg_50;
         float norm = am_tape_clip_grads(max_norm);
         // Store grad_norm in context for logging
         if (ctx) {
@@ -4608,7 +5118,9 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
       else if (!strcmp(subcmd, "APPLY_ACCUM")) {
         // TAPE APPLY_ACCUM <N> — average accumulated grads by N, copy to entries
         int n_accum = 1;
-        if (rest[0]) n_accum = (int)ctx_float(ctx, rest);
+        float numeric_arg_51 = ctx_float(ctx, rest);
+        if (ctx && ctx->error[0]) return;
+        if (rest[0]) n_accum = (int)numeric_arg_51;
         if (n_accum < 1) n_accum = 1;
         am_tape_apply_accum(n_accum);
       }
@@ -4657,10 +5169,18 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
                !strcmp(subcmd, "LR_LINEAR")) {
         char a1[32]={0}, a2[32]={0}, a3[32]={0}, a4[32]={0};
         sscanf(rest, "%31s %31s %31s %31s", a1, a2, a3, a4);
-        float base = a1[0] ? ctx_float(ctx, a1) : 0.001f;
-        int   w    = a2[0] ? (int)ctx_float(ctx, a2) : 0;
-        float p3   = a3[0] ? ctx_float(ctx, a3) : 0.0f;
-        float p4   = a4[0] ? ctx_float(ctx, a4) : 0.0f;
+        float numeric_arg_52 = ctx_float(ctx, a1);
+        if (ctx && ctx->error[0]) return;
+        float base = a1[0] ? numeric_arg_52 : 0.001f;
+        float numeric_arg_53 = ctx_float(ctx, a2);
+        if (ctx && ctx->error[0]) return;
+        int   w    = a2[0] ? (int)numeric_arg_53 : 0;
+        float numeric_arg_54 = ctx_float(ctx, a3);
+        if (ctx && ctx->error[0]) return;
+        float p3   = a3[0] ? numeric_arg_54 : 0.0f;
+        float numeric_arg_55 = ctx_float(ctx, a4);
+        if (ctx && ctx->error[0]) return;
+        float p4   = a4[0] ? numeric_arg_55 : 0.0f;
         if (!strcmp(subcmd, "LR_COSINE"))
             g_aml_schedule = am_schedule_cosine(base, w, (int)p3, p4);
         else if (!strcmp(subcmd, "LR_STEP"))
@@ -4754,7 +5274,9 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
         char vexpr[AML_MAX_LINE_LEN] = {0};
         sscanf(rest, "%31s %[^\n]", chname, vexpr);
         if (chname[0] && vexpr[0] && ctx) {
-          float val = ctx_float(ctx, vexpr);
+          float numeric_arg_56 = ctx_float(ctx, vexpr);
+          if (ctx && ctx->error[0]) return;
+          float val = numeric_arg_56;
           am_channel_write(chname, val);
         }
       }
@@ -4835,46 +5357,173 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
 // PREPROCESSOR — split script into lines with indentation
 // ═══════════════════════════════════════════════════════════════════════════════
 
-static int aml_preprocess(const char* script, AML_Line* lines, int max_lines) {
-    int count = 0;
+typedef struct {
+    AML_Line* lines;
+    int count, max_lines, source_count;
+    char sources[AML_MAX_IMPORTS][AML_MAX_SOURCE_PATH];
+    unsigned char state[AML_MAX_IMPORTS]; // 1: expanding, 2: complete
+} AML_Preparation;
+
+static int aml_source_error(const char* origin, int lineno, const char* message) {
+    snprintf(g_error, sizeof(g_error), "%.112s:%d: %.120s", origin, lineno, message);
+    return -1;
+}
+
+// The root may be embedded by amlc and removed; imported files must exist.
+static int aml_canonical_source(const char* path, char out[AML_MAX_SOURCE_PATH], int required) {
+    char* canonical = realpath(path, NULL);
+    if (!canonical && !required) {
+        const char* slash = strrchr(path, '/');
+        const char* basename = slash ? slash + 1 : path;
+        char directory[AML_MAX_SOURCE_PATH];
+        size_t n = slash ? (size_t)(slash - path) : 0;
+        if (slash == path) n = 1;
+        if (n >= sizeof(directory)) {
+            snprintf(g_error, sizeof(g_error), "source directory exceeds %zu bytes", sizeof(directory) - 1);
+            return -1;
+        }
+        if (slash) { memcpy(directory, path, n); directory[n] = 0; }
+        else snprintf(directory, sizeof(directory), ".");
+        char* parent = realpath(directory, NULL);
+        if (parent) {
+            int written = snprintf(out, AML_MAX_SOURCE_PATH, "%s%s%s", parent,
+                                   strcmp(parent, "/") == 0 ? "" : "/", basename);
+            free(parent);
+            if (written < 0 || written >= AML_MAX_SOURCE_PATH) {
+                snprintf(g_error, sizeof(g_error), "source path exceeds %d bytes", AML_MAX_SOURCE_PATH - 1);
+                return -1;
+            }
+            return 0;
+        }
+    }
+    if (!canonical) {
+        snprintf(g_error, sizeof(g_error), "cannot resolve source: %.220s", path);
+        return -1;
+    }
+    if (strlen(canonical) >= AML_MAX_SOURCE_PATH) {
+        free(canonical);
+        snprintf(g_error, sizeof(g_error), "source path exceeds %d bytes", AML_MAX_SOURCE_PATH - 1);
+        return -1;
+    }
+    strcpy(out, canonical);
+    free(canonical);
+    return 0;
+}
+
+static int aml_expand_source(AML_Preparation* prep, const char* script, const char* origin, int depth);
+
+static int aml_expand_import(AML_Preparation* prep, const char* text,
+                             const char* origin, int lineno, int depth) {
+    const char* start = text + 6;
+    while (isspace((unsigned char)*start)) start++;
+    if (*start++ != '"') return aml_source_error(origin, lineno, "IMPORT requires a quoted path");
+    const char* end = strchr(start, '"');
+    if (!end || end == start) return aml_source_error(origin, lineno, "invalid IMPORT path");
+    const char* tail = end + 1;
+    while (isspace((unsigned char)*tail)) tail++;
+    if (*tail && *tail != '#') return aml_source_error(origin, lineno, "unexpected text after IMPORT path");
+    char name[AML_MAX_SOURCE_PATH], path[AML_MAX_SOURCE_PATH * 2], canonical[AML_MAX_SOURCE_PATH];
+    size_t len = (size_t)(end - start);
+    if (len >= sizeof(name)) return aml_source_error(origin, lineno, "IMPORT path too long");
+    memcpy(name, start, len); name[len] = 0;
+    const char* slash = strrchr(origin, '/');
+    int written = name[0] == '/'
+        ? snprintf(path, sizeof(path), "%s", name)
+        : snprintf(path, sizeof(path), "%.*s/%s", slash ? (int)(slash - origin) : 0, origin, name);
+    if (written < 0 || (size_t)written >= sizeof(path))
+        return aml_source_error(origin, lineno, "IMPORT path too long");
+    if (aml_canonical_source(path, canonical, 1) != 0) {
+        char detail[256]; snprintf(detail, sizeof(detail), "%s", g_error);
+        return aml_source_error(origin, lineno, detail);
+    }
+    for (int i = 0; i < prep->source_count; i++) {
+        if (strcmp(canonical, prep->sources[i]) == 0) {
+            if (prep->state[i] == 1) return aml_source_error(origin, lineno, "IMPORT cycle detected");
+            return 0;
+        }
+    }
+    if (depth >= AML_MAX_IMPORT_DEPTH)
+        return aml_source_error(origin, lineno, "IMPORT depth limit exceeded");
+    if (prep->source_count >= AML_MAX_IMPORTS)
+        return aml_source_error(origin, lineno, "IMPORT source limit exceeded");
+    struct stat st;
+    if (stat(canonical, &st) != 0 || !S_ISREG(st.st_mode))
+        return aml_source_error(origin, lineno, "IMPORT source is not a regular file");
+    if (st.st_size < 0 || st.st_size > 1024 * 1024)
+        return aml_source_error(origin, lineno, "IMPORT source exceeds 1 MiB");
+    FILE* f = fopen(canonical, "rb");
+    if (!f) return aml_source_error(origin, lineno, "cannot open IMPORT source");
+    size_t size = (size_t)st.st_size;
+    char* imported = (char*)malloc(size + 2);
+    if (!imported) { fclose(f); return aml_source_error(origin, lineno, "IMPORT allocation failed"); }
+    size_t read = fread(imported, 1, size + 1, f);
+    int bad_read = ferror(f) || read != size || memchr(imported, 0, read) != NULL;
+    fclose(f);
+    if (bad_read) { free(imported); return aml_source_error(origin, lineno, "invalid IMPORT source read"); }
+    imported[read] = 0;
+    int slot = prep->source_count++;
+    strcpy(prep->sources[slot], canonical);
+    prep->state[slot] = 1;
+    int rc = aml_expand_source(prep, imported, canonical, depth + 1);
+    free(imported);
+    if (rc == 0) prep->state[slot] = 2;
+    return rc;
+}
+
+static int aml_expand_source(AML_Preparation* prep, const char* script, const char* origin, int depth) {
     const char* p = script;
     int lineno = 1;
-
-    while (*p && count < max_lines) {
-        // count indentation (spaces only, tabs = 4 spaces)
+    while (*p) {
         int indent = 0;
-        while (*p == ' ' || *p == '\t') {
-            indent += (*p == '\t') ? 4 : 1;
-            p++;
-        }
-
-        // read line content
+        while (*p == ' ' || *p == '\t') { indent += *p == '\t' ? 4 : 1; p++; }
         const char* start = p;
         while (*p && *p != '\n') p++;
-        int len = (int)(p - start);
+        size_t len = (size_t)(p - start);
         if (*p == '\n') p++;
-
-        // skip empty/comment lines
-        if (len == 0 || start[0] == '#') { lineno++; continue; }
-
-        // trim trailing whitespace
-        while (len > 0 && isspace((unsigned char)start[len - 1])) len--;
-        if (len == 0) { lineno++; continue; }
-
-        // store
-        if (len >= AML_MAX_LINE_LEN) {
-            fprintf(stderr, "aml: line %d truncated at %d bytes (AML_MAX_LINE_LEN)\n",
-                    lineno, AML_MAX_LINE_LEN - 1);   // R-2: loud, was a silent drop
-            len = AML_MAX_LINE_LEN - 1;
+        while (len && isspace((unsigned char)start[len - 1])) len--;
+        if (!len || start[0] == '#') { lineno++; continue; }
+        if (len >= AML_MAX_LINE_LEN)
+            return aml_source_error(origin, lineno, "AML source line exceeds AML_MAX_LINE_LEN");
+        if (prep->count >= prep->max_lines)
+            return aml_source_error(origin, lineno, "expanded AML line limit exceeded");
+        AML_Line* line = &prep->lines[prep->count++];
+        memcpy(line->text, start, len); line->text[len] = 0;
+        line->indent = indent; line->lineno = lineno;
+        strcpy(line->origin, origin);
+        if (strncasecmp(line->text, "IMPORT", 6) == 0 &&
+            (!line->text[6] || isspace((unsigned char)line->text[6]))) {
+            const char* pack = line->text + 6;
+            while (isspace((unsigned char)*pack)) pack++;
+            // Existing bare pack imports remain runtime aliases for MODE.
+            if (!strcasecmp(pack, "CODES_RIC") || !strcasecmp(pack, "CODES/RIC") ||
+                !strcasecmp(pack, "DARKMATTER") || !strcasecmp(pack, "NOTORCH")) {
+                lineno++;
+                continue;
+            }
+            if (indent) return aml_source_error(origin, lineno, "IMPORT must be top-level");
+            char directive[AML_MAX_LINE_LEN]; strcpy(directive, line->text);
+            // Retain a no-op boundary even for empty or already imported files.
+            line->text[0] = 0;
+            if (aml_expand_import(prep, directive, origin, lineno, depth) != 0) return -1;
         }
-        memcpy(lines[count].text, start, len);
-        lines[count].text[len] = 0;
-        lines[count].indent = indent;
-        lines[count].lineno = lineno;
-        count++;
         lineno++;
     }
-    return count;
+    return 0;
+}
+
+static int aml_preprocess(const char* script, AML_Line* lines, int max_lines) {
+    AML_Preparation* prep = (AML_Preparation*)calloc(1, sizeof(*prep));
+    if (!prep) { snprintf(g_error, sizeof(g_error), "source preparation allocation failed"); return -1; }
+    prep->lines = lines; prep->max_lines = max_lines;
+    char root_path[AML_MAX_SOURCE_PATH * 2];
+    if (g_source_path[0]) snprintf(root_path, sizeof(root_path), "%s", g_source_path);
+    else snprintf(root_path, sizeof(root_path), "%s/<memory>", g_base_dir);
+    if (aml_canonical_source(root_path, prep->sources[0], 0) != 0) { free(prep); return -1; }
+    prep->state[0] = 1; prep->source_count = 1;
+    int rc = aml_expand_source(prep, script, prep->sources[0], 0);
+    int count = prep->count;
+    free(prep);
+    return rc == 0 ? count : -1;
 }
 
 // Find end of indented block starting at line[start+1]
@@ -4892,6 +5541,27 @@ static int aml_find_block_end(AML_Line* lines, int nlines, int start) {
 // Forward declarations
 static int aml_exec_block(AML_ExecCtx* ctx, int start, int end);
 
+static int aml_reserved_function(const char* name) {
+    static const char* names[] = {
+        "abs", "min", "max", "sqrt", "clamp", "len", "sum", "dot", "rows", "cols",
+        "zeros", "randn", "add", "mul", "scale", "matrix", "matrix_zeros", "matvec",
+        "matmul", "softmax", "rmsnorm", "silu", "gelu", "dropout", "layernorm",
+        "seq_layernorm", "spa_embed", "spa_connectedness", "relu", "cross_entropy",
+        "embedding_lookup", "row", "seq_embed", "seq_matvec", "seq_rmsnorm",
+        "causal_attention", "multi_head_attention", "seq_cross_entropy",
+        "text_len", "text_bytes", "text_equal", "text_find", "text_slice",
+        "text_concat", "text_codepoint", "text_from_codepoint"
+    };
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+        if (strcasecmp(name, names[i]) == 0) return 1;
+    return 0;
+}
+
+static void aml_definition_error(AML_ExecCtx* ctx, int line, const char* message) {
+    aml_source_error(ctx->lines[line].origin, ctx->lines[line].lineno, message);
+    snprintf(ctx->error, sizeof(ctx->error), "%s", g_error);
+}
+
 // Register all function definitions (first pass)
 static void aml_register_funcs(AML_ExecCtx* ctx) {
     for (int i = 0; i < ctx->nlines; i++) {
@@ -4902,31 +5572,76 @@ static void aml_register_funcs(AML_ExecCtx* ctx) {
         char* name_start = text + 4;
         while (*name_start == ' ') name_start++;
         char* paren = strchr(name_start, '(');
-        if (!paren) continue;
+        if (!paren) { aml_definition_error(ctx, i, "invalid function declaration"); return; }
 
-        if (ctx->funcs.count >= AML_MAX_FUNCS) break;
+        if (ctx->funcs.count >= AML_MAX_FUNCS) {
+            aml_definition_error(ctx, i, "function limit exceeded"); return;
+        }
         AML_Func* f = &ctx->funcs.funcs[ctx->funcs.count];
+        memset(f, 0, sizeof(*f));
 
         int nlen = (int)(paren - name_start);
-        if (nlen >= AML_MAX_NAME) nlen = AML_MAX_NAME - 1;
+        while (nlen && isspace((unsigned char)name_start[nlen - 1])) nlen--;
+        if (!nlen || nlen >= AML_MAX_NAME ||
+            !(isalpha((unsigned char)name_start[0]) || name_start[0] == '_')) {
+            aml_definition_error(ctx, i, "invalid or overlong function name"); return;
+        }
+        for (int ni = 1; ni < nlen; ni++) {
+            if (!(isalnum((unsigned char)name_start[ni]) || name_start[ni] == '_')) {
+                aml_definition_error(ctx, i, "invalid function name"); return;
+            }
+        }
         memcpy(f->name, name_start, nlen);
         f->name[nlen] = 0;
+        if (aml_reserved_function(f->name)) {
+            aml_definition_error(ctx, i, "function name collides with an intrinsic"); return;
+        }
+        for (int fi = 0; fi < ctx->funcs.count; fi++) {
+            const AML_Func* previous = &ctx->funcs.funcs[fi];
+            if (strcmp(f->name, previous->name) == 0 ||
+                (previous->is_builtin && strcasecmp(f->name, previous->name) == 0)) {
+                aml_definition_error(ctx, i, "duplicate function name"); return;
+            }
+        }
 
         // parse params
         f->param_count = 0;
         char* pp = paren + 1;
-        while (*pp && *pp != ')' && f->param_count < AML_MAX_PARAMS) {
-            while (*pp == ' ' || *pp == ',') pp++;
+        while (*pp && *pp != ')') {
+            while (isspace((unsigned char)*pp)) pp++;
             if (*pp == ')') break;
+            if (f->param_count >= AML_MAX_PARAMS) {
+                aml_definition_error(ctx, i, "function parameter limit exceeded"); return;
+            }
             char* pe = pp;
-            while (*pe && *pe != ',' && *pe != ')' && *pe != ' ') pe++;
+            if (!(isalpha((unsigned char)*pe) || *pe == '_')) {
+                aml_definition_error(ctx, i, "invalid function parameter"); return;
+            }
+            while (isalnum((unsigned char)*pe) || *pe == '_') pe++;
             int plen = (int)(pe - pp);
-            if (plen >= AML_MAX_NAME) plen = AML_MAX_NAME - 1;
+            if (plen >= AML_MAX_NAME) {
+                aml_definition_error(ctx, i, "function parameter name too long"); return;
+            }
             memcpy(f->params[f->param_count], pp, plen);
             f->params[f->param_count][plen] = 0;
+            for (int pi = 0; pi < f->param_count; pi++) {
+                if (strcmp(f->params[pi], f->params[f->param_count]) == 0) {
+                    aml_definition_error(ctx, i, "duplicate function parameter"); return;
+                }
+            }
             f->param_count++;
             pp = pe;
+            while (isspace((unsigned char)*pp)) pp++;
+            if (*pp == ',') pp++;
+            else if (*pp != ')') {
+                aml_definition_error(ctx, i, "invalid function parameter list"); return;
+            }
         }
+        if (*pp++ != ')') { aml_definition_error(ctx, i, "unterminated function parameters"); return; }
+        while (isspace((unsigned char)*pp)) pp++;
+        if (*pp++ != ':') { aml_definition_error(ctx, i, "function declaration needs ':'"); return; }
+        while (isspace((unsigned char)*pp)) pp++;
+        if (*pp && *pp != '#') { aml_definition_error(ctx, i, "unexpected text after function declaration"); return; }
 
         f->body_start = i + 1;
         f->body_end = aml_find_block_end(ctx->lines, ctx->nlines, i);
@@ -4940,10 +5655,19 @@ static void aml_register_funcs(AML_ExecCtx* ctx) {
 // Call a user-defined function
 // lineno is the caller's line number (for error reporting)
 // v4.0: supports return values via ctx->has_return / return_value / return_array
-static int aml_call_func(AML_ExecCtx* ctx, AML_Func* f, float* args, int nargs, int lineno) {
+static int aml_call_value(AML_ExecCtx* ctx, AML_Func* f, AML_Var* args,
+                          int nargs, int lineno, AML_Var* out) {
     // Built-in functions: dispatch to C code directly
     if (f->is_builtin) {
-        aml_exec_builtin(f->body_start, args, nargs);
+        float scalar_args[AML_MAX_PARAMS];
+        for (int i = 0; i < nargs; i++) {
+            if (args[i].type != AML_TYPE_FLOAT) {
+                set_error_at(ctx, lineno, "field function requires scalar arguments");
+                return 1;
+            }
+            scalar_args[i] = args[i].value;
+        }
+        aml_exec_builtin(f->body_start, scalar_args, nargs);
         return 0;
     }
 
@@ -4951,11 +5675,16 @@ static int aml_call_func(AML_ExecCtx* ctx, AML_Func* f, float* args, int nargs, 
         set_error_at(ctx, lineno, "max call depth exceeded");
         return 1;
     }
+    if (nargs != f->param_count) {
+        set_error_at(ctx, lineno, "wrong number of function arguments");
+        return 1;
+    }
 
     // Save caller's return state (nested calls must not clobber it)
     int saved_has_return = ctx->has_return;
     float saved_return_value = ctx->return_value;
     AM_Array* saved_return_array = ctx->return_array;
+    AM_String* saved_return_string = ctx->return_string;
     int saved_return_type = ctx->return_type;
 
     // push local scope
@@ -4965,37 +5694,44 @@ static int aml_call_func(AML_ExecCtx* ctx, AML_Func* f, float* args, int nargs, 
 
     // bind params
     for (int i = 0; i < f->param_count && i < nargs; i++) {
-        symtab_set(locals, f->params[i], args[i]);
+        if (args[i].type == AML_TYPE_ARRAY) {
+            am_array_ref(args[i].array);
+            symtab_set_array(locals, f->params[i], args[i].array);
+        } else if (args[i].type == AML_TYPE_STRING) {
+            am_string_ref(args[i].string);
+            symtab_set_string(locals, f->params[i], args[i].string);
+        } else {
+            symtab_set(locals, f->params[i], args[i].value);
+        }
     }
 
     // reset return state for this function
     ctx->has_return = 0;
     ctx->return_value = 0;
     ctx->return_array = NULL;
+    ctx->return_string = NULL;
+    ctx->return_type = AML_TYPE_FLOAT;
 
     // execute body
-    int rc = aml_exec_block(ctx, f->body_start, f->body_end);
-
-    // v4.0: clean up local arrays on scope exit
-    // BUT: if we're returning an array, bump its refcount first
-    if (ctx->has_return && ctx->return_array) {
-        am_array_ref(ctx->return_array);
+    aml_exec_block(ctx, f->body_start, f->body_end);
+    if (ctx->has_return) {
+        out->type = ctx->return_type;
+        out->value = ctx->return_value;
+        out->array = ctx->return_array;
+        out->string = ctx->return_string;
     }
+    // Return expressions already own their references, including local aliases.
     symtab_clear_arrays(locals);
 
     // pop scope
     ctx->call_depth--;
 
-    // If this function didn't return, restore caller's return state
-    if (!ctx->has_return) {
-        ctx->has_return = saved_has_return;
-        ctx->return_value = saved_return_value;
-        ctx->return_array = saved_return_array;
-        ctx->return_type = saved_return_type;
-    }
-    // If this function DID return, has_return/return_value stay set for caller to read
-
-    return rc;
+    ctx->has_return = saved_has_return;
+    ctx->return_value = saved_return_value;
+    ctx->return_array = saved_return_array;
+    ctx->return_string = saved_return_string;
+    ctx->return_type = saved_return_type;
+    return ctx->error[0] != 0;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -5006,7 +5742,7 @@ static int aml_call_func(AML_ExecCtx* ctx, AML_Func* f, float* args, int nargs, 
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // Forward declaration for bytecode dispatch
-static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char arg_strs[][AML_MAX_NAME], int nargs);
+static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char arg_strs[][AML_MAX_LINE_LEN], int nargs);
 
 static AM_Array* aml_try_array_expr(AML_ExecCtx* ctx, const char* rhs) {
     // skip whitespace
@@ -5021,9 +5757,23 @@ static AM_Array* aml_try_array_expr(AML_ExecCtx* ctx, const char* rhs) {
             while (*rhs == ' ' || *rhs == ',') rhs++;
             if (*rhs == ']') break;
             char* end;
-            vals[count++] = strtof(rhs, &end);
+            float value = strtof(rhs, &end);
+            if (end == rhs) {
+                set_error(ctx, "array literal requires numeric elements");
+                return NULL;
+            }
+            vals[count++] = value;
             rhs = end;
+            while (isspace((unsigned char)*rhs)) rhs++;
+            if (*rhs != ',' && *rhs != ']') {
+                set_error(ctx, "invalid array literal");
+                return NULL;
+            }
         }
+        if (*rhs != ']') { set_error(ctx, "unterminated array literal"); return NULL; }
+        rhs++;
+        while (isspace((unsigned char)*rhs)) rhs++;
+        if (*rhs && *rhs != '#') { set_error(ctx, "unexpected text after array literal"); return NULL; }
         if (count > 0) {
             AM_Array* arr = am_array_new(count);
             if (arr) memcpy(arr->data, vals, count * sizeof(float));
@@ -5045,7 +5795,7 @@ static AM_Array* aml_try_array_expr(AML_ExecCtx* ctx, const char* rhs) {
 
     // Parse arguments as raw text tokens (needed for variable names)
     const char* ap = after_name + 1;
-    char arg_strs[AML_MAX_PARAMS][AML_MAX_NAME];
+    char arg_strs[AML_MAX_PARAMS][AML_MAX_LINE_LEN];
     int nargs = 0;
     while (*ap && *ap != ')' && nargs < AML_MAX_PARAMS) {
         while (*ap == ' ' || *ap == ',') ap++;
@@ -5053,25 +5803,43 @@ static AM_Array* aml_try_array_expr(AML_ExecCtx* ctx, const char* rhs) {
         int ai = 0;
         // Capture the whole argument expression (may be a number or identifier)
         int paren_depth = 0;
-        while (*ap && (paren_depth > 0 || (*ap != ',' && *ap != ')')) && ai < AML_MAX_NAME - 1) {
-            if (*ap == '(') paren_depth++;
-            if (*ap == ')') { if (paren_depth > 0) paren_depth--; else break; }
+        char quote = 0;
+        while (*ap && (quote || paren_depth > 0 || (*ap != ',' && *ap != ')'))) {
+            if (ai >= AML_MAX_LINE_LEN - 1) {
+                set_error(ctx, "array argument too long"); return NULL;
+            }
+            if (quote) {
+                if (*ap == '\\' && ap[1]) {
+                    if (ai >= AML_MAX_LINE_LEN - 2) {
+                        set_error(ctx, "array argument too long"); return NULL;
+                    }
+                    arg_strs[nargs][ai++] = *ap++;
+                    arg_strs[nargs][ai++] = *ap++;
+                    continue;
+                }
+                if (*ap == quote) quote = 0;
+            } else if (*ap == '"' || *ap == '\'') quote = *ap;
+            else if (*ap == '(' || *ap == '[') paren_depth++;
+            else if (*ap == ')' || *ap == ']') paren_depth--;
             arg_strs[nargs][ai++] = *ap++;
         }
+        if (quote || paren_depth) { set_error(ctx, "invalid array argument"); return NULL; }
         // Trim trailing spaces
         while (ai > 0 && arg_strs[nargs][ai-1] == ' ') ai--;
         arg_strs[nargs][ai] = 0;
         nargs++;
     }
+    if (*ap != ')') { set_error(ctx, "invalid array argument list"); return NULL; }
 
     return aml_array_dispatch(ctx, fname, arg_strs, nargs);
 }
 
 // Dispatch pre-parsed array function call (called from both interpreter and bytecode)
-static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char arg_strs[][AML_MAX_NAME], int nargs) {
+static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char arg_strs[][AML_MAX_LINE_LEN], int nargs) {
     // zeros(n) — create zero-initialized array
     if (strcasecmp(fname, "zeros") == 0 && nargs >= 1) {
         int n = (int)aml_eval(ctx, arg_strs[0]);
+        if (ctx->error[0]) return NULL;
         if (n > 0 && n <= AM_MAX_ARRAY_SIZE) return am_array_new(n);
         return NULL;
     }
@@ -5079,7 +5847,9 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
     // randn(n, std) — random normal initialization
     if (strcasecmp(fname, "randn") == 0 && nargs >= 1) {
         int n = (int)aml_eval(ctx, arg_strs[0]);
+        if (ctx->error[0]) return NULL;
         float std = (nargs >= 2) ? aml_eval(ctx, arg_strs[1]) : 1.0f;
+        if (ctx->error[0]) return NULL;
         if (n <= 0 || n > AM_MAX_ARRAY_SIZE) return NULL;
         AM_Array* arr = am_array_new(n);
         if (!arr) return NULL;
@@ -5166,6 +5936,7 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
     if (strcasecmp(fname, "scale") == 0 && nargs >= 2) {
         AML_Var* va = resolve_var_full(ctx, arg_strs[0]);
         float scalar = aml_eval(ctx, arg_strs[1]);
+        if (ctx->error[0]) return NULL;
         if (va && va->type == AML_TYPE_ARRAY && va->array) {
             AM_Array* arr = am_array_new(va->array->len);
             if (!arr) return NULL;
@@ -5183,8 +5954,11 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
     // matrix(rows, cols, std) — create matrix with random normal init
     if (strcasecmp(fname, "matrix") == 0 && nargs >= 2) {
         int rows = (int)aml_eval(ctx, arg_strs[0]);
+        if (ctx->error[0]) return NULL;
         int cols = (int)aml_eval(ctx, arg_strs[1]);
+        if (ctx->error[0]) return NULL;
         float std = (nargs >= 3) ? aml_eval(ctx, arg_strs[2]) : 0.08f;
+        if (ctx->error[0]) return NULL;
         AM_Array* arr = am_matrix_new(rows, cols);
         if (!arr) return NULL;
         for (int j = 0; j < arr->len; j += 2) {
@@ -5201,7 +5975,9 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
     // matrix_zeros(rows, cols) — create zero-initialized matrix
     if (strcasecmp(fname, "matrix_zeros") == 0 && nargs >= 2) {
         int rows = (int)aml_eval(ctx, arg_strs[0]);
+        if (ctx->error[0]) return NULL;
         int cols = (int)aml_eval(ctx, arg_strs[1]);
+        if (ctx->error[0]) return NULL;
         return am_matrix_new(rows, cols);
     }
 
@@ -5386,6 +6162,7 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
         }
         float p = 0.1f;
         if (nargs >= 2) p = ctx_float(ctx, arg_strs[1]);
+        if (ctx->error[0]) return NULL;
         if (input_arr) {
             int n = input_arr->len;
             AM_Array* out = am_array_new(n);
@@ -5460,7 +6237,9 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
         AML_Var* vx = resolve_var_full(ctx, arg_strs[0]);
         if (!vx || vx->type != AML_TYPE_ARRAY || !vx->array) return NULL;
         int T = (int)ctx_float(ctx, arg_strs[3]);
+        if (ctx->error[0]) return NULL;
         int D = (int)ctx_float(ctx, arg_strs[4]);
+        if (ctx->error[0]) return NULL;
         if (T <= 0 || D <= 0 || T * D > vx->array->len) return NULL;
         AM_Array* out = am_array_new(T * D);
         if (!out) return NULL;
@@ -5508,7 +6287,9 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
         AML_Var* vt = resolve_var_full(ctx, arg_strs[0]); // token ids (floats cast to int)
         AML_Var* vW = resolve_var_full(ctx, arg_strs[1]); // embedding matrix, flat
         int D = (int)ctx_float(ctx, arg_strs[2]);
+        if (ctx->error[0]) return NULL;
         float alpha = ctx_float(ctx, arg_strs[3]);
+        if (ctx->error[0]) return NULL;
         if (!vt || vt->type != AML_TYPE_ARRAY || !vt->array) return NULL;
         if (!vW || vW->type != AML_TYPE_ARRAY || !vW->array) return NULL;
         if (D <= 0) return NULL;
@@ -5541,7 +6322,9 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
     if (strcasecmp(fname, "spa_connectedness") == 0 && nargs >= 3) {
         AML_Var* vE = resolve_var_full(ctx, arg_strs[0]);
         int S = (int)ctx_float(ctx, arg_strs[1]);
+        if (ctx->error[0]) return NULL;
         int D = (int)ctx_float(ctx, arg_strs[2]);
+        if (ctx->error[0]) return NULL;
         if (!vE || vE->type != AML_TYPE_ARRAY || !vE->array) return NULL;
         if (S <= 0 || D <= 0 || S * D > vE->array->len) return NULL;
         AM_Array* bias_arr = NULL;
@@ -5596,6 +6379,7 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
     if (strcasecmp(fname, "cross_entropy") == 0 && nargs >= 2) {
         AML_Var* vl = resolve_var_full(ctx, arg_strs[0]);
         int target = (int)aml_eval(ctx, arg_strs[1]);
+        if (ctx->error[0]) return NULL;
         if (vl && vl->type == AML_TYPE_ARRAY && vl->array) {
             int n = vl->array->len;
             if (target < 0 || target >= n) return NULL;
@@ -5621,6 +6405,7 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
     if (strcasecmp(fname, "embedding_lookup") == 0 && nargs >= 2) {
         AML_Var* vm = resolve_var_full(ctx, arg_strs[0]);
         int token_id = (int)aml_eval(ctx, arg_strs[1]);
+        if (ctx->error[0]) return NULL;
         if (vm && vm->type == AML_TYPE_ARRAY && vm->array && vm->array->rows > 0) {
             if (token_id < 0 || token_id >= vm->array->rows) return NULL;
             int cols = vm->array->cols;
@@ -5638,6 +6423,7 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
     if (strcasecmp(fname, "row") == 0 && nargs >= 2) {
         AML_Var* vm = resolve_var_full(ctx, arg_strs[0]);
         int ri = (int)aml_eval(ctx, arg_strs[1]);
+        if (ctx->error[0]) return NULL;
         if (vm && vm->type == AML_TYPE_ARRAY && vm->array && vm->array->rows > 0) {
             if (ri < 0 || ri >= vm->array->rows) return NULL;
             int cols = vm->array->cols;
@@ -5659,6 +6445,7 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
         AML_Var* vwpe = resolve_var_full(ctx, arg_strs[1]);
         AML_Var* vtok = resolve_var_full(ctx, arg_strs[2]);
         int T = (int)aml_eval(ctx, arg_strs[3]);
+        if (ctx->error[0]) return NULL;
         if (vwte && vwte->type == AML_TYPE_ARRAY && vwte->array && vwte->array->rows > 0 &&
             vwpe && vwpe->type == AML_TYPE_ARRAY && vwpe->array && vwpe->array->rows > 0 &&
             vtok && vtok->type == AML_TYPE_ARRAY && vtok->array && T > 0) {
@@ -5691,6 +6478,7 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
         AML_Var* vw = resolve_var_full(ctx, arg_strs[0]);
         AML_Var* vx = resolve_var_full(ctx, arg_strs[1]);
         int T = (int)aml_eval(ctx, arg_strs[2]);
+        if (ctx->error[0]) return NULL;
         if (vw && vw->type == AML_TYPE_ARRAY && vw->array && vw->array->rows > 0 &&
             vx && vx->type == AML_TYPE_ARRAY && vx->array && T > 0) {
             int out_dim = vw->array->rows;
@@ -5759,7 +6547,9 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
     if (strcasecmp(fname, "seq_rmsnorm") == 0 && nargs >= 3) {
         AML_Var* vx = resolve_var_full(ctx, arg_strs[0]);
         int T = (int)aml_eval(ctx, arg_strs[1]);
+        if (ctx->error[0]) return NULL;
         int D = (int)aml_eval(ctx, arg_strs[2]);
+        if (ctx->error[0]) return NULL;
         if (vx && vx->type == AML_TYPE_ARRAY && vx->array && T > 0 && D > 0) {
             if (T * D > vx->array->len) return NULL;
             AM_Array* out = am_array_new(T * D);
@@ -5807,7 +6597,9 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
         AML_Var* vk = resolve_var_full(ctx, arg_strs[1]);
         AML_Var* vv = resolve_var_full(ctx, arg_strs[2]);
         int T = (int)aml_eval(ctx, arg_strs[3]);
+        if (ctx->error[0]) return NULL;
         int D = (int)aml_eval(ctx, arg_strs[4]);
+        if (ctx->error[0]) return NULL;
         if (vq && vq->type == AML_TYPE_ARRAY && vq->array &&
             vk && vk->type == AML_TYPE_ARRAY && vk->array &&
             vv && vv->type == AML_TYPE_ARRAY && vv->array && T > 0 && D > 0) {
@@ -5863,8 +6655,11 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
         AML_Var* vk = resolve_var_full(ctx, arg_strs[1]);
         AML_Var* vv = resolve_var_full(ctx, arg_strs[2]);
         int T = (int)aml_eval(ctx, arg_strs[3]);
+        if (ctx->error[0]) return NULL;
         int D = (int)aml_eval(ctx, arg_strs[4]);
+        if (ctx->error[0]) return NULL;
         int n_heads = (int)aml_eval(ctx, arg_strs[5]);
+        if (ctx->error[0]) return NULL;
         if (vq && vq->type == AML_TYPE_ARRAY && vq->array &&
             vk && vk->type == AML_TYPE_ARRAY && vk->array &&
             vv && vv->type == AML_TYPE_ARRAY && vv->array &&
@@ -5954,7 +6749,9 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
         AML_Var* vl = resolve_var_full(ctx, arg_strs[0]);
         AML_Var* vt = resolve_var_full(ctx, arg_strs[1]);
         int T = (int)aml_eval(ctx, arg_strs[2]);
+        if (ctx->error[0]) return NULL;
         int V = (int)aml_eval(ctx, arg_strs[3]);
+        if (ctx->error[0]) return NULL;
         if (vl && vl->type == AML_TYPE_ARRAY && vl->array &&
             vt && vt->type == AML_TYPE_ARRAY && vt->array && T > 0 && V > 0) {
             if (T * V > vl->array->len || T > vt->array->len) return NULL;
@@ -6008,7 +6805,7 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
 }
 
 // Execute a single line in Level 2 context
-static int aml_exec_line(AML_ExecCtx* ctx, int idx) {
+static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
     char* text = ctx->lines[idx].text;
 
     // v4.0: propagate return — if has_return is set, stop executing
@@ -6020,55 +6817,43 @@ static int aml_exec_line(AML_ExecCtx* ctx, int idx) {
         return aml_find_block_end(ctx->lines, ctx->nlines, idx);
     }
 
-    // --- v4.0: return statement ---
+    // Return owns its value until the function call transfers it to the caller.
     if (strncmp(text, "return ", 7) == 0 || strcmp(text, "return") == 0) {
         const char* rhs = text + 6;
-        while (*rhs == ' ') rhs++;
-        if (*rhs) {
-            // Try array builtin expression first (zeros, randn, add, mul, scale, literal)
-            AM_Array* arr = aml_try_array_expr(ctx, rhs);
-            if (arr) {
-                ctx->has_return = 1;
-                ctx->return_type = AML_TYPE_ARRAY;
-                ctx->return_value = 0;
-                ctx->return_array = arr;
-            } else {
-                // Check if RHS is just an array variable name
-                char rhs_name[AML_MAX_NAME] = {0};
-                const char* rp = rhs;
-                int ri = 0;
-                while ((isalnum((unsigned char)*rp) || *rp == '_') && ri < AML_MAX_NAME - 1)
-                    rhs_name[ri++] = *rp++;
-                rhs_name[ri] = 0;
-                while (*rp == ' ') rp++;
-                if (ri > 0 && *rp == '\0') {
-                    AML_Var* src = resolve_var_full(ctx, rhs_name);
-                    if (src && src->type == AML_TYPE_ARRAY && src->array) {
-                        ctx->has_return = 1;
-                        ctx->return_type = AML_TYPE_ARRAY;
-                        ctx->return_value = 0;
-                        ctx->return_array = src->array; // refcount bumped in aml_call_func
-                        return ctx->nlines;
-                    }
-                }
-                // Scalar return (may call user functions via aml_eval)
-                float val = aml_eval(ctx, rhs);
-                // Check if a user function returned an array through eval
-                if (ctx->has_return && ctx->return_array) {
-                    // Already set by the function call, keep it
-                } else {
-                    ctx->has_return = 1;
-                    ctx->return_type = AML_TYPE_FLOAT;
-                    ctx->return_value = val;
-                    ctx->return_array = NULL;
-                }
-            }
-        } else {
-            ctx->has_return = 1;
-            ctx->return_value = 0;
-            ctx->return_array = NULL;
+        while (isspace((unsigned char)*rhs)) rhs++;
+        AML_Var value = {0};
+        if (*rhs && aml_eval_value(ctx, rhs, &value)) {
+            aml_value_clear(&value);
+            return ctx->nlines;
         }
-        return ctx->nlines; // stop block execution
+        aml_clear_return(ctx);
+        ctx->has_return = 1;
+        ctx->return_type = value.type;
+        ctx->return_value = value.value;
+        ctx->return_array = value.array;
+        ctx->return_string = value.string;
+        return ctx->nlines;
+    }
+
+    // PRINT evaluates a value; ECHO retains its existing literal command form.
+    if (strncasecmp(text, "PRINT", 5) == 0 &&
+        (!text[5] || isspace((unsigned char)text[5]))) {
+        AML_Var value = {0};
+        if (!aml_eval_value(ctx, text + 5, &value)) {
+            if (value.type == AML_TYPE_STRING) {
+                fwrite(value.string->data, 1, (size_t)value.string->byte_len, stdout);
+            } else if (value.type == AML_TYPE_ARRAY) {
+                putchar('[');
+                for (int i = 0; i < value.array->len; i++)
+                    printf("%s%.9g", i ? ", " : "", (double)value.array->data[i]);
+                putchar(']');
+            } else {
+                printf("%.9g", (double)value.value);
+            }
+            putchar('\n');
+        }
+        aml_value_clear(&value);
+        return idx + 1;
     }
 
     // --- if/else ---
@@ -6112,7 +6897,13 @@ static int aml_exec_line(AML_ExecCtx* ctx, int idx) {
         int body_end = aml_find_block_end(ctx->lines, ctx->nlines, idx);
         int iterations = 0;
 
-        while (!ctx->error[0] && aml_eval(ctx, cond) != 0.0f && iterations < 10000 && !ctx->has_return) {
+        while (!ctx->error[0] && !ctx->has_return) {
+            float active = aml_eval(ctx, cond);
+            if (ctx->error[0] || active == 0.0f) break;
+            if (iterations >= 10000) {
+                set_error_at(ctx, ctx->lines[idx].lineno, "loop iteration limit exceeded");
+                break;
+            }
             aml_exec_block(ctx, idx + 1, body_end);
             iterations++;
         }
@@ -6155,8 +6946,11 @@ static int aml_exec_line(AML_ExecCtx* ctx, int idx) {
                 *dst++ = '\n';
             }
             *dst = 0;
-            am_spawn_launch(spawn_name, script);
+            if (am_spawn_launch_globals(spawn_name, script, &ctx->globals) < 0)
+                set_error_at(ctx, ctx->lines[idx].lineno, "cannot launch worker");
             free(script);
+        } else {
+            set_error_at(ctx, ctx->lines[idx].lineno, "worker script allocation failed");
         }
 
         return body_end;
@@ -6212,9 +7006,12 @@ static int aml_exec_line(AML_ExecCtx* ctx, int idx) {
     // --- v4.0: array element write: name[index] = expr ---
     {
         // Look for pattern: identifier[expr] = expr
-        const char* bracket = strchr(text, '[');
-        if (bracket) {
-            const char* close_bracket = strchr(bracket, ']');
+        const char* bracket = text;
+        if (isalpha((unsigned char)*bracket) || *bracket == '_')
+            while (isalnum((unsigned char)*bracket) || *bracket == '_') bracket++;
+        while (isspace((unsigned char)*bracket)) bracket++;
+        if (*bracket == '[' && bracket > text) {
+            const char* close_bracket = aml_value_close(bracket);
             if (close_bracket) {
                 const char* eq_after = close_bracket + 1;
                 while (*eq_after == ' ') eq_after++;
@@ -6242,6 +7039,7 @@ static int aml_exec_line(AML_ExecCtx* ctx, int idx) {
 
                         // Evaluate value
                         float val = aml_eval(ctx, eq_after + 1);
+                        if (ctx->error[0]) return idx + 1;
 
                         // Find the array variable and write to it
                         AML_Var* var = resolve_var_full(ctx, varname);
@@ -6256,123 +7054,61 @@ static int aml_exec_line(AML_ExecCtx* ctx, int idx) {
         }
     }
 
-    // --- assignment: name = expr ---
+    // Assignment and standalone calls share the typed expression evaluator.
     {
-        const char* eq = strchr(text, '=');
-        if (eq && eq > text && eq[1] != '=' && eq[-1] != '!' &&
-            eq[-1] != '<' && eq[-1] != '>') {
-            // extract variable name
-            char varname[AML_MAX_NAME] = {0};
-            const char* p = text;
-            int ni = 0;
-            while (p < eq && ni < AML_MAX_NAME - 1) {
-                if (!isspace((unsigned char)*p))
-                    varname[ni++] = *p;
-                p++;
-            }
-            varname[ni] = 0;
-
-            if (ni > 0 && (isalpha((unsigned char)varname[0]) || varname[0] == '_')) {
-                // v4.0: try array expression first (builtins only)
-                const char* rhs = eq + 1;
-                while (*rhs == ' ') rhs++;
-                AM_Array* arr = aml_try_array_expr(ctx, rhs);
-                if (arr) {
-                    AML_Symtab* tab = (ctx->call_depth > 0)
-                        ? &ctx->locals[ctx->call_depth - 1]
-                        : &ctx->globals;
-                    symtab_set_array(tab, varname, arr);
-                    return idx + 1;
-                }
-
-                // v4.0: also check if RHS is just a variable name holding an array
-                {
-                    char rhs_name[AML_MAX_NAME] = {0};
-                    const char* rp = rhs;
-                    int ri = 0;
-                    while ((isalnum((unsigned char)*rp) || *rp == '_') && ri < AML_MAX_NAME - 1)
-                        rhs_name[ri++] = *rp++;
-                    rhs_name[ri] = 0;
-                    while (*rp == ' ') rp++;
-                    if (ri > 0 && *rp == '\0') {
-                        // RHS is a bare identifier — check if it's an array variable
-                        AML_Var* src = resolve_var_full(ctx, rhs_name);
-                        if (src && src->type == AML_TYPE_ARRAY && src->array) {
-                            AM_Array* clone = am_array_clone(src->array);
-                            if (clone) {
-                                AML_Symtab* tab = (ctx->call_depth > 0)
-                                    ? &ctx->locals[ctx->call_depth - 1]
-                                    : &ctx->globals;
-                                symtab_set_array(tab, varname, clone);
-                                return idx + 1;
-                            }
-                        }
-                    }
-                }
-
-                float val = aml_eval(ctx, eq + 1);
-
-                // v4.0: check if a user function returned an array
-                if (ctx->has_return && ctx->return_array) {
-                    AML_Symtab* tab = (ctx->call_depth > 0)
-                        ? &ctx->locals[ctx->call_depth - 1]
-                        : &ctx->globals;
-                    symtab_set_array(tab, varname, ctx->return_array);
-                    ctx->has_return = 0;
-                    ctx->return_array = NULL;
-                    return idx + 1;
-                }
-                ctx->has_return = 0;
-
-                if (ctx->call_depth > 0)
-                    symtab_set(&ctx->locals[ctx->call_depth - 1], varname, val);
-                else
-                    symtab_set(&ctx->globals, varname, val);
-                return idx + 1;
+        const char* p = text;
+        char name[AML_MAX_NAME] = {0};
+        int n = 0;
+        if (isalpha((unsigned char)*p) || *p == '_') {
+            while (isalnum((unsigned char)*p) || *p == '_') {
+                if (n < AML_MAX_NAME - 1) name[n] = *p;
+                n++; p++;
             }
         }
-    }
-
-    // --- function call: name(args) ---
-    {
-        char* paren = strchr(text, '(');
-        if (paren && !strchr(text, '=')) {
-            char fname[AML_MAX_NAME] = {0};
-            int ni = 0;
-            const char* p = text;
-            while (p < paren && ni < AML_MAX_NAME - 1) {
-                if (!isspace((unsigned char)*p))
-                    fname[ni++] = *p;
-                p++;
+        while (isspace((unsigned char)*p)) p++;
+        if (n && *p == '=' && p[1] != '=') {
+            if (n >= AML_MAX_NAME) {
+                set_error_at(ctx, ctx->lines[idx].lineno, "variable name too long");
+                return idx + 1;
             }
-            fname[ni] = 0;
-
-            // find function
-            for (int fi = 0; fi < ctx->funcs.count; fi++) {
-                if (strcmp(ctx->funcs.funcs[fi].name, fname) == 0) {
-                    // parse args
-                    float args[AML_MAX_PARAMS];
-                    int nargs = 0;
-                    char argbuf[AML_MAX_LINE_LEN];
-                    char* ap = paren + 1;
-                    char* close = strchr(ap, ')');
-                    if (close) {
-                        int alen = (int)(close - ap);
-                        memcpy(argbuf, ap, alen);
-                        argbuf[alen] = 0;
-                        // split by comma
-                        char* save = NULL;
-                        for (char* tok = strtok_r(argbuf, ",", &save);
-                             tok && nargs < AML_MAX_PARAMS;
-                             tok = strtok_r(NULL, ",", &save)) {
-                            while (*tok == ' ') tok++;
-                            args[nargs++] = aml_eval(ctx, tok);
-                        }
-                    }
-                    aml_call_func(ctx, &ctx->funcs.funcs[fi], args, nargs, ctx->lines[idx].lineno);
+            const char* rhs = p + 1;
+            while (isspace((unsigned char)*rhs)) rhs++;
+            AML_Var value = {0};
+            if (aml_eval_value(ctx, rhs, &value)) {
+                aml_value_clear(&value);
+                return idx + 1;
+            }
+            // Preserve the original deep-copy contract for bare array aliases.
+            const char* end = rhs;
+            while (isalnum((unsigned char)*end) || *end == '_') end++;
+            while (isspace((unsigned char)*end)) end++;
+            if (value.type == AML_TYPE_ARRAY && !*end) {
+                AM_Array* copy = am_array_clone(value.array);
+                am_array_free(value.array);
+                value.array = copy;
+                if (!copy) {
+                    set_error_at(ctx, ctx->lines[idx].lineno, "array allocation failed");
                     return idx + 1;
                 }
             }
+            AML_Symtab* tab = ctx->call_depth > 0
+                ? &ctx->locals[ctx->call_depth - 1] : &ctx->globals;
+            int rc;
+            if (value.type == AML_TYPE_STRING) rc = symtab_set_string(tab, name, value.string);
+            else if (value.type == AML_TYPE_ARRAY) rc = symtab_set_array(tab, name, value.array);
+            else rc = symtab_set(tab, name, value.value);
+            if (rc) {
+                aml_value_clear(&value);
+                set_error_at(ctx, ctx->lines[idx].lineno, "variable limit exceeded");
+            }
+            return idx + 1;
+        }
+        if (n && n < AML_MAX_NAME && *p == '(' &&
+            (aml_value_function(ctx, name) || aml_text_function(name))) {
+            AML_Var value = {0};
+            aml_eval_value(ctx, text, &value);
+            aml_value_clear(&value);
+            return idx + 1;
         }
     }
 
@@ -6446,6 +7182,40 @@ static int aml_exec_line(AML_ExecCtx* ctx, int idx) {
     return idx + 1;
 }
 
+typedef struct {
+    char context_base[256];
+    char thread_base[256];
+    char source[AML_MAX_SOURCE_PATH];
+} AML_SourceScope;
+
+static void aml_enter_origin(AML_ExecCtx* ctx, int idx, AML_SourceScope* saved) {
+    memcpy(saved->context_base, ctx->base_dir, sizeof(saved->context_base));
+    memcpy(saved->thread_base, g_base_dir, sizeof(saved->thread_base));
+    memcpy(saved->source, g_source_path, sizeof(saved->source));
+    const char* origin = ctx->lines[idx].origin;
+    snprintf(g_source_path, sizeof(g_source_path), "%s", origin);
+    snprintf(ctx->base_dir, sizeof(ctx->base_dir), "%s", origin);
+    char* slash = strrchr(ctx->base_dir, '/');
+    if (slash == ctx->base_dir) slash[1] = 0;
+    else if (slash) *slash = 0;
+    else snprintf(ctx->base_dir, sizeof(ctx->base_dir), ".");
+    snprintf(g_base_dir, sizeof(g_base_dir), "%s", ctx->base_dir);
+}
+
+static void aml_leave_origin(AML_ExecCtx* ctx, const AML_SourceScope* saved) {
+    memcpy(ctx->base_dir, saved->context_base, sizeof(saved->context_base));
+    memcpy(g_base_dir, saved->thread_base, sizeof(saved->thread_base));
+    memcpy(g_source_path, saved->source, sizeof(saved->source));
+}
+
+static int aml_exec_line(AML_ExecCtx* ctx, int idx) {
+    AML_SourceScope saved;
+    aml_enter_origin(ctx, idx, &saved);
+    int next = aml_exec_line_body(ctx, idx);
+    aml_leave_origin(ctx, &saved);
+    return next;
+}
+
 // Execute a block of lines [start, end)
 static int aml_exec_block(AML_ExecCtx* ctx, int start, int end) {
     int i = start;
@@ -6473,7 +7243,7 @@ int am_exec(const char* script) {
     if (!lines) return 2;
 
     int nlines = aml_preprocess(script, lines, AML_MAX_LINES);
-    if (nlines == 0) { free(lines); return 0; }
+    if (nlines <= 0) { free(lines); return nlines < 0 ? 1 : 0; }
 
     // set up execution context
     AML_ExecCtx ctx;
@@ -6482,14 +7252,15 @@ int am_exec(const char* script) {
     ctx.lines = lines;
     ctx.nlines = nlines;
 
-    // v4.0: restore persistent globals if enabled
-    persistent_restore(&ctx.globals);
-
     // register built-in functions (native AML, not external bindings)
     aml_register_builtins(&ctx);
 
     // first pass: register user-defined function definitions
     aml_register_funcs(&ctx);
+    if (ctx.error[0]) { free(lines); return 1; }
+
+    // Restore only after the entire prepared program has passed validation.
+    persistent_restore(&ctx.globals);
 
     // second pass: execute top-level block
     aml_exec_block(&ctx, 0, nlines);
@@ -6497,6 +7268,7 @@ int am_exec(const char* script) {
     // v4.0: save globals to persistent storage, then clean up
     persistent_save(&ctx.globals);
     symtab_clear_arrays(&ctx.globals);
+    aml_clear_return(&ctx);
 
     free(lines);
 
@@ -6543,13 +7315,14 @@ void* am_program_open(const char* script) {
     if (!p->lines) { free(p); return NULL; }
 
     p->ctx.nlines = aml_preprocess(script, p->lines, AML_MAX_LINES);
-    if (p->ctx.nlines == 0) { free(p->lines); free(p); return NULL; }
+    if (p->ctx.nlines <= 0) { free(p->lines); free(p); return NULL; }
 
     snprintf(p->ctx.base_dir, sizeof(p->ctx.base_dir), "%s", g_base_dir);
     p->ctx.lines = p->lines;
-    persistent_restore(&p->ctx.globals);
     aml_register_builtins(&p->ctx);
     aml_register_funcs(&p->ctx);
+    if (p->ctx.error[0]) { free(p->lines); free(p); return NULL; }
+    persistent_restore(&p->ctx.globals);
     return p;
 }
 
@@ -6578,6 +7351,7 @@ int am_program_close(void* handle) {
 
     persistent_save(&p->ctx.globals);
     symtab_clear_arrays(&p->ctx.globals);
+    aml_clear_return(&p->ctx);
 
     int rc = 0;
     if (p->ctx.error[0]) {
@@ -6632,7 +7406,7 @@ enum {
 typedef struct {
     int opcode;
     char result[AML_MAX_NAME];     // LHS variable name
-    char args[8][AML_MAX_NAME];    // pre-split argument strings
+    char args[AML_MAX_PARAMS][AML_MAX_LINE_LEN]; // complete argument expressions
     int nargs;
     int orig_idx;                  // original line index (for error reporting)
 } AML_BytecodeOp;
@@ -6647,7 +7421,7 @@ typedef struct {
 
 // ── Bytecode compiler: parse each line into opcode + args ──
 
-static int bc_parse_func_call(const char* rhs, char* fname, char args[][AML_MAX_NAME], int* nargs) {
+static int bc_parse_func_call(const char* rhs, char* fname, char args[][AML_MAX_LINE_LEN], int* nargs) {
     // Parse: fname(arg1, arg2, ...) from RHS
     while (*rhs == ' ') rhs++;
     int fi = 0;
@@ -6660,21 +7434,39 @@ static int bc_parse_func_call(const char* rhs, char* fname, char args[][AML_MAX_
     if (*p != '(') return 0;
     p++; // skip '('
     *nargs = 0;
-    while (*p && *p != ')' && *nargs < 8) {
-        while (*p == ' ' || *p == ',') p++;
+    while (*p && *p != ')' && *nargs < AML_MAX_PARAMS) {
+        while (isspace((unsigned char)*p)) p++;
         if (*p == ')') break;
         int ai = 0;
         int pdepth = 0;
-        while (*p && (pdepth > 0 || (*p != ',' && *p != ')')) && ai < AML_MAX_NAME - 1) {
-            if (*p == '(') pdepth++;
-            if (*p == ')') { if (pdepth > 0) pdepth--; else break; }
+        char quote = 0;
+        while (*p && ai < AML_MAX_LINE_LEN - 1) {
+            if (quote) {
+                if (*p == '\\' && p[1]) {
+                    if (ai + 2 >= AML_MAX_LINE_LEN) return 0;
+                    args[*nargs][ai++] = *p++;
+                    args[*nargs][ai++] = *p++;
+                    continue;
+                }
+                if (*p == quote) quote = 0;
+            } else if (*p == '"' || *p == '\'') quote = *p;
+            else if (*p == '(' || *p == '[') pdepth++;
+            else if (*p == ')' || *p == ']') { if (!pdepth) break; pdepth--; }
+            else if (*p == ',' && !pdepth) break;
             args[*nargs][ai++] = *p++;
         }
-        while (ai > 0 && args[*nargs][ai-1] == ' ') ai--;
+        while (ai > 0 && isspace((unsigned char)args[*nargs][ai-1])) ai--;
+        if (!ai || quote || pdepth) return 0;
         args[*nargs][ai] = 0;
         (*nargs)++;
+        if (*p != ',') break;
+        p++;
+        while (isspace((unsigned char)*p)) p++;
+        if (*p == ')') return 0;
     }
-    return 1;
+    if (*p++ != ')') return 0;
+    while (isspace((unsigned char)*p)) p++;
+    return !*p || *p == '#';
 }
 
 static int bc_fname_to_opcode(const char* fname) {
@@ -6687,6 +7479,36 @@ static int bc_fname_to_opcode(const char* fname) {
     if (strcasecmp(fname, "mul") == 0) return BC_CALL_MUL;
     if (strcasecmp(fname, "silu") == 0) return BC_CALL_SILU;
     return -1; // unknown
+}
+
+static int bc_array_arity(int opcode) {
+    switch (opcode) {
+    case BC_CALL_ADD: case BC_CALL_MUL: return 2;
+    case BC_CALL_SILU: return 1;
+    case BC_CALL_SEQ_MATVEC: case BC_CALL_SEQ_RMSNORM: return 3;
+    case BC_CALL_SEQ_EMBED: case BC_CALL_SEQ_CROSS_ENTROPY: return 4;
+    case BC_CALL_MULTI_HEAD_ATTN: return 6;
+    default: return 0;
+    }
+}
+
+// Fastops only consume direct names/numbers. General expressions use the
+// interpreter once, preserving nested calls, quoted arguments, and effects.
+static int bc_simple_arguments(const AML_BytecodeOp* op) {
+    for (int i = 0; i < op->nargs; i++) {
+        const char* p = op->args[i];
+        if (isalpha((unsigned char)*p) || *p == '_') {
+            while (isalnum((unsigned char)*p) || *p == '_') p++;
+        } else {
+            char* end;
+            strtof(p, &end);
+            if (end == p) return 0;
+            p = end;
+        }
+        while (isspace((unsigned char)*p)) p++;
+        if (*p) return 0;
+    }
+    return 1;
 }
 
 static void bc_compile_line(AML_BytecodeOp* op, const char* text, int idx) {
@@ -6719,7 +7541,7 @@ static void bc_compile_line(AML_BytecodeOp* op, const char* text, int idx) {
         if (strncasecmp(sub, "CLIP_GRADS ", 11) == 0 || strncasecmp(sub, "CLIP ", 5) == 0) {
             op->opcode = BC_TAPE_CLIP_GRADS;
             const char* a = strchr(sub, ' ');
-            if (a) { while (*a == ' ') a++; snprintf(op->args[0], AML_MAX_NAME, "%s", a); }
+            if (a) { while (*a == ' ') a++; snprintf(op->args[0], AML_MAX_LINE_LEN, "%s", a); }
             op->nargs = 1; return;
         }
         if (strncasecmp(sub, "ADAMW_STEP ", 11) == 0 || strncasecmp(sub, "ADAMW ", 6) == 0) {
@@ -6731,17 +7553,16 @@ static void bc_compile_line(AML_BytecodeOp* op, const char* text, int idx) {
         op->opcode = BC_FALLBACK; return;
     }
 
-    // Assignment: var = expr
-    const char* eq = strchr(text, '=');
-    if (eq && eq > text && eq[1] != '=' && eq[-1] != '!' && eq[-1] != '<' && eq[-1] != '>') {
-        // Extract LHS var name
-        const char* p = text;
-        int ni = 0;
-        while (p < eq && ni < AML_MAX_NAME - 1) {
-            if (!isspace((unsigned char)*p)) op->result[ni++] = *p;
-            p++;
-        }
-        op->result[ni] = 0;
+    // Only an identifier immediately followed by '=' is an assignment.
+    // PRINT/return/call arguments may contain '=' and array-call text in quotes.
+    const char* eq = text;
+    if (isalpha((unsigned char)*eq) || *eq == '_')
+        while (isalnum((unsigned char)*eq) || *eq == '_') eq++;
+    size_t name_len = (size_t)(eq - text);
+    while (isspace((unsigned char)*eq)) eq++;
+    if (name_len > 0 && name_len < AML_MAX_NAME && *eq == '=' && eq[1] != '=') {
+        memcpy(op->result, text, name_len);
+        op->result[name_len] = 0;
 
         // Parse RHS as function call
         const char* rhs = eq + 1;
@@ -6749,7 +7570,9 @@ static void bc_compile_line(AML_BytecodeOp* op, const char* text, int idx) {
         char fname[AML_MAX_NAME] = {0};
         if (bc_parse_func_call(rhs, fname, op->args, &op->nargs)) {
             int opc = bc_fname_to_opcode(fname);
-            if (opc >= 0) { op->opcode = opc; return; }
+            if (opc >= 0 && op->nargs == bc_array_arity(opc) && bc_simple_arguments(op)) {
+                op->opcode = opc; return;
+            }
         }
         // Unknown function or not a function call
         op->opcode = BC_FALLBACK; return;
@@ -6760,6 +7583,7 @@ static void bc_compile_line(AML_BytecodeOp* op, const char* text, int idx) {
 
 void* am_compile(const char* script) {
     if (!script || !*script) return NULL;
+    g_error[0] = 0;
 
     AM_Compiled* c = (AM_Compiled*)calloc(1, sizeof(AM_Compiled));
     if (!c) return NULL;
@@ -6768,7 +7592,7 @@ void* am_compile(const char* script) {
     if (!c->lines) { free(c); return NULL; }
 
     c->nlines = aml_preprocess(script, c->lines, AML_MAX_LINES);
-    if (c->nlines == 0) { free(c->lines); free(c); return NULL; }
+    if (c->nlines <= 0) { free(c->lines); free(c); return NULL; }
 
     // Pre-register builtins and functions
     AML_ExecCtx tmp;
@@ -6777,6 +7601,7 @@ void* am_compile(const char* script) {
     tmp.nlines = c->nlines;
     aml_register_builtins(&tmp);
     aml_register_funcs(&tmp);
+    if (tmp.error[0]) { free(c->lines); free(c); return NULL; }
     memcpy(&c->funcs, &tmp.funcs, sizeof(AML_Functab));
 
     // Compile to bytecode
@@ -6798,17 +7623,35 @@ static inline AM_Array* bc_get_array(AML_ExecCtx* ctx, const char* name) {
 }
 
 static inline float bc_get_float(AML_ExecCtx* ctx, const char* name) {
-    float val = 0;
-    resolve_var(ctx, name, &val);
-    return val;
+    return aml_eval_arg(ctx, name);
 }
 
 static inline void bc_set_array(AML_ExecCtx* ctx, const char* name, AM_Array* arr) {
-    if (arr) symtab_set_array(&ctx->globals, name, arr);
+    if (arr && symtab_set_array(&ctx->globals, name, arr)) {
+        am_array_free(arr);
+        set_error(ctx, "variable limit exceeded");
+    }
+}
+
+static int bc_array_types_match(AML_ExecCtx* ctx, const AML_BytecodeOp* op) {
+    int arrays;
+    switch (op->opcode) {
+    case BC_CALL_SILU: case BC_CALL_SEQ_RMSNORM: arrays = 1; break;
+    case BC_CALL_SEQ_EMBED: case BC_CALL_MULTI_HEAD_ATTN: arrays = 3; break;
+    default: arrays = 2; break;
+    }
+    for (int i = 0; i < op->nargs; i++) {
+        AML_Var* v = resolve_var_full(ctx, op->args[i]);
+        if (i < arrays) {
+            if (!v || v->type != AML_TYPE_ARRAY || !v->array) return 0;
+        } else if (v && v->type != AML_TYPE_FLOAT) return 0;
+    }
+    return 1;
 }
 
 int am_exec_compiled(void* handle) {
     if (!handle) return 0;
+    if (!g_am_initialized) am_init();
     AM_Compiled* c = (AM_Compiled*)handle;
     g_error[0] = 0;
 
@@ -6818,11 +7661,15 @@ int am_exec_compiled(void* handle) {
     ctx.nlines = c->nlines;
     memcpy(&ctx.funcs, &c->funcs, sizeof(AML_Functab));
     persistent_restore(&ctx.globals);
-    aml_register_builtins(&ctx);
-    aml_register_funcs(&ctx);
-
-    for (int i = 0; i < c->nops; i++) {
+    for (int i = 0; i < c->nops && !ctx.has_return && !ctx.error[0]; i++) {
         AML_BytecodeOp* op = &c->ops[i];
+        AML_SourceScope saved;
+        aml_enter_origin(&ctx, op->orig_idx, &saved);
+        if (bc_array_arity(op->opcode) && !bc_array_types_match(&ctx, op)) {
+            i = aml_exec_line(&ctx, op->orig_idx) - 1;
+            aml_leave_origin(&ctx, &saved);
+            continue;
+        }
         switch (op->opcode) {
 
         case BC_NOP: break;
@@ -6853,7 +7700,9 @@ int am_exec_compiled(void* handle) {
         }
 
         case BC_TAPE_APPLY_ACCUM: {
-            int n = (int)bc_get_float(&ctx, op->args[0]);
+            float value = bc_get_float(&ctx, op->args[0]);
+            if (ctx.error[0]) break;
+            int n = (int)value;
             if (n < 1) n = 1;
             am_tape_apply_accum(n);
             break;
@@ -6861,6 +7710,7 @@ int am_exec_compiled(void* handle) {
 
         case BC_TAPE_CLIP_GRADS: {
             float max_norm = bc_get_float(&ctx, op->args[0]);
+            if (ctx.error[0]) break;
             if (max_norm <= 0) max_norm = 1.0f;
             float norm = am_tape_clip_grads(max_norm);
             symtab_set(&ctx.globals, "grad_norm", norm);
@@ -6872,6 +7722,7 @@ int am_exec_compiled(void* handle) {
             float wd = op->args[1][0] ? bc_get_float(&ctx, op->args[1]) : 0.1f;
             float b1 = op->args[2][0] ? bc_get_float(&ctx, op->args[2]) : 0.9f;
             float b2 = op->args[3][0] ? bc_get_float(&ctx, op->args[3]) : 0.95f;
+            if (ctx.error[0]) break;
             am_tape_adamw_step(lr, wd, b1, b2);
 #ifdef USE_CUDA
             for (int pi = 0; pi < g_tape.count; pi++) {
@@ -6979,21 +7830,25 @@ int am_exec_compiled(void* handle) {
                 [BC_CALL_SEQ_CROSS_ENTROPY] = "seq_cross_entropy",
             };
             AM_Array* out = aml_array_dispatch(&ctx, bc_fnames[op->opcode], op->args, op->nargs);
-            if (out) bc_set_array(&ctx, op->result, out);
+            if (ctx.error[0]) am_array_free(out);
+            else if (out) bc_set_array(&ctx, op->result, out);
+            else i = aml_exec_line(&ctx, op->orig_idx) - 1;
             break;
         }
 
         case BC_FALLBACK:
         default:
-            aml_exec_line(&ctx, op->orig_idx);
+            i = aml_exec_line(&ctx, op->orig_idx) - 1;
             break;
         }
 
+        aml_leave_origin(&ctx, &saved);
         if (ctx.error[0]) break;
     }
 
     persistent_save(&ctx.globals);
     symtab_clear_arrays(&ctx.globals);
+    aml_clear_return(&ctx);
 
     if (ctx.error[0]) {
         snprintf(g_error, sizeof(g_error), "%s", ctx.error);
@@ -7023,8 +7878,13 @@ int am_exec_source(const char* script, const char* source_path) {
                  sizeof(g_base_dir) - 1);
         return 1;
     }
+    char canonical[AML_MAX_SOURCE_PATH];
+    if (aml_canonical_source(source_path, canonical, 0) != 0) return 1;
     char saved_base[sizeof(g_base_dir)];
+    char saved_source[sizeof(g_source_path)];
     memcpy(saved_base, g_base_dir, sizeof(saved_base));
+    memcpy(saved_source, g_source_path, sizeof(saved_source));
+    snprintf(g_source_path, sizeof(g_source_path), "%s", canonical);
     if (slash) {
         memcpy(g_base_dir, source_path, n);
         g_base_dir[n] = 0;
@@ -7033,6 +7893,7 @@ int am_exec_source(const char* script, const char* source_path) {
     }
     int rc = am_exec(script);
     memcpy(g_base_dir, saved_base, sizeof(g_base_dir));
+    memcpy(g_source_path, saved_source, sizeof(g_source_path));
     return rc;
 }
 
@@ -8815,4 +9676,174 @@ AM_MethodSteering am_method_step(float dt) {
 
 AM_MethodState* am_method_get_state(void) {
     return &M;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// IMMUTABLE UTF-8 TEXT — codepoint indexing, independent of the current locale
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Decode one Unicode scalar value. The terminating C NUL is outside the text
+// domain; remaining is the number of bytes before that terminator.
+static int am_string_decode_utf8(const unsigned char* src, int remaining, int* cp) {
+    if (remaining <= 0) return -1;
+    unsigned int lead = src[0], value, minimum;
+    int width;
+    if (lead > 0 && lead < 0x80) {
+        *cp = (int)lead;
+        return 1;
+    }
+    if (lead >= 0xC2 && lead <= 0xDF) {
+        width = 2; value = lead & 0x1F; minimum = 0x80;
+    } else if (lead >= 0xE0 && lead <= 0xEF) {
+        width = 3; value = lead & 0x0F; minimum = 0x800;
+    } else if (lead >= 0xF0 && lead <= 0xF4) {
+        width = 4; value = lead & 0x07; minimum = 0x10000;
+    } else {
+        return -1;
+    }
+    if (remaining < width) return -1;
+    for (int i = 1; i < width; i++) {
+        if ((src[i] & 0xC0) != 0x80) return -1;
+        value = (value << 6) | (src[i] & 0x3F);
+    }
+    if (value < minimum || value > 0x10FFFF ||
+        (value >= 0xD800 && value <= 0xDFFF)) return -1;
+    *cp = (int)value;
+    return width;
+}
+
+// Allocate a fresh owner, including for empty strings and full-range slices.
+static AM_String* am_string_alloc(int byte_len, int len) {
+    if (byte_len < 0 || byte_len > AM_MAX_STRING_BYTES) return NULL;
+    AM_String* text = (AM_String*)malloc(sizeof(*text));
+    if (!text) return NULL;
+    text->data = (char*)malloc((size_t)byte_len + 1);
+    if (!text->data) { free(text); return NULL; }
+    text->byte_len = byte_len;
+    text->len = len;
+    text->refcount = 1;
+    text->data[byte_len] = 0;
+    return text;
+}
+
+AM_String* am_string_new(const char* utf8) {
+    if (!utf8) return NULL;
+    int byte_len = 0;
+    while (byte_len <= AM_MAX_STRING_BYTES && utf8[byte_len]) byte_len++;
+    if (byte_len > AM_MAX_STRING_BYTES) return NULL;
+
+    int len = 0, pos = 0;
+    while (pos < byte_len) {
+        int cp;
+        int width = am_string_decode_utf8((const unsigned char*)utf8 + pos,
+                                          byte_len - pos, &cp);
+        if (width < 0) return NULL;
+        pos += width;
+        len++;
+    }
+    AM_String* text = am_string_alloc(byte_len, len);
+    if (text) memcpy(text->data, utf8, (size_t)byte_len);
+    return text;
+}
+
+void am_string_ref(AM_String* text) {
+    if (text) __atomic_add_fetch(&text->refcount, 1, __ATOMIC_RELAXED);
+}
+
+void am_string_free(AM_String* text) {
+    if (!text || __atomic_sub_fetch(&text->refcount, 1, __ATOMIC_ACQ_REL) > 0) return;
+    free(text->data);
+    free(text);
+}
+
+AM_String* am_string_concat(const AM_String* a, const AM_String* b) {
+    if (!a || !b || a->byte_len > AM_MAX_STRING_BYTES - b->byte_len) return NULL;
+    AM_String* text = am_string_alloc(a->byte_len + b->byte_len, a->len + b->len);
+    if (text) {
+        memcpy(text->data, a->data, (size_t)a->byte_len);
+        memcpy(text->data + a->byte_len, b->data, (size_t)b->byte_len);
+    }
+    return text;
+}
+
+// Strings created by this API retain valid UTF-8 and codepoint counts.
+static int am_string_byte_offset(const AM_String* text, int index) {
+    int pos = 0;
+    for (int i = 0; i < index; i++) {
+        int cp;
+        int width = am_string_decode_utf8((const unsigned char*)text->data + pos,
+                                          text->byte_len - pos, &cp);
+        if (width < 0) return -1;
+        pos += width;
+    }
+    return pos;
+}
+
+static int am_string_clamp_index(int index, int len) {
+    if (index < 0) index += len;
+    if (index < 0) return 0;
+    return index > len ? len : index;
+}
+
+AM_String* am_string_slice(const AM_String* text, int start, int end) {
+    if (!text) return NULL;
+    start = am_string_clamp_index(start, text->len);
+    end = am_string_clamp_index(end, text->len);
+    if (end <= start) return am_string_new("");
+    int first = am_string_byte_offset(text, start);
+    int last = am_string_byte_offset(text, end);
+    if (first < 0 || last < first) return NULL;
+    AM_String* out = am_string_alloc(last - first, end - start);
+    if (out) memcpy(out->data, text->data + first, (size_t)(last - first));
+    return out;
+}
+
+int am_string_find(const AM_String* text, const AM_String* needle) {
+    if (!text || !needle) return -1;
+    // A valid needle begins with ASCII or a UTF-8 leading byte, so a byte
+    // match cannot begin inside a multibyte codepoint's continuation bytes.
+    const char* match = strstr(text->data, needle->data);
+    if (!match) return -1;
+    int index = 0;
+    for (const char* p = text->data; p < match; p++)
+        if (((unsigned char)*p & 0xC0) != 0x80) index++;
+    return index;
+}
+
+int am_string_codepoint(const AM_String* text, int index) {
+    if (!text) return -1;
+    if (index < 0) index += text->len;
+    if (index < 0 || index >= text->len) return -1;
+    int pos = am_string_byte_offset(text, index), cp;
+    if (pos < 0 || am_string_decode_utf8((const unsigned char*)text->data + pos,
+                                        text->byte_len - pos, &cp) < 0) return -1;
+    return cp;
+}
+
+AM_String* am_string_from_codepoint(int cp) {
+    if (cp <= 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return NULL;
+    char bytes[4];
+    int width;
+    if (cp < 0x80) {
+        bytes[0] = (char)cp;
+        width = 1;
+    } else if (cp < 0x800) {
+        bytes[0] = (char)(0xC0 | (cp >> 6));
+        bytes[1] = (char)(0x80 | (cp & 0x3F));
+        width = 2;
+    } else if (cp < 0x10000) {
+        bytes[0] = (char)(0xE0 | (cp >> 12));
+        bytes[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        bytes[2] = (char)(0x80 | (cp & 0x3F));
+        width = 3;
+    } else {
+        bytes[0] = (char)(0xF0 | (cp >> 18));
+        bytes[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+        bytes[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        bytes[3] = (char)(0x80 | (cp & 0x3F));
+        width = 4;
+    }
+    AM_String* text = am_string_alloc(width, 1);
+    if (text) memcpy(text->data, bytes, (size_t)width);
+    return text;
 }
