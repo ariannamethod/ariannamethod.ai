@@ -21,7 +21,7 @@ ifdef BLAS
   endif
 endif
 
-.PHONY: all test test-janus janus clean test-all test-blas amlc runner install
+.PHONY: all test test-amlc test-janus janus clean test-all test-blas amlc runner install
 
 # ═══ Core AML ═══
 all: libaml.a runner amlc
@@ -83,6 +83,10 @@ install-cuda: libariannamethod_cuda.a
 # ═══ AML Tests ═══
 test: core/test_aml
 	./core/test_aml
+
+test-amlc: all
+	bash tests/test_amlc.sh
+	bash tests/test_amlc_runtime.sh
 
 core/test_aml: core/test_aml.c core/ariannamethod.c core/ariannamethod.h
 	$(CC) $(CFLAGS) core/test_aml.c core/ariannamethod.c -o $@ $(LDFLAGS)

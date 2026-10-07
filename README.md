@@ -327,6 +327,10 @@ calendar heals while the self is thrown far from its origin, in a single day.
 
 Python-like syntax with indentation. `def`, `if/else`, `while`, variables, expressions, `INCLUDE`.
 
+`amlc` embeds runtime lines as one ordered program, preserving indentation and
+variable/function scope before C `main()`. `make test-amlc` compares compiled
+and interpreted control flow, arrays, and asynchronous channel delivery.
+
 ### Variables and expressions
 
 ```aml

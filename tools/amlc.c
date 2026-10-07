@@ -3,7 +3,7 @@
  * Reads .aml file, extracts BLOOD blocks, concatenates BLOOD COMPILE bodies
  * into a single .c file, runs cc to compile (or just emits the C with
  * --emit-c). AML runtime directives (PROPHECY, DESTINY, VELOCITY, FIELD,
- * RESONANCE, LOAD, SAVE) are lowered to `am_exec()` calls in a
+ * RESONANCE, LOAD, SAVE) and Level 2 blocks are lowered to one `am_exec()` call in a
  * constructor so the compiled binary applies them before main() — the same
  * field physics the `aml` runner executes via am_exec_file. amlc lowers both
  * the BLOOD layer and the top-level directives to C.
@@ -388,24 +388,26 @@ static int parse_aml(const char *path, Parsed *out) {
          * compiled binary logs it exactly like the runner. C-header injection moved
          * to the BLOOD INCLUDE directive above (A-5). */
 
-        /* Any line that reaches here is not blank/comment/BLOOD, so it is a
-         * top-level AML directive. Lower it verbatim to an am_exec() call (A-1:
-         * was — only the 7 names in AML_KEYWORDS were lowered, the other ~68 §2/§3
-         * commands dropped, breaking spec §2.0 "the transpiler lowers every
-         * top-level directive" and README/CLAUDE.md "every AML command maps to a
-         * concrete C operation"). am_exec upcases and silently ignores unknown
-         * commands per §9.5, so verbatim pass-through is safe and also makes
-         * matching case-insensitive — fixes A-2. */
+        /* Keep the whole runtime program, including indentation. Each am_exec
+         * owns a fresh context: one call per line loses variables and function
+         * bodies, and runs both sides of if/else. A-1/A-2 pass-through still
+         * applies, now within a single ordered script. */
         if (out->n_directives >= MAX_DIRECTIVES) {
             fprintf(stderr, "amlc: line %d: too many AML directives (max %d) — refusing "
                     "rather than silently dropping; raise MAX_DIRECTIVES\n", line_no, MAX_DIRECTIVES);
             fclose(f);
             return 1;
         }
+        rtrim(line);
+        if (strlen(line) >= MAX_ARG_LEN) {
+            fprintf(stderr, "amlc: line %d: AML line exceeds %d bytes\n",
+                    line_no, MAX_ARG_LEN - 1);
+            fclose(f);
+            return 1;
+        }
         char *d = out->directives[out->n_directives++];
-        strncpy(d, p, MAX_ARG_LEN - 1);
+        strncpy(d, line, MAX_ARG_LEN - 1);
         d[MAX_ARG_LEN - 1] = 0;
-        rtrim(d);
     }
     fclose(f);
 
@@ -444,18 +446,26 @@ static int emit_c(Parsed *p, FILE *fp) {
     }
 
     if (p->n_directives > 0) {
-        fprintf(fp, "\n/* Top-level AML runtime directives — applied before main() via a constructor. */\n");
+        fprintf(fp, "\n/* One runtime program preserves scope and indented control flow. */\n");
+        fprintf(fp, "#include <stdio.h>\n#include <stdlib.h>\n");
         fprintf(fp, "extern int am_exec(const char *);\n");
+        fprintf(fp, "extern const char *am_get_error(void);\n");
         fprintf(fp, "__attribute__((constructor)) static void aml__apply_directives(void) {\n");
-        total_lines += 3;
+        fprintf(fp, "    int aml__rc = am_exec(\n");
+        total_lines += 7;
         for (int i = 0; i < p->n_directives; i++) {
-            fprintf(fp, "    am_exec(");
+            fprintf(fp, "        ");
             emit_c_string(fp, p->directives[i]);
-            fprintf(fp, ");\n");
+            fprintf(fp, " \"\\n\"\n");
             total_lines++;
         }
+        fprintf(fp, "    );\n");
+        fprintf(fp, "    if (aml__rc != 0) {\n");
+        fprintf(fp, "        fprintf(stderr, \"amlc: runtime failed: %%s\\n\", am_get_error());\n");
+        fprintf(fp, "        exit(EXIT_FAILURE);\n");
+        fprintf(fp, "    }\n");
         fprintf(fp, "}\n");
-        total_lines++;
+        total_lines += 6;
     }
 
     if (p->has_main) {

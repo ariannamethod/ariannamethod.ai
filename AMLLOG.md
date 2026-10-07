@@ -12,6 +12,26 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-10-07 — amlc preserves runtime scope and indented blocks
+
+The Haiku AML audit reproduced a compiler/interpreter divergence: `x = 0`
+followed by `if x == 1` printed only the else branch through `runner/aml`,
+but both branches after compilation. `amlc` removed indentation and emitted
+one `am_exec()` per line; each call created a fresh execution context.
+
+Runtime lines now form one embedded program executed before C `main()`.
+Assignments, functions, loops, arrays, and spawn blocks keep their context.
+The generated constructor checks execution failure and exits with the runtime
+error before entering `main()`. Oversized compiler runtime lines are rejected.
+
+Verification: `make test` passes 550/550. Existing compiler smoke checks pass;
+`tests/test_amlc_runtime.sh` compares actual compiled/interpreted output for
+branching, scalar functions, loops, arrays, and channel delivery, then checks
+runtime-error propagation, mixed BLOOD/AML field initialization, and line
+overflow rejection. The new behavioral test fails against the original
+compiler: it prints the forbidden branch and loses function/loop/array state.
+Run both compiler suites with `make test-amlc`.
+
 ## 2026-08-02 — Channels gain a non-blocking read and a depth query
 
 `am_channel_read` polls 1000 × 1 ms before giving up. For a spawned thread that is right — the
