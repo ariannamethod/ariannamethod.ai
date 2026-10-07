@@ -1,6 +1,6 @@
 # AML — Arianna Method Language
 
-**Version:** 5.1.0 (Soma)
+**Version:** 5.1.1 (Source origins)
 **Extension:** `.aml`
 **Status:** Living specification
 
@@ -70,7 +70,7 @@ args           = expression { "," expression } ;
 
 The transpiler preserves the runtime lines, their indentation, and their order
 in one embedded AML program. An `__attribute__((constructor))` executes that
-program with one `am_exec()` call before C `main()`. Assignments, `def`,
+program with one `am_exec_source()` call before C `main()`. Assignments, `def`,
 `if/else`, `while`, arrays, and `SPAWN/AWAIT/CHANNEL` share one execution context
 and retain their block structure. Runtime failure prints `am_get_error()` and
 terminates before `main()`.
@@ -78,7 +78,15 @@ terminates before `main()`.
 `BLOOD COMPILE`, `BLOOD MAIN`, `BLOOD INCLUDE`, and `BLOOD LINK` retain their C
 compilation roles. Runtime source is bounded to 512 nonblank, noncomment lines
 of at most 511 bytes each in `amlc`; the interpreter's own line limits also
-apply. File-based `INCLUDE` continues to use runtime file resolution.
+apply. The call supplies the absolute input path captured by `amlc` and
+resolves runtime `INCLUDE` from that directory, regardless of launch directory.
+The main source file is embedded; included files are read at runtime.
+
+`--scalar` links available AML/NoTorch archives without BLAS flags or libraries;
+use archives built in scalar mode. `--no-accel` builds standalone C without
+either archive and rejects runtime AML. `--run -- args...` passes literal argv
+to the binary and returns its exit status. C compiler errors also return a
+nonzero status.
 
 ### 2.1 Prophecy Physics
 
@@ -619,6 +627,7 @@ temporal_debt       float   0–∞         Backward movement cost
 ```c
 void        am_init(void);                          // Initialize to defaults
 int         am_exec(const char* script);            // Parse and execute AML
+int         am_exec_source(const char* script, const char* source_path); // Embedded file origin
 int         am_exec_file(const char* path);         // Execute AML file
 void*       am_program_open(const char* script);    // Open a resumable program
 int         am_program_step(void* p, int max_lines);// Run a slice; 1 = finished
@@ -744,7 +753,17 @@ func AMKGetTemperature() float32
 | `~/.yent/init.aml` | Yent's personal init |
 | `~/.arianna/init.aml` | Arianna's personal init |
 
-**INCLUDE resolution:** relative to the including file's directory.
+**INCLUDE resolution:** relative to the including file's directory. Absolute
+paths and double-quoted paths are accepted. Each file executes in a separate
+local context; definitions are not imported into the parent. A missing file,
+include-depth overflow, or child execution error stops the including program.
+Source directories are limited to 255 bytes; oversized paths report an error.
+
+`am_exec_source(script, source_path)` scopes the source directory to the call
+and restores the previous directory on return. The named main file need not
+exist. Source origins, include-depth counters, and last-error buffers are
+thread-local; `SPAWN` snapshots the caller's origin for its worker. Worker block
+serialization retains indentation relative to the first body line.
 
 ---
 
@@ -1105,6 +1124,12 @@ Launches the indented block in a background thread. Local variable changes do no
 | `CHANNEL TRY` | `CHANNEL TRY <name> <var>` | Non-blocking read: takes one float if the queue is non-empty, otherwise leaves `<var>` **untouched** and continues |
 | `CHANNEL DEPTH` | `CHANNEL DEPTH <name> <var>` | Queued values into `<var>` (`-1` if there is no such channel) |
 | `CHANNEL CLOSE` | `CHANNEL CLOSE <name>` | Deactivate a channel |
+
+An `AWAIT` joins every requested pending worker and propagates the first failure
+into the awaiting execution context. The worker's diagnostic is copied before
+thread exit and restored in the awaiting thread. The C API's `am_spawn_await`
+returns the worker status; the existing void `am_spawn_await_all` exposes a
+failure through `am_get_error()`.
 
 `CHANNEL READ` polls 1000 x 1 ms before giving up, which is ~2 s of wall time in practice — correct for a spawned thread, ruinous
 for a single-threaded host running the program inside a scheduled quantum, where one empty read

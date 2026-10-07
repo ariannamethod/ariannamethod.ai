@@ -87,6 +87,7 @@ test: core/test_aml
 test-amlc: all
 	bash tests/test_amlc.sh
 	bash tests/test_amlc_runtime.sh
+	bash tests/test_amlc_includes.sh
 
 core/test_aml: core/test_aml.c core/ariannamethod.c core/ariannamethod.h
 	$(CC) $(CFLAGS) core/test_aml.c core/ariannamethod.c -o $@ $(LDFLAGS)

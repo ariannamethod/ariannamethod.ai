@@ -91,7 +91,7 @@
 static AM_State G;
 static int g_am_initialized = 0;   // A-4: field auto-inits on first am_exec; kept
                                    // separate from G so am_init's memset(&G) cannot clear it.
-static char g_base_dir[256] = "";  // A-6: directory of the file being executed; seeds
+static _Thread_local char g_base_dir[256] = ".";  // directory of this thread's source; seeds
                                    // ctx.base_dir so relative INCLUDEs resolve against the
                                    // including file, not the filesystem root.
 
@@ -112,6 +112,7 @@ static char g_pipe_read_buf[AM_PIPE_BUF_SIZE] = {0};
 // Async — SPAWN/AWAIT/CHANNEL globals
 #ifndef AM_ASYNC_DISABLED
 static AM_SpawnSlot   g_spawns[AM_MAX_SPAWNS];
+static char           g_spawn_errors[AM_MAX_SPAWNS][256];
 static int            g_spawn_count = 0;
 static pthread_t      g_spawn_threads[AM_MAX_SPAWNS];
 static pthread_mutex_t g_spawn_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -1091,7 +1092,7 @@ int am_delta_load(const char* path, float* A, float* B, int E, int rank) {
 // LEVEL 2 INFRASTRUCTURE — error, field map, symbol table
 // ═══════════════════════════════════════════════════════════════════════════════
 
-static char g_error[256] = {0};
+static _Thread_local char g_error[256] = {0};
 
 const char* am_get_error(void) { return g_error; }
 
@@ -2818,13 +2819,15 @@ static int tape_ensure_entry(AM_Array* arr) {
 typedef struct {
     char* script;       // heap-allocated AML script text
     int   slot_idx;     // index into g_spawns
+    char  base_dir[256]; // source origin travels with the worker
 } AM_SpawnArg;
 
 // Thread entry point: runs an AML script in its own context
 static void* am_spawn_thread_fn(void* arg) {
     AM_SpawnArg* sa = (AM_SpawnArg*)arg;
 
-    // Execute the script (am_exec creates its own AML_ExecCtx)
+    // Execute the script with the caller's source origin in this thread.
+    snprintf(g_base_dir, sizeof(g_base_dir), "%s", sa->base_dir);
     int rc = am_exec(sa->script);
 
     // Mark slot as done
@@ -2832,6 +2835,8 @@ static void* am_spawn_thread_fn(void* arg) {
     if (sa->slot_idx >= 0 && sa->slot_idx < AM_MAX_SPAWNS) {
         g_spawns[sa->slot_idx].active = 0;
         g_spawns[sa->slot_idx].result = rc;
+        snprintf(g_spawn_errors[sa->slot_idx], sizeof(g_spawn_errors[0]),
+                 "%s", g_error);
     }
     pthread_mutex_unlock(&g_spawn_mutex);
 
@@ -2849,12 +2854,14 @@ int am_spawn_launch(const char* name, const char* script) {
     g_spawns[idx].active = 1;
     g_spawns[idx].joined = 0;
     g_spawns[idx].result = 0;
+    g_spawn_errors[idx][0] = 0;
 
     AM_SpawnArg* arg = (AM_SpawnArg*)malloc(sizeof(AM_SpawnArg));
     if (!arg) return -1;
     arg->script = strdup(script);
     if (!arg->script) { free(arg); return -1; }
     arg->slot_idx = idx;
+    snprintf(arg->base_dir, sizeof(arg->base_dir), "%s", g_base_dir);
 
     int err = pthread_create(&g_spawn_threads[idx], NULL, am_spawn_thread_fn, arg);
     if (err != 0) {
@@ -2868,27 +2875,51 @@ int am_spawn_launch(const char* name, const char* script) {
     return idx;
 }
 
+// Join transfers the completed worker's diagnostic to the awaiting thread.
+static int am_spawn_join(int i) {
+    int err = pthread_join(g_spawn_threads[i], NULL);
+    if (err) {
+        snprintf(g_error, sizeof(g_error), "cannot await %s: %s",
+                 g_spawns[i].name, strerror(err));
+        return -1;
+    }
+    g_spawns[i].joined = 1;
+    if (g_spawns[i].result != 0)
+        snprintf(g_error, sizeof(g_error), "%s",
+                 g_spawn_errors[i][0] ? g_spawn_errors[i] : "spawned program failed");
+    return g_spawns[i].result;
+}
+
 // Await a specific spawn by name. Returns result code.
 int am_spawn_await(const char* name) {
     for (int i = 0; i < g_spawn_count; i++) {
         if (strcmp(g_spawns[i].name, name) == 0 && !g_spawns[i].joined) {
-            pthread_join(g_spawn_threads[i], NULL);
-            g_spawns[i].joined = 1;
-            return g_spawns[i].result;
+            return am_spawn_join(i);
         }
     }
+    snprintf(g_error, sizeof(g_error), "no unjoined spawn: %s", name);
     return -1;
 }
 
-// Await all spawns
-void am_spawn_await_all(void) {
+// Join every pending worker, preserving the first failure if several fail.
+static int am_spawn_join_all(void) {
+    int rc = 0;
+    char first_error[256] = {0};
     for (int i = 0; i < g_spawn_count; i++) {
         if (!g_spawns[i].joined) {
-            pthread_join(g_spawn_threads[i], NULL);
-            g_spawns[i].joined = 1;
+            int result = am_spawn_join(i);
+            if (result != 0 && rc == 0) {
+                rc = result;
+                snprintf(first_error, sizeof(first_error), "%s", g_error);
+            }
         }
     }
+    if (rc != 0) snprintf(g_error, sizeof(g_error), "%s", first_error);
+    return rc;
 }
+
+// Public void API retains its signature; failures remain in am_get_error().
+void am_spawn_await_all(void) { (void)am_spawn_join_all(); }
 
 int am_spawn_count(void) {
     int n = 0;
@@ -2902,6 +2933,7 @@ static void am_spawn_reset(void) {
     am_spawn_await_all();
     g_spawn_count = 0;
     memset(g_spawns, 0, sizeof(g_spawns));
+    memset(g_spawn_errors, 0, sizeof(g_spawn_errors));
 }
 
 // --- CHANNEL ---
@@ -4688,12 +4720,16 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
         snprintf(names, sizeof(names), "%s", arg);
         char* save = NULL;
         char* tok = strtok_r(names, " \t", &save);
+        int failed = 0;
         while (tok) {
-          am_spawn_await(tok);
+          if (am_spawn_await(tok) != 0 && !failed) {
+            set_error_at(ctx, lineno, g_error);
+            failed = 1;
+          }
           tok = strtok_r(NULL, " \t", &save);
         }
       } else {
-        am_spawn_await_all();
+        if (am_spawn_join_all() != 0) set_error_at(ctx, lineno, g_error);
       }
     }
 
@@ -6076,7 +6112,7 @@ static int aml_exec_line(AML_ExecCtx* ctx, int idx) {
         int body_end = aml_find_block_end(ctx->lines, ctx->nlines, idx);
         int iterations = 0;
 
-        while (aml_eval(ctx, cond) != 0.0f && iterations < 10000 && !ctx->has_return) {
+        while (!ctx->error[0] && aml_eval(ctx, cond) != 0.0f && iterations < 10000 && !ctx->has_return) {
             aml_exec_block(ctx, idx + 1, body_end);
             iterations++;
         }
@@ -6100,17 +6136,25 @@ static int aml_exec_line(AML_ExecCtx* ctx, int idx) {
         // Build script string from indented block
         // Calculate total size needed
         int total = 0;
+        int base_indent = idx + 1 < body_end ? ctx->lines[idx + 1].indent : 0;
         for (int bi = idx + 1; bi < body_end; bi++)
-            total += (int)strlen(ctx->lines[bi].text) + 1; // +1 for newline
+            total += (int)strlen(ctx->lines[bi].text) + 1
+                     + (ctx->lines[bi].indent > base_indent
+                        ? ctx->lines[bi].indent - base_indent : 0);
         total += 1; // null terminator
 
         char* script = (char*)malloc(total);
         if (script) {
-            script[0] = 0;
+            char* dst = script;
             for (int bi = idx + 1; bi < body_end; bi++) {
-                strcat(script, ctx->lines[bi].text);
-                strcat(script, "\n");
+                int indent = ctx->lines[bi].indent - base_indent;
+                while (indent-- > 0) *dst++ = ' ';
+                size_t len = strlen(ctx->lines[bi].text);
+                memcpy(dst, ctx->lines[bi].text, len);
+                dst += len;
+                *dst++ = '\n';
             }
+            *dst = 0;
             am_spawn_launch(spawn_name, script);
             free(script);
         }
@@ -6125,19 +6169,43 @@ static int aml_exec_line(AML_ExecCtx* ctx, int idx) {
             set_error_at(ctx, ctx->lines[idx].lineno, "max include depth exceeded");
             return idx + 1;
         }
-        char path[512];
-        const char* fname = text + 8;
-        while (*fname == ' ') fname++;
+        char path[512], fname[AML_MAX_LINE_LEN];
+        snprintf(fname, sizeof(fname), "%s", text + 8);
+        char* name = fname;
+        while (*name == ' ' || *name == '\t') name++;
+        size_t n = strlen(name);
+        while (n && isspace((unsigned char)name[n - 1])) name[--n] = 0;
+        if (*name == '"') {
+            if (n < 2 || name[n - 1] != '"') {
+                set_error_at(ctx, ctx->lines[idx].lineno, "unterminated INCLUDE path");
+                return idx + 1;
+            }
+            name[n - 1] = 0;
+            name++;
+        }
+        if (!*name) {
+            set_error_at(ctx, ctx->lines[idx].lineno, "empty INCLUDE path");
+            return idx + 1;
+        }
 
-        if (fname[0] == '/') {
-            snprintf(path, sizeof(path), "%s", fname);
+        int written;
+        if (name[0] == '/') {
+            written = snprintf(path, sizeof(path), "%s", name);
         } else {
-            snprintf(path, sizeof(path), "%s/%s", ctx->base_dir, fname);
+            written = snprintf(path, sizeof(path), "%s/%s",
+                               ctx->base_dir[0] ? ctx->base_dir : ".", name);
+        }
+        if (written < 0 || (size_t)written >= sizeof(path)) {
+            set_error_at(ctx, ctx->lines[idx].lineno, "INCLUDE path too long");
+            return idx + 1;
         }
 
         ctx->include_depth++;
-        am_exec_file(path);
+        int rc = am_exec_file(path);
         ctx->include_depth--;
+        if (rc != 0)
+            set_error_at(ctx, ctx->lines[idx].lineno,
+                         g_error[0] ? g_error : "included program failed");
         return idx + 1;
     }
 
@@ -6381,7 +6449,7 @@ static int aml_exec_line(AML_ExecCtx* ctx, int idx) {
 // Execute a block of lines [start, end)
 static int aml_exec_block(AML_ExecCtx* ctx, int start, int end) {
     int i = start;
-    while (i < end && i < ctx->nlines && !ctx->has_return) {
+    while (i < end && i < ctx->nlines && !ctx->has_return && !ctx->error[0]) {
         i = aml_exec_line(ctx, i);
     }
     return 0;
@@ -6494,12 +6562,12 @@ int am_program_step(void* handle, int max_lines) {
     if (p->done) return 1;
 
     int executed = 0;
-    while (p->pc < p->ctx.nlines && !p->ctx.has_return
+    while (p->pc < p->ctx.nlines && !p->ctx.has_return && !p->ctx.error[0]
            && (max_lines <= 0 || executed < max_lines)) {
         p->pc = aml_exec_line(&p->ctx, p->pc);
         executed++;
     }
-    if (p->pc >= p->ctx.nlines || p->ctx.has_return) p->done = 1;
+    if (p->pc >= p->ctx.nlines || p->ctx.has_return || p->ctx.error[0]) p->done = 1;
     return p->done;
 }
 
@@ -6942,13 +7010,39 @@ void am_free_compiled(void* handle) {
     free(c);
 }
 
+int am_exec_source(const char* script, const char* source_path) {
+    if (!source_path || !*source_path) {
+        snprintf(g_error, sizeof(g_error), "source path is empty");
+        return 1;
+    }
+    const char* slash = strrchr(source_path, '/');
+    size_t n = slash ? (size_t)(slash - source_path) : 0;
+    if (slash == source_path) n = 1; // file in filesystem root
+    if (n >= sizeof(g_base_dir)) {
+        snprintf(g_error, sizeof(g_error), "source directory exceeds %zu bytes",
+                 sizeof(g_base_dir) - 1);
+        return 1;
+    }
+    char saved_base[sizeof(g_base_dir)];
+    memcpy(saved_base, g_base_dir, sizeof(saved_base));
+    if (slash) {
+        memcpy(g_base_dir, source_path, n);
+        g_base_dir[n] = 0;
+    } else {
+        snprintf(g_base_dir, sizeof(g_base_dir), ".");
+    }
+    int rc = am_exec(script);
+    memcpy(g_base_dir, saved_base, sizeof(g_base_dir));
+    return rc;
+}
+
 int am_exec_file(const char* path) {
     if (!path) return 1;
     // A-6: include recursion guard. am_exec() builds a fresh AML_ExecCtx on every
     // call, resetting ctx.include_depth, so the INCLUDE handler's per-ctx guard
     // never accumulated across am_exec_file — a file that INCLUDEs itself recursed
     // to a stack overflow (SIGSEGV). Bound the nesting with a static counter here.
-    static int file_depth = 0;
+    static _Thread_local int file_depth = 0;
     if (file_depth >= AML_MAX_INCLUDE) {
         snprintf(g_error, 256, "max include depth (%d) exceeded: %s", AML_MAX_INCLUDE, path);
         return 1;
@@ -6978,24 +7072,9 @@ int am_exec_file(const char* path) {
     fclose(f);
     buf[rd] = 0;
 
-    // A-6: publish this file's directory so relative INCLUDEs inside it resolve
-    // against it (am_exec seeds ctx.base_dir from g_base_dir). Save/restore for nesting.
-    char saved_base[256];
-    snprintf(saved_base, sizeof(saved_base), "%s", g_base_dir);
-    const char* slash = strrchr(path, '/');
-    if (slash) {
-        size_t n = (size_t)(slash - path);
-        if (n >= sizeof(g_base_dir)) n = sizeof(g_base_dir) - 1;
-        memcpy(g_base_dir, path, n);
-        g_base_dir[n] = 0;
-    } else {
-        snprintf(g_base_dir, sizeof(g_base_dir), ".");
-    }
-
     file_depth++;
-    int rc = am_exec(buf);
+    int rc = am_exec_source(buf, path);
     file_depth--;
-    snprintf(g_base_dir, sizeof(g_base_dir), "%s", saved_base);
     free(buf);
     return rc;
 }
