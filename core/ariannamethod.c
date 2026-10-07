@@ -10337,16 +10337,28 @@ AM_String* am_list_key(const AM_List* list) {
     }
     AM_String* out = am_string_alloc(byte_len, len);
     if (!out) return NULL;
-    int offset = snprintf(out->data, (size_t)byte_len + 1, "%d:", list->len);
+    size_t capacity = (size_t)byte_len + 1;
+    int written = snprintf(out->data, capacity, "%d:", list->len);
+    if (written < 0 || (size_t)written >= capacity) goto failed;
+    size_t offset = (size_t)written;
     for (int i = 0; i < list->len; i++) {
         const AM_String* item = list->items[i];
-        offset += snprintf(out->data + offset, (size_t)(byte_len - offset) + 1,
-                           "%d:", item->byte_len);
+        if (offset >= capacity) goto failed;
+        size_t remaining = capacity - offset;
+        written = snprintf(out->data + offset, remaining, "%d:", item->byte_len);
+        if (written < 0 || (size_t)written >= remaining) goto failed;
+        offset += (size_t)written;
+        if (item->byte_len < 0 || (size_t)item->byte_len >= capacity - offset)
+            goto failed;
         memcpy(out->data + offset, item->data, (size_t)item->byte_len);
-        offset += item->byte_len;
+        offset += (size_t)item->byte_len;
     }
-    out->data[byte_len] = 0;
+    if (offset != (size_t)byte_len) goto failed;
+    out->data[offset] = 0;
     return out;
+failed:
+    am_string_free(out);
+    return NULL;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

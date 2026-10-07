@@ -12,6 +12,16 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-10-07 — bound composite-key writes after CodeQL review
+
+PR #29's CodeQL review identified `snprintf` return values feeding the next
+remaining-capacity calculation in `list_key`. Every formatted prefix now
+checks negative/truncated results before advancing the offset. Raw token
+copies retain room for the terminator, and the final offset must match the
+precomputed length. Failure frees the incomplete string. The canonical
+encoding and public API are unchanged; `make test-maps` passes the same
+API, allocation-fault, runtime, and five-path gates.
+
 ## 2026-10-07 — words carry their own weight (v5.4.0)
 
 Haiku's cloud needs growing word weights and transition counts. `AM_Map`
