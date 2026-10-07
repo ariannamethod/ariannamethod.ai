@@ -42,10 +42,17 @@ no function-table slots. Every intrinsic accepts exactly the arguments shown.
 | `list_find(xs, text)` | First matching index, or -1 |
 | `list_slice(xs, start, end)` | New container with the selected items; end is exclusive |
 | `list_clone(xs)` | New container with all items |
+| `list_key(xs)` | Canonical text key preserving the exact ordered items |
 
 `list_push` and `list_set` work as standalone statements and inside expressions.
 `list_find` compares exact UTF-8 bytes and starts at index zero. It performs no
 case folding or normalization.
+
+`list_key` prefixes the item count and each UTF-8 byte length with decimal
+digits and `:` separators. `[]` becomes `0:`; `["", "a:b"]` becomes
+`2:0:3:a:b`. Content is copied unchanged, so empty items, embedded delimiters,
+and Unicode spelling retain their identity. The result must fit the 1 MiB
+text limit. This encoding is useful for the compound keys in [numeric maps](MAPS.md).
 
 Negative indices count from the end. Get/set reject indices outside the list;
 slice bounds clamp to `[0, list_len(xs)]`, and an end before the start produces
@@ -63,7 +70,7 @@ Numeric `len`, `sum`, `dot`, `rows`, and `cols` use typed arguments and their
 documented argument counts. Passing a parenthesized list or a function that
 returns a list is an error just like passing a list variable. Optional numeric
 array arguments in `layernorm`, `seq_layernorm`, and `spa_connectedness` also
-reject strings and lists. Their existing numeric/undefined-name sentinel for
+reject strings, lists, and maps. Their existing numeric/undefined-name sentinel for
 an absent optional array remains valid. Argument expressions are evaluated
 once, with temporary references released after the operation.
 
@@ -130,6 +137,7 @@ immutable.
 | `am_list_set(xs, index, item)` | Borrow `item`, retain on success; zero or -1 |
 | `am_list_find(xs, item)` | First matching index or -1 |
 | `am_list_slice(xs, start, end)` | Owned container with clamped bounds; NULL on failure |
+| `am_list_key(xs)` | Owned canonical key string; NULL on failure or size overflow |
 
 Release strings returned by `am_list_get` with `am_string_free`. C set returns
 a status; AML set returns the stored string. Self-replacement is valid: set

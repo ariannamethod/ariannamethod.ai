@@ -19,6 +19,7 @@
 #define ARIANNAMETHOD_H
 
 #include <stdlib.h>  // for rand(), RAND_MAX
+#include <stdint.h>  // for ordered-map hashes
 #include <math.h>    // for fabsf, sinf, sqrtf, fmaxf, fminf, expf
 #ifdef __cplusplus
 extern "C" {
@@ -308,9 +309,11 @@ typedef struct {
 #define AML_TYPE_ARRAY  1
 #define AML_TYPE_STRING 2
 #define AML_TYPE_LIST   3
+#define AML_TYPE_MAP    4
 #define AM_MAX_ARRAY_SIZE  1048576  // 1M floats = 4MB
 #define AM_MAX_STRING_BYTES 1048576
 #define AM_MAX_LIST_ITEMS 65536
+#define AM_MAX_MAP_ITEMS 65536
 
 // Immutable validated UTF-8. len counts Unicode codepoints, byte_len bytes.
 // Each owner keeps one atomic reference; embedded NUL is outside the text domain.
@@ -348,6 +351,35 @@ AM_String* am_list_get(const AM_List* list, int index); // owned reference or NU
 int am_list_set(AM_List* list, int index, AM_String* item); // retain; 0 or -1
 int am_list_find(const AM_List* list, const AM_String* item); // first index or -1
 AM_List* am_list_slice(const AM_List* list, int start, int end); // owned container
+AM_String* am_list_key(const AM_List* list); // canonical composite key, owned text
+
+// Ordered UTF-8 string -> finite float map. Keys are immutable retained text.
+// Entries keep insertion order; buckets store entry indices plus one (0 = empty).
+// Container refs are atomic; mutable use requires one context or host locking.
+typedef struct {
+    AM_String* key;
+    float value;
+    uint64_t hash;
+} AM_MapEntry;
+
+typedef struct {
+    AM_MapEntry* entries;
+    int len;
+    int capacity;
+    int* buckets;
+    int bucket_capacity;
+    int refcount;
+} AM_Map;
+
+AM_Map* am_map_new(void);
+void am_map_ref(AM_Map* map);
+void am_map_free(AM_Map* map);
+AM_Map* am_map_clone(const AM_Map* map);
+int am_map_has(const AM_Map* map, const AM_String* key); // 1 found, 0 otherwise
+int am_map_get(const AM_Map* map, const AM_String* key, float* out); // 1/0/-1
+int am_map_set(AM_Map* map, AM_String* key, float value); // retain new key; 0/-1
+int am_map_delete(AM_Map* map, const AM_String* key); // 1 removed, 0 absent, -1 invalid
+AM_List* am_map_keys(const AM_Map* map); // independent owned list, retained keys
 
 typedef struct {
     float* data;
@@ -370,14 +402,15 @@ typedef struct {
     char origin[AML_MAX_SOURCE_PATH]; // absolute source file; survives IMPORT expansion
 } AML_Line;
 
-// Variable — supports float, array, immutable UTF-8 string, or string list
+// Variable — supports float, array, immutable UTF-8 string, string list, or map
 typedef struct {
     char      name[AML_MAX_NAME];
-    int       type;     // AML_TYPE_FLOAT / ARRAY / STRING / LIST
+    int       type;     // AML_TYPE_FLOAT / ARRAY / STRING / LIST / MAP
     float     value;    // used when type == FLOAT
     AM_Array* array;    // used when type == ARRAY (heap allocated)
     AM_String* string;  // used when type == STRING (one owned reference)
     AM_List*   list;    // used when type == LIST (one owned reference)
+    AM_Map*    map;     // used when type == MAP (one owned reference)
 } AML_Var;
 
 // Symbol table
@@ -419,7 +452,8 @@ typedef struct {
     AM_Array*    return_array;      // array return value (NULL if scalar)
     AM_String*   return_string;     // owned string return value
     AM_List*     return_list;       // owned string list return value
-    int          return_type;       // AML_TYPE_FLOAT / ARRAY / STRING / LIST
+    AM_Map*      return_map;        // owned numeric map return value
+    int          return_type;       // AML_TYPE_FLOAT / ARRAY / STRING / LIST / MAP
 } AML_ExecCtx;
 
 // AM_State field map entry (for reading state in expressions)
@@ -1193,6 +1227,8 @@ const char* am_get_var_text(const char* name);
 // Getter is borrowed until persistent mutation/reset; retained items are shared.
 int am_set_var_list(const char* name, const AM_List* list);
 const AM_List* am_get_var_list(const char* name);
+int am_set_var_map(const char* name, const AM_Map* map);
+const AM_Map* am_get_var_map(const char* name);
 
 // Clear the calling thread's persistent globals (frees arrays, strings, lists).
 void am_persistent_clear(void);

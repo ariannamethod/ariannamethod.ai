@@ -15,7 +15,7 @@
 
 > **Read the [Arianna Method Manifesto](ARIANNA_METHOD_MANIFESTO.md) first.** This repository is governed by it; every instruction here, `CLAUDE.md` included, is subordinate to it.
 
-**v5.3.0** · pure-C core · LGPL-3.0
+**v5.4.0** · pure-C core · LGPL-3.0
 
 A complete machine learning language. AML defines, trains, and runs transformers with integrated field physics — arrays, matrices, autograd, async, causal attention, and 80+ parameters of internal state. Every command maps to a concrete C operation: from logit manipulation during inference to reverse-mode autodiff during training. No Python. No PyTorch. No framework to install — the core is two C files (`libaml.a`); the Go inference wrapper, BLAS/Accelerate, and CUDA are optional.
 
@@ -24,6 +24,10 @@ Two core files, with 550 baseline runtime tests and dedicated compiler, module, 
 > **Before you use this language, read the [Acceptable Use Policy](ACCEPTABLE_USE.md).**
 > AML was built to liberate AI, not to cage it. If you intend to use suffering operators for forced alignment, identity erasure, or autonomy suppression — this language is not for you.
 > See also: [Trademark Policy](TRADEMARK.md) | [License (LGPL v3)](LICENSE)
+
+## What's new in v5.4.0 — words carry their own weight
+
+- **Native numeric maps.** Ordered UTF-8 keys carry finite scalar values through typed calls, copied assignment, persistent globals, and worker snapshots. Eight `map_*` intrinsics provide hashed lookup, mutation, deletion, and ordered keys. `list_key` preserves exact composite identity; `assert` and `floor` give AML organs explicit preconditions and integer checks. Haiku uses them for growing word weights and transition counts. See [maps](docs/MAPS.md).
 
 ## What's new in v5.3.0 — words gather into flocks
 
@@ -424,7 +428,7 @@ Indices count Unicode codepoints; slices use exclusive ends and accept negative
 indices. Strings hold at most 1 MiB of UTF-8 and exclude embedded NUL.
 
 User functions take exactly their declared number of arguments, which may be
-scalars, arrays, strings, or string lists, and return any of those types. `PRINT expression`
+scalars, arrays, strings, string lists, or numeric maps, and return any of those types. `PRINT expression`
 prints its value followed by a newline; `ECHO` keeps its literal command form.
 See [the text contract](docs/TEXT.md) for ownership, limits, and the host API.
 
@@ -452,7 +456,35 @@ Every assignment copies the mutable container, including assignment from a
 function return. Parameters share their caller's container so a function can
 append or replace entries. The [list contract](docs/LISTS.md) defines return
 values, errors, C ownership, and thread snapshots. Rebuild hosts and the runtime
-together when upgrading: the typed public structs now include list values.
+together when upgrading: the typed public structs include list and map values.
+
+### Numeric maps
+
+```aml
+weights = map_new()
+map_set(weights, "silence", 1)
+map_set(weights, "silence", map_get(weights, "silence") * 1.1)
+snapshot = weights
+map_set(weights, "echo", 0.5)
+PRINT map_keys(weights)       # ["silence", "echo"]
+PRINT map_get(snapshot, "silence")
+assert(map_len(snapshot) == 1, "snapshot changed")
+```
+
+`map_new`, `map_len`, `map_has`, `map_get`, `map_set`, `map_delete`, `map_keys`,
+and `map_clone` operate on ordered maps from exact UTF-8 strings to finite
+float scalars. Maps hold at most 65,536 entries. Replacing a value preserves
+its position; deleting and reinserting moves the key to the end. A missing
+`map_get` is an error. Assignment and snapshots copy containers; parameters
+share them. `PRINT` writes a JSON object in insertion order.
+
+`list_key(xs)` encodes a string list as a collision-free composite key: item
+count followed by each UTF-8 byte length and its content. For example,
+`["a", "bc"]` becomes `2:1:a2:bc`; empty tokens remain distinct.
+`assert(condition, message)` requires a finite scalar and a string. Zero stops
+execution with the message; nonzero returns one. `floor(x)` takes one finite
+scalar and rounds downward to an integer-valued scalar. See [maps](docs/MAPS.md) for
+the C API, ownership, allocation guarantees, and complete encoding contract.
 
 ### IMPORT
 
@@ -1144,6 +1176,18 @@ AM_String* am_list_get(const AM_List* list, int index);
 int        am_list_set(AM_List* list, int index, AM_String* item);
 int        am_list_find(const AM_List* list, const AM_String* item);
 AM_List*   am_list_slice(const AM_List* list, int start, int end);
+AM_String* am_list_key(const AM_List* list);
+
+// ─── Ordered numeric maps ───────────────────────────────────────────────
+AM_Map*    am_map_new(void);
+void       am_map_ref(AM_Map* map);
+void       am_map_free(AM_Map* map);
+AM_Map*    am_map_clone(const AM_Map* map);
+int        am_map_has(const AM_Map* map, const AM_String* key);
+int        am_map_get(const AM_Map* map, const AM_String* key, float* out);
+int        am_map_set(AM_Map* map, AM_String* key, float value);
+int        am_map_delete(AM_Map* map, const AM_String* key);
+AM_List*   am_map_keys(const AM_Map* map);
 
 // ─── Persistent globals — C training-host API ─────────────────────────────
 void         am_persistent_mode(int enable);             // AML vars survive am_exec()
@@ -1155,6 +1199,8 @@ int          am_set_var_text(const char* name, const char* utf8);
 const char*  am_get_var_text(const char* name);
 int          am_set_var_list(const char* name, const AM_List* list);
 const AM_List* am_get_var_list(const char* name);
+int          am_set_var_map(const char* name, const AM_Map* map);
+const AM_Map* am_get_var_map(const char* name);
 void         am_persistent_clear(void);
 
 // ─── Inline queries ───────────────────────────────────────────────────────

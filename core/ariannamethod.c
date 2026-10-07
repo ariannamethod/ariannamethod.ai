@@ -731,6 +731,7 @@ static int      symtab_set(AML_Symtab* tab, const char* name, float value);
 static int      symtab_set_array(AML_Symtab* tab, const char* name, AM_Array* arr);
 static int      symtab_set_string(AML_Symtab* tab, const char* name, AM_String* str);
 static int      symtab_set_list(AML_Symtab* tab, const char* name, AM_List* list);
+static int      symtab_set_map(AML_Symtab* tab, const char* name, AM_Map* map);
 static void     symtab_clear_arrays(AML_Symtab* tab);
 static int      symtab_snapshot(AML_Symtab* dst, const AML_Symtab* src);
 static int      symtab_copy_value(AML_Symtab* dst, const AML_Var* value);
@@ -767,7 +768,7 @@ static int persistent_restore(AML_Symtab* dst) {
 static int persistent_save(AML_Symtab* src) {
     if (!g_persistent_enabled) return 0;
     // Build the complete replacement first. Failed allocation leaves every
-    // previous persistent binding intact, including mutable list containers.
+    // previous persistent binding intact, including mutable list/map containers.
     AML_Symtab next = {0};
     for (int i = 0; i < g_persistent_globals.count; i++) {
         AML_Var* old = &g_persistent_globals.vars[i];
@@ -869,6 +870,27 @@ const AM_List* am_get_var_list(const char* name) {
     if (!name) return NULL;
     AML_Var* v = symtab_get_var(&g_persistent_globals, name);
     return v && v->type == AML_TYPE_LIST ? v->list : NULL;
+}
+
+int am_set_var_map(const char* name, const AM_Map* map) {
+    if (!name || !*name || strlen(name) >= AML_MAX_NAME || !map) return 1;
+    if (!(isalpha((unsigned char)*name) || *name == '_')) return 1;
+    for (const char* p = name + 1; *p; p++)
+        if (!(isalnum((unsigned char)*p) || *p == '_')) return 1;
+    AM_Map* copy = am_map_clone(map);
+    if (!copy) return 1;
+    if (symtab_set_map(&g_persistent_globals, name, copy)) {
+        am_map_free(copy);
+        return 1;
+    }
+    g_persistent_enabled = 1;
+    return 0;
+}
+
+const AM_Map* am_get_var_map(const char* name) {
+    if (!name) return NULL;
+    AML_Var* v = symtab_get_var(&g_persistent_globals, name);
+    return v && v->type == AML_TYPE_MAP ? v->map : NULL;
 }
 
 // enable/disable packs
@@ -3127,6 +3149,8 @@ static int symtab_set(AML_Symtab* tab, const char* name, float value) {
             tab->vars[i].string = NULL;
             if (tab->vars[i].type == AML_TYPE_LIST) am_list_free(tab->vars[i].list);
             tab->vars[i].list = NULL;
+            if (tab->vars[i].type == AML_TYPE_MAP) am_map_free(tab->vars[i].map);
+            tab->vars[i].map = NULL;
             tab->vars[i].type = AML_TYPE_FLOAT;
             tab->vars[i].value = value;
             return 0;
@@ -3139,6 +3163,7 @@ static int symtab_set(AML_Symtab* tab, const char* name, float value) {
     tab->vars[tab->count].array = NULL;
     tab->vars[tab->count].string = NULL;
     tab->vars[tab->count].list = NULL;
+    tab->vars[tab->count].map = NULL;
     tab->count++;
     return 0;
 }
@@ -3155,6 +3180,8 @@ static int symtab_set_array(AML_Symtab* tab, const char* name, AM_Array* arr) {
             tab->vars[i].string = NULL;
             if (tab->vars[i].type == AML_TYPE_LIST) am_list_free(tab->vars[i].list);
             tab->vars[i].list = NULL;
+            if (tab->vars[i].type == AML_TYPE_MAP) am_map_free(tab->vars[i].map);
+            tab->vars[i].map = NULL;
             tab->vars[i].type = AML_TYPE_ARRAY;
             tab->vars[i].value = 0;
             tab->vars[i].array = arr;
@@ -3168,6 +3195,7 @@ static int symtab_set_array(AML_Symtab* tab, const char* name, AM_Array* arr) {
     tab->vars[tab->count].array = arr;
     tab->vars[tab->count].string = NULL;
     tab->vars[tab->count].list = NULL;
+    tab->vars[tab->count].map = NULL;
     tab->count++;
     return 0;
 }
@@ -3191,7 +3219,15 @@ static int symtab_set_list(AML_Symtab* tab, const char* name, AM_List* list) {
     return 0;
 }
 
-// Free all owned arrays, strings, and lists in a symbol table.
+static int symtab_set_map(AML_Symtab* tab, const char* name, AM_Map* map) {
+    if (symtab_set(tab, name, 0)) return 1;
+    AML_Var* v = symtab_get_var(tab, name);
+    v->type = AML_TYPE_MAP;
+    v->map = map;
+    return 0;
+}
+
+// Free all owned arrays, strings, lists, and maps in a symbol table.
 static void symtab_clear_arrays(AML_Symtab* tab) {
     for (int i = 0; i < tab->count; i++) {
         if (tab->vars[i].type == AML_TYPE_ARRAY && tab->vars[i].array) {
@@ -3206,10 +3242,14 @@ static void symtab_clear_arrays(AML_Symtab* tab) {
             am_list_free(tab->vars[i].list);
             tab->vars[i].list = NULL;
         }
+        if (tab->vars[i].type == AML_TYPE_MAP) {
+            am_map_free(tab->vars[i].map);
+            tab->vars[i].map = NULL;
+        }
     }
 }
 
-// Copy one binding without sharing mutable arrays or list containers.
+// Copy one binding without sharing mutable arrays, lists, or maps.
 static int symtab_copy_value(AML_Symtab* dst, const AML_Var* v) {
     if (v->type == AML_TYPE_ARRAY) {
 #ifdef USE_CUDA
@@ -3232,6 +3272,13 @@ static int symtab_copy_value(AML_Symtab* dst, const AML_Var* v) {
         if (!list) return 1;
         if (!symtab_set_list(dst, v->name, list)) return 0;
         am_list_free(list);
+        return 1;
+    }
+    if (v->type == AML_TYPE_MAP) {
+        AM_Map* map = am_map_clone(v->map);
+        if (!map) return 1;
+        if (!symtab_set_map(dst, v->name, map)) return 0;
+        am_map_free(map);
         return 1;
     }
     return symtab_set(dst, v->name, v->value);
@@ -3262,8 +3309,10 @@ static AML_Var* resolve_var_full(AML_ExecCtx* ctx, const char* name) {
 // Resolve variable: locals → globals → field map
 static int resolve_var(AML_ExecCtx* ctx, const char* name, float* out) {
     AML_Var* value = resolve_var_full(ctx, name);
-    if (value && (value->type == AML_TYPE_STRING || value->type == AML_TYPE_LIST)) {
-        set_error(ctx, value->type == AML_TYPE_LIST
+    if (value && (value->type == AML_TYPE_STRING || value->type == AML_TYPE_LIST ||
+                  value->type == AML_TYPE_MAP)) {
+        set_error(ctx, value->type == AML_TYPE_MAP ? "map used as a scalar expression" :
+            value->type == AML_TYPE_LIST
             ? "list used as a scalar expression" : "string used as a scalar expression");
         *out = 0;
         return 1;
@@ -3290,6 +3339,7 @@ static void aml_value_clear(AML_Var* v) {
     if (v->type == AML_TYPE_ARRAY) am_array_free(v->array);
     if (v->type == AML_TYPE_STRING) am_string_free(v->string);
     if (v->type == AML_TYPE_LIST) am_list_free(v->list);
+    if (v->type == AML_TYPE_MAP) am_map_free(v->map);
     memset(v, 0, sizeof(*v));
 }
 
@@ -3297,9 +3347,11 @@ static void aml_clear_return(AML_ExecCtx* ctx) {
     am_array_free(ctx->return_array);
     am_string_free(ctx->return_string);
     am_list_free(ctx->return_list);
+    am_map_free(ctx->return_map);
     ctx->return_array = NULL;
     ctx->return_string = NULL;
     ctx->return_list = NULL;
+    ctx->return_map = NULL;
     ctx->return_type = AML_TYPE_FLOAT;
     ctx->return_value = 0;
     ctx->has_return = 0;
@@ -3327,10 +3379,22 @@ static int aml_text_function(const char* name) {
 
 static int aml_list_function(const char* name) {
     static const char* names[] = {"list_new", "list_len", "list_get", "list_push",
-        "list_set", "list_find", "list_slice", "list_clone"};
+        "list_set", "list_find", "list_slice", "list_clone", "list_key"};
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (strcasecmp(name, names[i]) == 0) return 1;
     return 0;
+}
+
+static int aml_map_function(const char* name) {
+    static const char* names[] = {"map_new", "map_len", "map_has", "map_get",
+        "map_set", "map_delete", "map_keys", "map_clone"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+        if (strcasecmp(name, names[i]) == 0) return 1;
+    return 0;
+}
+
+static int aml_scalar_intrinsic_function(const char* name) {
+    return strcasecmp(name, "assert") == 0 || strcasecmp(name, "floor") == 0;
 }
 
 // Decode quoted source into UTF-8. Escapes are explicit and never insert NUL.
@@ -3440,7 +3504,8 @@ static int aml_list_dispatch(AML_ExecCtx* ctx, const char* name, AML_Var* args,
                              int nargs, AML_Var* out) {
     int need = 2;
     if (!strcasecmp(name, "list_new")) need = 0;
-    else if (!strcasecmp(name, "list_len") || !strcasecmp(name, "list_clone")) need = 1;
+    else if (!strcasecmp(name, "list_len") || !strcasecmp(name, "list_clone") ||
+             !strcasecmp(name, "list_key")) need = 1;
     else if (!strcasecmp(name, "list_set") || !strcasecmp(name, "list_slice")) need = 3;
     if (nargs != need) { set_error(ctx, "wrong number of list arguments"); return 1; }
     if (!strcasecmp(name, "list_new")) {
@@ -3452,6 +3517,12 @@ static int aml_list_dispatch(AML_ExecCtx* ctx, const char* name, AML_Var* args,
         AM_List* list = args[0].list;
         if (!strcasecmp(name, "list_len")) {
             out->value = (float)list->len;
+            return 0;
+        }
+        if (!strcasecmp(name, "list_key")) {
+            out->string = am_list_key(list);
+            if (!out->string) { set_error(ctx, "composite key limit exceeded or allocation failed"); return 1; }
+            out->type = AML_TYPE_STRING;
             return 0;
         }
         if (!strcasecmp(name, "list_clone")) out->list = am_list_clone(list);
@@ -3499,13 +3570,93 @@ static int aml_list_dispatch(AML_ExecCtx* ctx, const char* name, AML_Var* args,
     return 0;
 }
 
+static int aml_map_dispatch(AML_ExecCtx* ctx, const char* name, AML_Var* args,
+                            int nargs, AML_Var* out) {
+    int need = 2;
+    if (!strcasecmp(name, "map_new")) need = 0;
+    else if (!strcasecmp(name, "map_len") || !strcasecmp(name, "map_keys") ||
+             !strcasecmp(name, "map_clone")) need = 1;
+    else if (!strcasecmp(name, "map_set")) need = 3;
+    if (nargs != need) { set_error(ctx, "wrong number of map arguments"); return 1; }
+    if (!strcasecmp(name, "map_new")) {
+        out->map = am_map_new();
+    } else {
+        if (args[0].type != AML_TYPE_MAP || !args[0].map) {
+            set_error(ctx, "map operation requires a map"); return 1;
+        }
+        AM_Map* map = args[0].map;
+        if (!strcasecmp(name, "map_len")) { out->value = (float)map->len; return 0; }
+        if (!strcasecmp(name, "map_clone")) out->map = am_map_clone(map);
+        else if (!strcasecmp(name, "map_keys")) {
+            out->list = am_map_keys(map);
+            if (!out->list) { set_error(ctx, "map keys allocation failed"); return 1; }
+            out->type = AML_TYPE_LIST;
+            return 0;
+        } else {
+            if (args[1].type != AML_TYPE_STRING || !args[1].string) {
+                set_error(ctx, "map key must be a string"); return 1;
+            }
+            AM_String* key = args[1].string;
+            if (!strcasecmp(name, "map_has")) out->value = (float)am_map_has(map, key);
+            else if (!strcasecmp(name, "map_get")) {
+                if (am_map_get(map, key, &out->value) != 1) {
+                    set_error(ctx, "map key not found"); return 1;
+                }
+            } else if (!strcasecmp(name, "map_delete")) {
+                int deleted = am_map_delete(map, key);
+                if (deleted < 0) { set_error(ctx, "invalid map deletion"); return 1; }
+                out->value = (float)deleted;
+            } else {
+                if (args[2].type != AML_TYPE_FLOAT || !isfinite(args[2].value)) {
+                    set_error(ctx, "map value must be a finite scalar"); return 1;
+                }
+                if (am_map_set(map, key, args[2].value)) {
+                    set_error(ctx, "map limit exceeded or allocation failed"); return 1;
+                }
+                out->value = args[2].value;
+            }
+            return 0;
+        }
+    }
+    if (!out->map) { set_error(ctx, "map allocation failed"); return 1; }
+    out->type = AML_TYPE_MAP;
+    return 0;
+}
+
+static int aml_scalar_intrinsic_dispatch(AML_ExecCtx* ctx, const char* name,
+                                         AML_Var* args, int nargs, AML_Var* out) {
+    if (!strcasecmp(name, "floor")) {
+        if (nargs != 1) { set_error(ctx, "floor requires exactly one argument"); return 1; }
+        if (args[0].type != AML_TYPE_FLOAT || !isfinite(args[0].value)) {
+            set_error(ctx, "floor requires a finite scalar"); return 1;
+        }
+        out->value = floorf(args[0].value);
+        return 0;
+    }
+    if (nargs != 2) { set_error(ctx, "assert requires exactly two arguments"); return 1; }
+    if (args[0].type != AML_TYPE_FLOAT || !isfinite(args[0].value)) {
+        set_error(ctx, "assert condition must be a finite scalar"); return 1;
+    }
+    if (args[1].type != AML_TYPE_STRING || !args[1].string) {
+        set_error(ctx, "assert message must be a string"); return 1;
+    }
+    if (!args[0].value) {
+        char message[sizeof(ctx->error)];
+        snprintf(message, sizeof(message), "assertion failed: %s", args[1].string->data);
+        set_error(ctx, message);
+        return 1;
+    }
+    out->value = 1;
+    return 0;
+}
+
 static int aml_array_scalar_function(const char* name) {
     return !strcasecmp(name, "len") || !strcasecmp(name, "sum") ||
            !strcasecmp(name, "dot") || !strcasecmp(name, "rows") ||
            !strcasecmp(name, "cols");
 }
 
-// Preserve numeric/undefined zero results while rejecting text and lists.
+// Preserve numeric/undefined zero results while rejecting text, lists, and maps.
 // The shared typed parser handles parentheses and returned values exactly once.
 static int aml_array_scalar_dispatch(AML_ExecCtx* ctx, const char* name,
                                       AML_Var* args, int nargs, AML_Var* out) {
@@ -3514,7 +3665,7 @@ static int aml_array_scalar_dispatch(AML_ExecCtx* ctx, const char* name,
         set_error(ctx, "wrong number of array arguments"); return 1;
     }
     for (int i = 0; i < nargs; i++) {
-        if (args[i].type == AML_TYPE_STRING || args[i].type == AML_TYPE_LIST) {
+        if (args[i].type == AML_TYPE_STRING || args[i].type == AML_TYPE_LIST || args[i].type == AML_TYPE_MAP) {
             set_error(ctx, "array operation requires an array"); return 1;
         }
     }
@@ -3584,6 +3735,8 @@ static int aml_invoke_value(AML_ExecCtx* ctx, const char* name,
     *cursor = p + 1;
     if (aml_text_function(name)) rc = aml_text_dispatch(ctx, name, args, nargs, out);
     else if (aml_list_function(name)) rc = aml_list_dispatch(ctx, name, args, nargs, out);
+    else if (aml_map_function(name)) rc = aml_map_dispatch(ctx, name, args, nargs, out);
+    else if (aml_scalar_intrinsic_function(name)) rc = aml_scalar_intrinsic_dispatch(ctx, name, args, nargs, out);
     else if (aml_array_scalar_function(name)) rc = aml_array_scalar_dispatch(ctx, name, args, nargs, out);
     else {
         AML_Func* f = aml_value_function(ctx, name);
@@ -3651,8 +3804,9 @@ static float expr_primary(AML_Expr* e) {
 
             if (e->ctx) {
                 AML_Var* var = resolve_var_full(e->ctx, name);
-                if (var && (var->type == AML_TYPE_STRING || var->type == AML_TYPE_LIST)) {
-                    set_error(e->ctx, var->type == AML_TYPE_LIST
+                if (var && (var->type == AML_TYPE_STRING || var->type == AML_TYPE_LIST || var->type == AML_TYPE_MAP)) {
+                    set_error(e->ctx, var->type == AML_TYPE_MAP
+                        ? "array indexing requires an array; use map_get for maps" : var->type == AML_TYPE_LIST
                         ? "array indexing requires an array; use list_get for lists"
                         : "array indexing requires an array; use text_codepoint/text_slice for text");
                     e->error = 1;
@@ -3672,6 +3826,7 @@ static float expr_primary(AML_Expr* e) {
         // function call
         if (*e->p == '(') {
             if (e->ctx && (aml_text_function(name) || aml_list_function(name) ||
+                           aml_map_function(name) || aml_scalar_intrinsic_function(name) ||
                            aml_array_scalar_function(name) ||
                            aml_value_function(e->ctx, name))) {
                 AML_Var result = {0};
@@ -3681,7 +3836,7 @@ static float expr_primary(AML_Expr* e) {
                 }
                 if (result.type != AML_TYPE_FLOAT) {
                     aml_value_clear(&result);
-                    set_error(e->ctx, "string/array/list value used as a scalar expression");
+                    set_error(e->ctx, "string/array/list/map value used as a scalar expression");
                     e->error = 1;
                     return 0;
                 }
@@ -3911,10 +4066,12 @@ static int aml_eval_value(AML_ExecCtx* ctx, const char* text, AML_Var* out) {
                 if (v->type == AML_TYPE_ARRAY) am_array_ref(out->array);
                 if (v->type == AML_TYPE_STRING) am_string_ref(out->string);
                 if (v->type == AML_TYPE_LIST) am_list_ref(out->list);
+                if (v->type == AML_TYPE_MAP) am_map_ref(out->map);
                 return 0;
             }
         }
         if (*p == '(' && (aml_text_function(name) || aml_list_function(name) ||
+                          aml_map_function(name) || aml_scalar_intrinsic_function(name) ||
                           aml_array_scalar_function(name) ||
                           aml_value_function(ctx, name))) {
             const char* close = aml_value_close(p);
@@ -5090,7 +5247,7 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
         sscanf(rest, "%31s", vname);
         if (vname[0] && ctx) {
           AML_Var* v = resolve_var_full(ctx, vname);
-          if (v && v->type == AML_TYPE_LIST) {
+          if (v && (v->type == AML_TYPE_LIST || v->type == AML_TYPE_MAP)) {
             set_error(ctx, "TAPE requires a numeric array");
             return;
           }
@@ -5183,7 +5340,7 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
         sscanf(rest, "%31s", vname);
         if (vname[0] && ctx) {
           AML_Var* v = resolve_var_full(ctx, vname);
-          if (v && v->type == AML_TYPE_LIST) {
+          if (v && (v->type == AML_TYPE_LIST || v->type == AML_TYPE_MAP)) {
             set_error(ctx, "TAPE requires a numeric array");
             return;
           }
@@ -5607,7 +5764,9 @@ static int aml_reserved_function(const char* name) {
         "text_len", "text_bytes", "text_equal", "text_find", "text_slice",
         "text_concat", "text_codepoint", "text_from_codepoint",
         "list_new", "list_len", "list_get", "list_push", "list_set", "list_find",
-        "list_slice", "list_clone"
+        "list_slice", "list_clone", "list_key",
+        "map_new", "map_len", "map_has", "map_get", "map_set", "map_delete",
+        "map_keys", "map_clone", "assert", "floor"
     };
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (strcasecmp(name, names[i]) == 0) return 1;
@@ -5743,6 +5902,7 @@ static int aml_call_value(AML_ExecCtx* ctx, AML_Func* f, AML_Var* args,
     AM_Array* saved_return_array = ctx->return_array;
     AM_String* saved_return_string = ctx->return_string;
     AM_List* saved_return_list = ctx->return_list;
+    AM_Map* saved_return_map = ctx->return_map;
     int saved_return_type = ctx->return_type;
 
     // push local scope
@@ -5761,6 +5921,9 @@ static int aml_call_value(AML_ExecCtx* ctx, AML_Func* f, AML_Var* args,
         } else if (args[i].type == AML_TYPE_LIST) {
             am_list_ref(args[i].list);
             symtab_set_list(locals, f->params[i], args[i].list);
+        } else if (args[i].type == AML_TYPE_MAP) {
+            am_map_ref(args[i].map);
+            symtab_set_map(locals, f->params[i], args[i].map);
         } else {
             symtab_set(locals, f->params[i], args[i].value);
         }
@@ -5772,6 +5935,7 @@ static int aml_call_value(AML_ExecCtx* ctx, AML_Func* f, AML_Var* args,
     ctx->return_array = NULL;
     ctx->return_string = NULL;
     ctx->return_list = NULL;
+    ctx->return_map = NULL;
     ctx->return_type = AML_TYPE_FLOAT;
 
     // execute body
@@ -5782,6 +5946,7 @@ static int aml_call_value(AML_ExecCtx* ctx, AML_Func* f, AML_Var* args,
         out->array = ctx->return_array;
         out->string = ctx->return_string;
         out->list = ctx->return_list;
+        out->map = ctx->return_map;
     }
     // Return expressions already own their references, including local aliases.
     symtab_clear_arrays(locals);
@@ -5794,6 +5959,7 @@ static int aml_call_value(AML_ExecCtx* ctx, AML_Func* f, AML_Var* args,
     ctx->return_array = saved_return_array;
     ctx->return_string = saved_return_string;
     ctx->return_list = saved_return_list;
+    ctx->return_map = saved_return_map;
     ctx->return_type = saved_return_type;
     return ctx->error[0] != 0;
 }
@@ -5899,7 +6065,7 @@ static AM_Array* aml_try_array_expr(AML_ExecCtx* ctx, const char* rhs) {
 }
 
 // Evaluate an optional numeric array once. Scalar values (including the legacy
-// undefined-name zero) still mean "no array"; string/list values are errors.
+// undefined-name zero) still mean "no array"; string/list/map values are errors.
 // A returned array reference is owned by the caller.
 static int aml_optional_array(AML_ExecCtx* ctx, const char* expression, AM_Array** out) {
     AML_Var value = {0};
@@ -5907,7 +6073,7 @@ static int aml_optional_array(AML_ExecCtx* ctx, const char* expression, AM_Array
     if (aml_eval_value(ctx, expression, &value)) {
         aml_value_clear(&value); return 1;
     }
-    if (value.type == AML_TYPE_STRING || value.type == AML_TYPE_LIST) {
+    if (value.type == AML_TYPE_STRING || value.type == AML_TYPE_LIST || value.type == AML_TYPE_MAP) {
         aml_value_clear(&value);
         set_error(ctx, "optional argument requires a numeric array"); return 1;
     }
@@ -5926,7 +6092,7 @@ static int aml_optional_array(AML_ExecCtx* ctx, const char* expression, AM_Array
 static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char arg_strs[][AML_MAX_LINE_LEN], int nargs) {
     // Numeric array intrinsics cannot consume string containers, including in
     // optional gamma/beta/bias positions that otherwise permit absent arrays.
-    // Leave scalar/text/list/user calls to their own evaluator without effects.
+    // Leave scalar/text/list/map/user calls to their own evaluator without effects.
     static const char* array_names[] = {
         "zeros", "randn", "add", "mul", "scale", "matrix", "matrix_zeros",
         "matvec", "matmul", "softmax", "rmsnorm", "silu", "gelu", "dropout",
@@ -5938,8 +6104,10 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
         if (strcasecmp(fname, array_names[fi])) continue;
         for (int i = 0; i < nargs; i++) {
             AML_Var* v = resolve_var_full(ctx, arg_strs[i]);
-            if (v && v->type == AML_TYPE_LIST) {
-                set_error(ctx, "numeric array operation cannot consume a list");
+            if (v && (v->type == AML_TYPE_LIST || v->type == AML_TYPE_MAP)) {
+                set_error(ctx, v->type == AML_TYPE_MAP
+                    ? "numeric array operation cannot consume a map"
+                    : "numeric array operation cannot consume a list");
                 return NULL;
             }
         }
@@ -6987,6 +7155,7 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
         ctx->return_array = value.array;
         ctx->return_string = value.string;
         ctx->return_list = value.list;
+        ctx->return_map = value.map;
         return ctx->nlines;
     }
 
@@ -7004,6 +7173,14 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
                     aml_print_json_string(value.list->items[i]);
                 }
                 putchar(']');
+            } else if (value.type == AML_TYPE_MAP) {
+                putchar('{');
+                for (int i = 0; i < value.map->len; i++) {
+                    if (i) fputs(", ", stdout);
+                    aml_print_json_string(value.map->entries[i].key);
+                    printf(": %.9g", (double)value.map->entries[i].value);
+                }
+                putchar('}');
             } else if (value.type == AML_TYPE_ARRAY) {
                 putchar('[');
                 for (int i = 0; i < value.array->len; i++)
@@ -7206,8 +7383,10 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
 
                         // Find the array variable and write to it
                         AML_Var* var = resolve_var_full(ctx, varname);
-                        if (var && var->type == AML_TYPE_LIST) {
-                            set_error(ctx, "array element write requires an array; use list_set for lists");
+                        if (var && (var->type == AML_TYPE_LIST || var->type == AML_TYPE_MAP)) {
+                            set_error(ctx, var->type == AML_TYPE_MAP
+                                ? "array element write requires an array; use map_set for maps"
+                                : "array element write requires an array; use list_set for lists");
                             return idx + 1;
                         }
                         if (var && var->type == AML_TYPE_ARRAY && var->array) {
@@ -7267,12 +7446,22 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
                     return idx + 1;
                 }
             }
+            if (value.type == AML_TYPE_MAP) {
+                AM_Map* copy = am_map_clone(value.map);
+                am_map_free(value.map);
+                value.map = copy;
+                if (!copy) {
+                    set_error_at(ctx, ctx->lines[idx].lineno, "map allocation failed");
+                    return idx + 1;
+                }
+            }
             AML_Symtab* tab = ctx->call_depth > 0
                 ? &ctx->locals[ctx->call_depth - 1] : &ctx->globals;
             int rc;
             if (value.type == AML_TYPE_STRING) rc = symtab_set_string(tab, name, value.string);
             else if (value.type == AML_TYPE_ARRAY) rc = symtab_set_array(tab, name, value.array);
             else if (value.type == AML_TYPE_LIST) rc = symtab_set_list(tab, name, value.list);
+            else if (value.type == AML_TYPE_MAP) rc = symtab_set_map(tab, name, value.map);
             else rc = symtab_set(tab, name, value.value);
             if (rc) {
                 aml_value_clear(&value);
@@ -7281,7 +7470,8 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
             return idx + 1;
         }
         if (n && n < AML_MAX_NAME && *p == '(' &&
-            (aml_value_function(ctx, name) || aml_text_function(name) || aml_list_function(name))) {
+            (aml_value_function(ctx, name) || aml_text_function(name) || aml_list_function(name) ||
+             aml_map_function(name) || aml_scalar_intrinsic_function(name))) {
             AML_Var value = {0};
             aml_eval_value(ctx, text, &value);
             aml_value_clear(&value);
@@ -7798,7 +7988,7 @@ void* am_compile(const char* script) {
 // Helper: resolve var to array (inlined, frequent operation)
 static inline AM_Array* bc_get_array(AML_ExecCtx* ctx, const char* name) {
     AML_Var* v = resolve_var_full(ctx, name);
-    if (v && v->type == AML_TYPE_LIST) {
+    if (v && (v->type == AML_TYPE_LIST || v->type == AML_TYPE_MAP)) {
         set_error(ctx, "TAPE requires a numeric array");
         return NULL;
     }
@@ -10122,4 +10312,204 @@ AM_List* am_list_slice(const AM_List* list, int start, int end) {
 
 AM_List* am_list_clone(const AM_List* list) {
     return list ? am_list_slice(list, 0, list->len) : NULL;
+}
+
+static int am_decimal_digits(int n) {
+    int digits = 1;
+    while (n >= 10) { n /= 10; digits++; }
+    return digits;
+}
+
+// Count + ':' then one byte-length + ':' + raw UTF-8 field per item.
+// The byte lengths make every sequence unambiguous, including empty strings,
+// delimiters, control characters, and multibyte Unicode. Nothing is escaped.
+AM_String* am_list_key(const AM_List* list) {
+    if (!list) return NULL;
+    int byte_len = am_decimal_digits(list->len) + 1;
+    int len = byte_len;
+    for (int i = 0; i < list->len; i++) {
+        const AM_String* item = list->items[i];
+        int prefix = am_decimal_digits(item->byte_len) + 1;
+        if (byte_len > AM_MAX_STRING_BYTES - prefix ||
+            item->byte_len > AM_MAX_STRING_BYTES - byte_len - prefix) return NULL;
+        byte_len += prefix + item->byte_len;
+        len += prefix + item->len;
+    }
+    AM_String* out = am_string_alloc(byte_len, len);
+    if (!out) return NULL;
+    size_t capacity = (size_t)byte_len + 1;
+    int written = snprintf(out->data, capacity, "%d:", list->len);
+    if (written < 0 || (size_t)written >= capacity) goto failed;
+    size_t offset = (size_t)written;
+    for (int i = 0; i < list->len; i++) {
+        const AM_String* item = list->items[i];
+        if (offset >= capacity) goto failed;
+        size_t remaining = capacity - offset;
+        written = snprintf(out->data + offset, remaining, "%d:", item->byte_len);
+        if (written < 0 || (size_t)written >= remaining) goto failed;
+        offset += (size_t)written;
+        if (item->byte_len < 0 || (size_t)item->byte_len >= capacity - offset)
+            goto failed;
+        memcpy(out->data + offset, item->data, (size_t)item->byte_len);
+        offset += (size_t)item->byte_len;
+    }
+    if (offset != (size_t)byte_len) goto failed;
+    out->data[offset] = 0;
+    return out;
+failed:
+    am_string_free(out);
+    return NULL;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ORDERED NUMERIC MAPS — hashed UTF-8 keys, insertion-order finite float values
+// ═══════════════════════════════════════════════════════════════════════════════
+
+static uint64_t am_map_hash(const AM_String* key) {
+    uint64_t hash = UINT64_C(14695981039346656037);
+    for (int i = 0; i < key->byte_len; i++) {
+        hash ^= (unsigned char)key->data[i];
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
+AM_Map* am_map_new(void) {
+    AM_Map* map = (AM_Map*)malloc(sizeof(*map));
+    if (!map) return NULL;
+    memset(map, 0, sizeof(*map));
+    map->refcount = 1;
+    return map;
+}
+
+void am_map_ref(AM_Map* map) {
+    if (map) __atomic_add_fetch(&map->refcount, 1, __ATOMIC_RELAXED);
+}
+
+void am_map_free(AM_Map* map) {
+    if (!map || __atomic_sub_fetch(&map->refcount, 1, __ATOMIC_ACQ_REL) > 0) return;
+    for (int i = 0; i < map->len; i++) am_string_free(map->entries[i].key);
+    free(map->entries);
+    free(map->buckets);
+    free(map);
+}
+
+static int am_map_find(const AM_Map* map, const AM_String* key, uint64_t hash) {
+    if (!map->bucket_capacity) return -1;
+    unsigned int mask = (unsigned int)map->bucket_capacity - 1;
+    unsigned int slot = (unsigned int)hash & mask;
+    while (map->buckets[slot]) {
+        int index = map->buckets[slot] - 1;
+        const AM_MapEntry* entry = &map->entries[index];
+        if (entry->hash == hash && entry->key->byte_len == key->byte_len &&
+            !memcmp(entry->key->data, key->data, (size_t)key->byte_len)) return index;
+        slot = (slot + 1) & mask;
+    }
+    return -1;
+}
+
+static void am_map_index_entry(int* buckets, int bucket_capacity,
+                                const AM_MapEntry* entry, int index) {
+    unsigned int mask = (unsigned int)bucket_capacity - 1;
+    unsigned int slot = (unsigned int)entry->hash & mask;
+    while (buckets[slot]) slot = (slot + 1) & mask;
+    buckets[slot] = index + 1;
+}
+
+// Both replacement allocations and reindexing finish before either live
+// buffer changes. A failed reserve preserves all map storage and references.
+static int am_map_reserve(AM_Map* map, int need) {
+    if (need <= map->capacity) return 0;
+    if (need > AM_MAX_MAP_ITEMS) return -1;
+    int capacity = map->capacity ? map->capacity : 8;
+    while (capacity < need) capacity *= 2;
+    int bucket_capacity = capacity * 2;
+    AM_MapEntry* entries = (AM_MapEntry*)malloc((size_t)capacity * sizeof(*entries));
+    if (!entries) return -1;
+    int* buckets = (int*)calloc((size_t)bucket_capacity, sizeof(*buckets));
+    if (!buckets) { free(entries); return -1; }
+    if (map->len) memcpy(entries, map->entries, (size_t)map->len * sizeof(*entries));
+    for (int i = 0; i < map->len; i++)
+        am_map_index_entry(buckets, bucket_capacity, &entries[i], i);
+    free(map->entries);
+    free(map->buckets);
+    map->entries = entries;
+    map->capacity = capacity;
+    map->buckets = buckets;
+    map->bucket_capacity = bucket_capacity;
+    return 0;
+}
+
+int am_map_has(const AM_Map* map, const AM_String* key) {
+    return map && key && am_map_find(map, key, am_map_hash(key)) >= 0;
+}
+
+int am_map_get(const AM_Map* map, const AM_String* key, float* out) {
+    if (!map || !key || !out) return -1;
+    int index = am_map_find(map, key, am_map_hash(key));
+    if (index < 0) return 0;
+    *out = map->entries[index].value;
+    return 1;
+}
+
+int am_map_set(AM_Map* map, AM_String* key, float value) {
+    if (!map || !key || !isfinite(value)) return -1;
+    uint64_t hash = am_map_hash(key);
+    int index = am_map_find(map, key, hash);
+    if (index >= 0) {
+        map->entries[index].value = value;
+        return 0;
+    }
+    if (map->len >= AM_MAX_MAP_ITEMS || am_map_reserve(map, map->len + 1)) return -1;
+    AM_MapEntry* entry = &map->entries[map->len];
+    am_string_ref(key);
+    entry->key = key;
+    entry->value = value;
+    entry->hash = hash;
+    am_map_index_entry(map->buckets, map->bucket_capacity, entry, map->len);
+    map->len++;
+    return 0;
+}
+
+int am_map_delete(AM_Map* map, const AM_String* key) {
+    if (!map || !key) return -1;
+    int index = am_map_find(map, key, am_map_hash(key));
+    if (index < 0) return 0;
+    am_string_free(map->entries[index].key);
+    if (index + 1 < map->len)
+        memmove(&map->entries[index], &map->entries[index + 1],
+                (size_t)(map->len - index - 1) * sizeof(*map->entries));
+    map->len--;
+    memset(&map->entries[map->len], 0, sizeof(*map->entries));
+    memset(map->buckets, 0, (size_t)map->bucket_capacity * sizeof(*map->buckets));
+    for (int i = 0; i < map->len; i++)
+        am_map_index_entry(map->buckets, map->bucket_capacity, &map->entries[i], i);
+    return 1;
+}
+
+AM_Map* am_map_clone(const AM_Map* map) {
+    if (!map) return NULL;
+    AM_Map* out = am_map_new();
+    if (!out) return NULL;
+    if (am_map_reserve(out, map->len)) { am_map_free(out); return NULL; }
+    for (int i = 0; i < map->len; i++) {
+        out->entries[i] = map->entries[i];
+        am_string_ref(out->entries[i].key);
+        am_map_index_entry(out->buckets, out->bucket_capacity, &out->entries[i], i);
+        out->len++;
+    }
+    return out;
+}
+
+AM_List* am_map_keys(const AM_Map* map) {
+    if (!map) return NULL;
+    AM_List* out = am_list_new();
+    if (!out) return NULL;
+    for (int i = 0; i < map->len; i++) {
+        if (am_list_push(out, map->entries[i].key) < 0) {
+            am_list_free(out);
+            return NULL;
+        }
+    }
+    return out;
 }
