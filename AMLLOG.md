@@ -12,6 +12,14 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-10-07 — bound the module test's source builder
+
+CodeQL review of PR #27 flagged three fixture-building loops that accumulated
+`snprintf` return values without checking truncation. The test now uses one
+checked append helper: capacity is verified before pointer arithmetic, and a
+negative/truncated formatting result fails before advancing the offset.
+`make test-imports` still passes 1017 checks and the compiled/interpreted gates.
+
 ## 2026-10-07 — native modules, UTF-8 values, and worker snapshots (v5.2.0)
 
 Haiku needs organs in separate AML files and words that remain words through

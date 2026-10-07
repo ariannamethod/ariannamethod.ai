@@ -3,6 +3,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "ariannamethod.h"
 #include <math.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +28,23 @@ static void put_file(const char* path, const char* text) {
     size_t size = strlen(text);
     CHECK(fwrite(text, 1, size, file) == size);
     CHECK(fclose(file) == 0);
+}
+
+static void append_source(char* buffer, size_t capacity, size_t* used,
+                          const char* format, ...) {
+    if (*used >= capacity) {
+        fputs("FAIL: fixture source capacity exhausted\n", stderr);
+        exit(1);
+    }
+    va_list args;
+    va_start(args, format);
+    int written = vsnprintf(buffer + *used, capacity - *used, format, args);
+    va_end(args);
+    if (written < 0 || (size_t)written >= capacity - *used) {
+        fputs("FAIL: fixture source truncated\n", stderr);
+        exit(1);
+    }
+    *used += (size_t)written;
 }
 
 static void tension_is(float expected) {
@@ -211,7 +229,7 @@ static void test_budgets(void) {
 
     size_t used = 0;
     for (int i = 0; i <= AML_MAX_LINES; i++)
-        used += (size_t)snprintf(script + used, sizeof(script) - used, "TENSION 0.875\n");
+        append_source(script, sizeof(script), &used, "TENSION 0.875\n");
     put_file("tree/too-many-lines.aml", script);
     reject_paths("TENSION 0.875\nIMPORT \"tree/too-many-lines.aml\"\n", "line limit");
 
@@ -222,10 +240,11 @@ static void test_budgets(void) {
     CHECK(fclose(large) == 0);
     reject_paths("TENSION 0.875\nIMPORT \"tree/too-large.aml\"\n", "source exceeds 1 MiB");
 
-    used = (size_t)snprintf(script, sizeof(script), "TENSION 0.875\n");
+    used = 0;
+    append_source(script, sizeof(script), &used, "TENSION 0.875\n");
     for (int i = 0; i < AML_MAX_FUNCS; i++)
-        used += (size_t)snprintf(script + used, sizeof(script) - used,
-                                "def budget_%d():\n    return %d\n", i, i);
+        append_source(script, sizeof(script), &used,
+                      "def budget_%d():\n    return %d\n", i, i);
     put_file("tree/too-many-funcs.aml", script);
     reject_paths("TENSION 0.875\nIMPORT \"tree/too-many-funcs.aml\"\n", "function limit");
 
@@ -237,13 +256,13 @@ static void test_budgets(void) {
     }
     reject_paths("TENSION 0.875\nIMPORT \"tree/depth-0.aml\"\n", "depth limit");
 
-    used = (size_t)snprintf(script, sizeof(script), "TENSION 0.875\n");
+    used = 0;
+    append_source(script, sizeof(script), &used, "TENSION 0.875\n");
     for (int i = 0; i < AML_MAX_IMPORTS; i++) {
         char filename[80];
         snprintf(filename, sizeof(filename), "tree/source-%d.aml", i);
         put_file(filename, "");
-        used += (size_t)snprintf(script + used, sizeof(script) - used,
-                                "IMPORT \"%s\"\n", filename);
+        append_source(script, sizeof(script), &used, "IMPORT \"%s\"\n", filename);
     }
     reject_paths(script, "source limit");
 
