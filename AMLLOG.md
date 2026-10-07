@@ -12,6 +12,55 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-10-07 — words carry their own weight (v5.4.0)
+
+Haiku's cloud needs growing word weights and transition counts. `AM_Map`
+provides an ordered UTF-8-string-to-finite-float collection with hashed lookup,
+geometric growth, and a 65,536-entry bound. Eight `map_*` intrinsics expose
+construction, length, membership, lookup, set, delete, keys, and clone.
+Replacement preserves order; deletion preserves the remaining order;
+reinsertion appends. Missing lookup fails explicitly. `PRINT` emits an ordered
+JSON object with escaped text keys and round-trippable float32 values.
+
+Map ownership follows string lists: assignment copies a container, parameters
+retain shared mutation, returns carry ownership, and persistent/worker
+snapshots copy containers. Host setters prepare replacement before publication.
+Growth allocates both entry storage and its hash index before replacing either;
+allocation failure preserves the previous map. Delete rebuilds the existing
+index without allocating. Typed scalar, array, text, list, TAPE, and bytecode
+paths reject maps where they do not belong.
+
+`list_key` encodes the item count and each UTF-8 byte length before its exact
+content. Empty words, colons, controls, and multibyte tokens keep their
+structural identity. Its complete result must fit the 1 MiB text limit.
+`assert(condition, message)` supplies application preconditions; `floor(x)`
+supports integer checks. Both require finite scalar inputs and exact arity.
+Haiku bounds its counters at 2^24 and stages updates before publishing them.
+Its in-memory cloud and transition example now run on this toolchain.
+
+Proof on Linux x86_64:
+
+- `make test-maps`: **3,540 API / 4,708 allocation-fault / 3,727 runtime**
+  checks. **76 invalid programs** fail through interpreter, resumable,
+  bytecode, runner, and compiled scalar execution; exact JSON output agrees.
+- Persistent replacement refuses **29 / 30 / 31** consecutive allocation
+  budgets in interpreter / resumable / bytecode execution before saving
+  completely. Each rejected replacement retains the previous table;
+  tracked live allocations return to zero after cleanup.
+- ASan/UBSan pass API and runtime suites, including the **65,536-entry**
+  boundary and **12 workers / 120,000** copy/mutation cycles. LeakSanitizer
+  is disabled under ptrace; allocation wrappers check retained ownership.
+- Independent differential probes cover **20,000** ordered map operations,
+  two **820-key** exhaustive alphabets, and failed-statement persistence.
+- Existing **550/550** runtime tests, all three compiler suites, **1,017**
+  import checks, text **483 / 515 / 1,122**, and list **173 / 978 / 2,817**
+  gates pass. Their existing 41 text and 66 list invalid programs pass all
+  five execution paths.
+
+See [MAPS](docs/MAPS.md) for the AML/C contract and `make test-maps` for the
+reproducible gates. Rebuild hosts with the new header: `AML_Var` and
+`AML_ExecCtx` now carry maps. No dependency was added.
+
 ## 2026-10-07 — string collections carry Haiku's word overlap (v5.3.0)
 
 `AM_List` adds ordered mutable containers of immutable UTF-8 strings. Eight

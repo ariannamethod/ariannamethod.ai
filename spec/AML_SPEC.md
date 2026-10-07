@@ -81,10 +81,12 @@ limits, and compiled-program file requirements.
 
 Strings are immutable validated UTF-8, with at most 1 MiB of content and no
 embedded NUL. Variables, arguments, and returns carry their actual scalar,
-array, string, or string-list type. User functions require exactly their declared arity.
+array, string, string-list, or numeric-map type. User functions require exactly their declared arity.
 `PRINT value` writes UTF-8 strings, numeric scalars, or bracketed numeric arrays,
 then a newline. String lists print as JSON arrays of UTF-8 strings with escaped
 quotes, backslashes, and control bytes. `ECHO` keeps its literal command semantics.
+Numeric maps print as JSON objects with the same escaped keys and finite
+numeric values, in insertion order.
 
 The eight expression intrinsics are `text_len`, `text_bytes`, `text_equal`,
 `text_find`, `text_slice`, `text_concat`, `text_codepoint`, and
@@ -111,10 +113,36 @@ clone containers too. [LISTS.md](../docs/LISTS.md) defines the full AML/C owners
 contract. Lists require `list_*` operations; scalar and numeric-array operators
 reject them.
 
+Numeric maps associate exact UTF-8 string keys with finite float scalars, with
+at most 65,536 entries. Their eight intrinsics are `map_new`, `map_len`,
+`map_has`, `map_get`, `map_set`, `map_delete`, `map_keys`, and `map_clone`.
+Lookup uses a hash index and exact byte equality. Replacing a value retains
+its insertion position; deleting and reinserting appends the key. Missing
+`map_get` is an error; `map_has` returns zero or one. Set returns the stored
+value; delete returns one if removed, zero if absent. `map_keys` returns an
+independent string list. Keys may be empty and retain their Unicode spelling.
+
+Map assignment, persistent storage, and worker launch clone the container;
+function parameters share it. Failed set growth preserves the prior map.
+Numeric operations reject maps. [MAPS.md](../docs/MAPS.md) defines ownership,
+host APIs, execution bounds, and operation-level allocation guarantees.
+
+`list_key(xs)` constructs an injective string encoding: decimal item count
+then `:`, followed by each item's decimal UTF-8 byte length, `:`, and its
+unmodified content. Thus an empty list is `0:` and one empty string is `1:0:`.
+The result retains the 1 MiB text limit; an oversized encoding fails.
+
+`assert(condition, message)` accepts exactly a finite scalar and UTF-8 string.
+A nonzero condition returns one; zero stops execution with the message.
+Argument expressions follow ordinary eager evaluation. Assertion failure
+does not roll back effects of earlier statements or argument evaluation.
+`floor(x)` accepts exactly one finite scalar and returns its downward-rounded
+integer value as a scalar; wrong types and nonfinite inputs fail explicitly.
+
 The numeric array queries `len`, `sum`, `rows`, and `cols` take exactly one typed
 argument; `dot` takes exactly two. Parenthesized and returned values retain
 their type. Optional gamma/beta/bias array arguments are evaluated once and
-reject text/list values before the numeric operation updates output or tape.
+reject text/list/map values before the numeric operation updates output or tape.
 Existing scalar and undefined-name placeholders retain their absent-array
 behavior.
 
