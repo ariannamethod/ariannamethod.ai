@@ -1,6 +1,6 @@
 # AML — Arianna Method Language
 
-**Version:** 5.6.0 (Numerical values and Unicode lowercase)
+**Version:** 5.7.0 (Immutable tokenizers and live text input)
 **Extension:** `.aml`
 **Status:** Living specification
 
@@ -81,12 +81,13 @@ limits, and compiled-program file requirements.
 
 Strings are immutable validated UTF-8, with at most 1 MiB of content and no
 embedded NUL. Variables, arguments, and returns carry their actual scalar,
-array, string, string-list, or numeric-map type. User functions require exactly their declared arity.
+array, string, string-list, numeric-map, or immutable-tokenizer type. User functions require exactly their declared arity.
 `PRINT value` writes UTF-8 strings, numeric scalars, or bracketed numeric arrays,
 then a newline. String lists print as JSON arrays of UTF-8 strings with escaped
 quotes, backslashes, and control bytes. `ECHO` keeps its literal command semantics.
 Numeric maps print as JSON objects with the same escaped keys and finite
 numeric values, in insertion order.
+Tokenizer values print as `<tokenizer>`.
 
 The nine expression intrinsics are `text_len`, `text_bytes`, `text_equal`,
 `text_find`, `text_slice`, `text_concat`, `text_codepoint`, and
@@ -102,6 +103,33 @@ context for Greek final sigma. Locale-specific casing and normalization are
 separate operations. Output must fit the same 1 MiB bound; a failed allocation
 or expansion leaves the input unchanged. [TEXT_LOWER.md](../docs/TEXT_LOWER.md)
 records the tables, provenance, and exact casing contract.
+
+`codepoint_isalnum(cp)` accepts one finite integer Unicode scalar, including
+zero, and returns one for Unicode 15 Letter/Number categories, zero otherwise.
+Invalid scalars and other types fail. `read_line()` takes no arguments, flushes
+standard output, then reads one complete line from standard input. It returns
+`[text]` with only the final LF removed, or `[]` for EOF without remaining
+bytes. Blank lines return `[""]`; CR remains part of the string. NUL, invalid
+UTF-8, input errors, exceeded 1 MiB line limits and allocation failures stop
+execution without publishing a partial value. Consumed input remains consumed.
+[TEXT_INPUT.md](../docs/TEXT_INPUT.md) defines the C APIs and Unicode data.
+
+`tokenizer_load(path)` requires one string and creates an immutable tokenizer
+through an independent copied `AM_TokenizerBackend` table. Relative paths use
+the statement's original AML source directory, including imported statements
+and compiled executables. `tokenizer_pieces(model, text)` returns a fresh string
+list. Every piece is valid UTF-8 without NUL; a call admits at most 65,536 pieces
+and 1,048,576 aggregate output bytes. The list publishes only after complete
+successful encoding. Failed assignments preserve their previous target.
+
+Assignments, arguments, returns, persistent globals and worker snapshots retain
+immutable models. Atomic references destroy each native model at its final
+owner. Each value keeps its original copied callback table; registry replacement
+affects future loads. Configure registration before execution and keep callback
+code loaded while owners exist. The NoTorch bridge supplies deterministic
+Unigram inference, model normalization and unknown surface pieces. Scalar,
+array, text, list and map operations reject tokenizer operands.
+[TOKENIZER.md](../docs/TOKENIZER.md) defines backend ownership and model support.
 
 String lists are ordered mutable containers of immutable text, with a maximum
 of 65,536 items. Their eight intrinsics are `list_new`, `list_len`, `list_get`,
@@ -170,7 +198,7 @@ A missing backend is an explicit runtime error; existing `randn` and tensor
 initialization keep their current streams. See [SAMPLING.md](../docs/SAMPLING.md).
 
 Numerical values use an independent optional `AM_NumericalBackend` table.
-`am_use_notorch()` registers both canonical NoTorch tables; the sampling-only
+`am_use_notorch()` registers canonical NoTorch numerical, sampling and tokenizer tables; the sampling-only
 registration keeps its existing contract. Registration copies the tables,
 survives initialization, and must finish before workers run. A missing or
 incomplete numerical table fails explicitly.
@@ -200,7 +228,7 @@ arithmetic contracts.
 The numeric array queries `len`, `sum`, `rows`, and `cols` take exactly one typed
 argument; `dot` takes exactly two. Parenthesized and returned values retain
 their type. Optional gamma/beta/bias array arguments are evaluated once and
-reject text/list/map values before the numeric operation updates output or tape.
+reject text/list/map/tokenizer values before the numeric operation updates output or tape.
 Existing scalar and undefined-name placeholders retain their absent-array
 behavior.
 
