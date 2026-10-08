@@ -42,11 +42,20 @@ no function-table slots. Every intrinsic accepts exactly the arguments shown.
 | `list_find(xs, text)` | First matching index, or -1 |
 | `list_slice(xs, start, end)` | New container with the selected items; end is exclusive |
 | `list_clone(xs)` | New container with all items |
+| `list_sorted(xs)` | New container in stable ascending UTF-8 byte order |
 | `list_key(xs)` | Canonical text key preserving the exact ordered items |
 
 `list_push` and `list_set` work as standalone statements and inside expressions.
 `list_find` compares exact UTF-8 bytes and starts at index zero. It performs no
 case folding or normalization.
+
+`list_sorted` uses the same byte comparison in ascending order. Valid UTF-8 byte
+order follows Unicode scalar order and is independent of the host locale.
+Prefixes sort before their extensions; empty strings sort first. Duplicates
+remain in their original order, including distinct string owners containing
+equal bytes. The operation leaves the input unchanged and retains its immutable
+string items in an independent container. It performs no normalization or case
+folding. `list_sorted(map_keys(weights))` provides lexical traversal of a map.
 
 `list_key` prefixes the item count and each UTF-8 byte length with decimal
 digits and `:` separators. `[]` becomes `0:`; `["", "a:b"]` becomes
@@ -112,9 +121,9 @@ list construction can span statements, functions, and modules.
 
 Failed push/set operations leave that list unchanged. Push growth allocates a
 replacement item buffer before publishing it; a failed allocation retains the
-old buffer, capacity, length, and item references. Cloning, slicing, and host
-setters leave their source containers unchanged on allocation failure. Failed
-persistent replacement preserves the previous persistent table.
+old buffer, capacity, length, and item references. Cloning, slicing, sorting,
+and host setters leave their source containers unchanged on allocation failure.
+Failed persistent replacement preserves the previous persistent table.
 
 These guarantees apply to the named operations. Program execution preserves
 the effects of completed earlier statements. After a later runtime error, the
@@ -132,6 +141,7 @@ immutable.
 | `am_list_new()` | Owned empty list; NULL on failure |
 | `am_list_ref(xs)` / `am_list_free(xs)` | Retain/release a container; NULL is accepted |
 | `am_list_clone(xs)` | Owned container copy; NULL on failure |
+| `am_list_sorted(xs)` | Owned stable lexical copy; NULL on NULL input or allocation failure |
 | `am_list_push(xs, item)` | Borrow `item`, retain on success; new length or -1 |
 | `am_list_get(xs, index)` | Owned retained string; NULL for invalid list/index |
 | `am_list_set(xs, index, item)` | Borrow `item`, retain on success; zero or -1 |
@@ -164,3 +174,6 @@ The dedicated suite checks low-level ownership and allocation failures, typed
 execution, copied assignments, shared parameters, persistent storage, worker
 snapshots, numeric type rejection, exact JSON output, and interpreter/resumable/
 bytecode/runner/compiled scalar parity.
+Sorting checks fixed Unicode/control/prefix order, duplicate-owner stability,
+all short merge boundaries, the 65,536-item limit, detached mutation, every
+allocation refusal, and persistence through all three host execution modes.

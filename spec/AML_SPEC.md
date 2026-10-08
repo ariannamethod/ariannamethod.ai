@@ -1,6 +1,6 @@
 # AML — Arianna Method Language
 
-**Version:** 5.8.0 (Explicit records and portable checkpoints)
+**Version:** 5.9.0 (Stable lexical lists and complete expressions)
 **Extension:** `.aml`
 **Status:** Living specification
 
@@ -64,6 +64,16 @@ expression     = term { ( "+" | "-" | "*" | "/" | ">" | "<" | "==" | "!=" | "and
 term           = number | identifier | identifier "(" [ args ] ")" | "(" expression ")" ;
 args           = value { "," value } ;
 ```
+
+Expressions consume their complete supplied argument. Unclosed parentheses or
+index brackets, unsupported operators and trailing tokens are errors. A `#`
+outside quoted strings starts a comment; a final `:` terminates an `if`/`while`
+condition before that comment. Level 0 commands retain their own argument
+boundaries: for example, `TENSION` evaluates one whole expression, while
+`TAPE ADAMW` consumes its separate positional numeric arguments. Expression
+evaluation remains eager; earlier statements and evaluated arguments keep their
+effects when a later expression fails. `%` is unsupported; express a remainder
+as `x - floor(x / divisor) * divisor`.
 
 **Note on indentation:** AML Level 2 uses Python-style indentation for blocks. This is deliberate — transformer attention weights respond strongly to indented code-like structures (see TRIPD research). The indentation IS the syntax, not decoration.
 
@@ -137,14 +147,21 @@ and allocation failure are explicit errors. [TOKENIZER.md](../docs/TOKENIZER.md)
 defines backend ownership and model support.
 
 String lists are ordered mutable containers of immutable text, with a maximum
-of 65,536 items. Their eight intrinsics are `list_new`, `list_len`, `list_get`,
-`list_push`, `list_set`, `list_find`, `list_slice`, and `list_clone`. Indexes must
+of 65,536 items. Their intrinsics are `list_new`, `list_len`, `list_get`,
+`list_push`, `list_set`, `list_find`, `list_slice`, `list_clone`, `list_sorted`,
+and `list_key`. Indexes must
 be finite integers; negative indexes count from the end. Get/set reject an
 out-of-range index; slices clamp exclusive endpoints. Lookup uses exact UTF-8
 content and returns the first index or `-1`. Push returns the new length; set
 returns the stored string. Wrong types, invalid indexes, capacity exhaustion,
 and allocation failure stop the current operation. Failed push/set leave the
 container unchanged.
+
+`list_sorted(xs)` returns an independent container sorted stably by ascending
+UTF-8 bytes. Empty strings and duplicates are preserved; equal byte strings
+retain their input order. Sorting retains immutable items and leaves the input
+container unchanged on success or allocation failure. Ordering is independent
+of locale and performs no case folding or normalization.
 
 Every list assignment clones the container; function parameters retain a
 shared reference so a callee can mutate its caller's list. Clones and slices

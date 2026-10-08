@@ -70,6 +70,17 @@ static const char* program =
     "list_push(special, text_from_codepoint(1))\n"
     "list_push(special, text_from_codepoint(31))\n"
     "list_push(special, text_from_codepoint(127))\n"
+    "sorted_special = list_sorted(identity(special))\n"
+    "list_sorted(special) # discarded sorted result owns its references\n"
+    "sorted_words = list_sorted(words)\n"
+    "sorted_copy = list_sorted(words)\n"
+    "list_set(sorted_copy, 0, 'changed_sorted')\n"
+    "sorted_empty = list_sorted(empty)\n"
+    "sorted_one = list_sorted(fresh('only'))\n"
+    "duplicates = list_new()\n"
+    "list_push(duplicates, 'é')\nlist_push(duplicates, '')\nlist_push(duplicates, 'é')\n"
+    "list_push(duplicates, 'é')\n"
+    "sorted_duplicates = list_sorted(duplicates)\n"
     "length = list_len(words)\n"
     "first = list_find(words, 'owl')\n"
     "missing = list_find(words, 'missing')\n"
@@ -110,7 +121,9 @@ static const char* printed =
     "PRINT first\nPRINT missing\nPRINT composed\nPRINT combining\nPRINT same\n"
     "PRINT 'x=add(words,copy)'\nPRINT flow\n"
     "if 1:\n    if 0:\n        ECHO WRONG_INNER\n"
-    "else:\n    ECHO WRONG_OUTER\nECHO GOOD\nPRINT events\nPRINT once_sum\n";
+    "else:\n    ECHO WRONG_OUTER\nECHO GOOD\nPRINT events\nPRINT once_sum\n"
+    "PRINT sorted_special\nPRINT sorted_words\nPRINT sorted_copy\n"
+    "PRINT sorted_empty\nPRINT sorted_one\nPRINT sorted_duplicates\n";
 
 static const char* expected_output =
     "[]\n"
@@ -129,13 +142,19 @@ static const char* expected_output =
     "[\"\", \"é\", \"é\", \"🦉\", \"one\\n\\r\\t\\\\\\\"'\", \"\\u0001\", \"\\u001f\", \"\x7f\"]\n"
     "owl\nCafé\nold\nowl\n2\n7\n0\n-1\n1\n2\n1\nx=add(words,copy)\n"
     "[\"after\", \"zero\", \"one\", \"two\", \"outer\"]\n[AML] GOOD\n"
-    "[\"g\", \"s\"]\n15\n";
+    "[\"g\", \"s\"]\n15\n"
+    "[\"\", \"\\u0001\", \"\\u001f\", \"é\", \"one\\n\\r\\t\\\\\\\"'\", \"\x7f\", \"é\", \"🦉\"]\n"
+    "[\"Café\", \"a\", \"b\", \"c\", \"owl\", \"tail\", \"Привет\"]\n"
+    "[\"changed_sorted\", \"a\", \"b\", \"c\", \"owl\", \"tail\", \"Привет\"]\n"
+    "[]\n[\"only\"]\n[\"\", \"é\", \"é\", \"é\"]\n";
 
 static const char* bad[] = {
     "x = list_new(1)", "x = list_len()", "x = list_get(words, 0, 1)",
     "x = list_push(words)", "x = list_set(words, 0)",
     "x = list_find(words, 'x', 1)", "x = list_slice(words, 0)",
     "x = list_clone(words, 1)", "x = list_len(words,)",
+    "x = list_sorted()", "x = list_sorted(words, 1)", "x = list_sorted(1)",
+    "x = list_sorted('owl')", "x = list_sorted(a)", "list_sorted(1)",
     "x = list_len('owl')", "x = list_get(a, 0)", "x = list_push(words, 1)",
     "x = list_push(words, list_new())", "x = list_set(words, 0, a)",
     "x = list_find(words, 1)", "x = list_slice(words, '0', 1)", "x = list_clone(1)",
@@ -218,6 +237,11 @@ static void test_program(int mode) {
     const char* last[] = {"last"};
     const char* flow[] = {"after", "zero", "one", "two", "outer"};
     const char* events[] = {"g", "s"};
+    const char* sorted_words[] = {"Café", "a", "b", "c", "owl", "tail", "Привет"};
+    const char* sorted_copy[] = {"changed_sorted", "a", "b", "c", "owl", "tail", "Привет"};
+    const char* sorted_duplicates[] = {"", "é", "é", "é"};
+    const char* duplicates[] = {"é", "", "é", "é"};
+    const char* sorted_one[] = {"only"};
     list_equals("words", 7, words);
     list_equals("copy", 4, copy);
     list_equals("alias", 3, alias);
@@ -232,6 +256,12 @@ static void test_program(int mode) {
     list_equals("replaced", 1, last);
     list_equals("flow", 5, flow);
     list_equals("events", 2, events);
+    list_equals("sorted_words", 7, sorted_words);
+    list_equals("sorted_copy", 7, sorted_copy);
+    list_equals("sorted_duplicates", 4, sorted_duplicates);
+    list_equals("duplicates", 4, duplicates);
+    list_equals("sorted_empty", 0, NULL);
+    list_equals("sorted_one", 1, sorted_one);
     text_equals("saved", "owl");
     text_equals("stored", "Café");
     text_equals("retained", "old");

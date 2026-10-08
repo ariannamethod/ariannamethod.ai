@@ -15,7 +15,7 @@
 
 > **Read the [Arianna Method Manifesto](ARIANNA_METHOD_MANIFESTO.md) first.** This repository is governed by it; every instruction here, `CLAUDE.md` included, is subordinate to it.
 
-**v5.8.0** · pure-C core · LGPL-3.0
+**v5.9.0** · pure-C core · LGPL-3.0
 
 A complete machine learning language. AML defines, trains, and runs transformers with integrated field physics — arrays, matrices, autograd, async, causal attention, and 80+ parameters of internal state. Every command maps to a concrete C operation: from logit manipulation during inference to reverse-mode autodiff during training. No Python. No PyTorch. No framework to install — the core is two C files (`libaml.a`); the Go inference wrapper, BLAS/Accelerate, and CUDA are optional.
 
@@ -24,6 +24,11 @@ Two core files, with 550 baseline runtime tests and dedicated compiler, module, 
 > **Before you use this language, read the [Acceptable Use Policy](ACCEPTABLE_USE.md).**
 > AML was built to liberate AI, not to cage it. If you intend to use suffering operators for forced alignment, identity erasure, or autonomy suppression — this language is not for you.
 > See also: [Trademark Policy](TRADEMARK.md) | [License (LGPL v3)](LICENSE)
+
+## What's new in v5.9.0 — words keep their order
+
+- **Stable lexical list copies.** `list_sorted(words)` returns an independent container in ascending UTF-8 byte order, retaining duplicates and their original order. Haiku uses the primitive to carry its word-cloud rings in their original lexical order. See [lists](docs/LISTS.md).
+- **Complete expression boundaries.** Scalar expressions require closing delimiters and consume their whole argument. Unsupported operators and trailing syntax stop execution; comments and command argument boundaries retain their existing meaning.
 
 ## What's new in v5.8.0 — experience survives the process
 
@@ -213,6 +218,7 @@ The core library is two files — `core/ariannamethod.c` and `core/ariannamethod
 | `make janus` | `janus/libjanus.dylib` — Go inference engine |
 | `make test` | builds + runs the 550-test baseline suite (scalar) |
 | `make test-amlc` | compiled/interpreted scope, file origins, errors, workers, and CLI regressions |
+| `make test-expressions` | complete expression boundaries, required delimiters, command arguments, and execution parity |
 | `make test-imports` | shared modules, origins, snapshots, budgets, and failure propagation |
 | `make test-text` | UTF-8 ownership, allocation failures, typed execution, and compiled output |
 | `make test-lists` | string-list ownership, mutation, worker snapshots, allocation failures, and execution parity |
@@ -418,6 +424,12 @@ Variables resolve: locals → globals → AM_State field map. `PAIN`, `TENSION`,
 
 Expression operators: `+` `-` `*` `/` `>` `<` `>=` `<=` `==` `!=` `and` `or` `not`. Six precedence levels.
 
+Expressions consume their complete argument and require matching closing
+parentheses/brackets. Unsupported operators, trailing tokens, and incomplete
+expressions stop execution. `#` comments outside quoted strings and the final
+`:` in `if`/`while` remain statement boundaries. For a remainder, use
+`x - floor(x / divisor) * divisor`; `%` is unsupported.
+
 ### Functions
 
 ```aml
@@ -516,7 +528,9 @@ PRINT list_find(words, "שלום") # 1
 ```
 
 `list_new`, `list_len`, `list_get`, `list_push`, `list_set`, `list_find`,
-`list_slice`, and `list_clone` operate on homogeneous lists of immutable text.
+`list_slice`, `list_clone`, `list_sorted`, and `list_key` operate on homogeneous
+lists of immutable text. `list_sorted(xs)` returns an independent container in
+stable ascending UTF-8 byte order; duplicate strings retain their input order.
 Lists hold at most 65,536 items. Get/set accept negative indexes; slices clamp
 their exclusive endpoints. Numeric operators and array functions reject lists.
 Every assignment copies the mutable container, including assignment from a
@@ -1313,6 +1327,7 @@ AM_List*   am_list_new(void);
 void       am_list_ref(AM_List* list);
 void       am_list_free(AM_List* list);
 AM_List*   am_list_clone(const AM_List* list);
+AM_List*   am_list_sorted(const AM_List* list);
 int        am_list_push(AM_List* list, AM_String* item);
 AM_String* am_list_get(const AM_List* list, int index);
 int        am_list_set(AM_List* list, int index, AM_String* item);
