@@ -66,6 +66,9 @@ static void test_native(const char* path) {
     char error[256]; AM_Tokenizer* model = am_tokenizer_load(path, error, sizeof(error));
     if (!model) fprintf(stderr, "native load: %s\n", error);
     CHECK(model);
+    AM_String* identity = am_tokenizer_identity(model, error, sizeof(error));
+    CHECK(identity && !strcmp(identity->data, "fc30e3ec6d1e9014281c11d2c3fc4970e26137d9ca8015f6ae606eeb20fb493a"));
+    am_string_free(identity);
     test_vectors(model);
     pthread_t threads[4]; Worker states[4];
     for (int i = 0; i < 4; i++) { states[i] = (Worker){model, 0}; CHECK(pthread_create(&threads[i], NULL, worker, &states[i]) == 0); }

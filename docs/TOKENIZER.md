@@ -14,7 +14,9 @@ PRINT pieces
 
 `tokenizer_load(path)` requires one string and returns a tokenizer value.
 `tokenizer_pieces(model, text)` requires a tokenizer and a string; it returns
-a fresh list of immutable strings. Both names are case-insensitive and reserved
+a fresh list of immutable strings. `tokenizer_identity(model)` returns a fresh
+string containing 64 lowercase SHA-256 hex digits from the exact loaded model
+bytes. All three names are case-insensitive and reserved
 against user function definitions. `PRINT model` emits `<tokenizer>`.
 
 ## Paths, output and ownership
@@ -63,6 +65,11 @@ and NORMAL, UNKNOWN, CONTROL, USER_DEFINED and UNUSED pieces. Unsupported model
 algorithms and byte fallback produce explicit loader errors. There is no
 SentencePiece or protobuf runtime library dependency.
 
+The identity bridge requires NoTorch's `nt_spm_identity` accessor, introduced
+in [NoTorch PR #165](https://github.com/ariannamethod/notorch/pull/165), commit
+[`9380e86017d466f456ae54514aa841f00c26ea9e`](https://github.com/ariannamethod/notorch/commit/9380e86017d466f456ae54514aa841f00c26ea9e).
+Build and install that revision or a descendant before linking this bridge.
+
 `am_use_notorch()` registers tokenizer, sampling and numerical backends together.
 The optional runner and compiler already call it. Install the bridge, AML and
 NoTorch archives in one prefix for `amlc --scalar`; the link order remains
@@ -82,6 +89,7 @@ typedef struct {
     int (*pieces)(const void* model, const char* text, size_t bytes,
                   AM_TokenizerEmit emit, void* context,
                   char* error, size_t error_cap);
+    const char* (*identity)(const void* model); // optional borrowed 64-hex SHA-256
 } AM_TokenizerBackend;
 
 void am_set_tokenizer_backend(const AM_TokenizerBackend* backend);
@@ -90,12 +98,18 @@ void am_tokenizer_ref(AM_Tokenizer* model);
 void am_tokenizer_free(AM_Tokenizer* model);
 AM_List* am_tokenizer_pieces(const AM_Tokenizer* model, const AM_String* text,
                            char* error, size_t error_cap);
+AM_String* am_tokenizer_identity(const AM_Tokenizer* model,
+                                char* error, size_t error_cap);
 int am_set_var_tokenizer(const char* name, AM_Tokenizer* model);
 const AM_Tokenizer* am_get_var_tokenizer(const char* name);
 ```
 
-Registration copies the table and survives `am_init`. All three callbacks are
-required; `NULL` or an incomplete table disables future loads. Configure the
+Registration copies the table and survives `am_init`. Load, destroy and pieces
+callbacks are required; `NULL` or an incomplete table disables future loads.
+The identity callback is optional; a model loaded without it reports an explicit
+error when identity is requested. Existing three-callback C initializers leave
+the appended identity callback zero and remain valid source initializers; rebuild
+hosts and bridges against the updated public header. Configure the
 registry before executing programs or starting workers. Each loaded value
 keeps its copied table, so replacement or unregistering changes future loads
 and existing owners continue to use their original callbacks. Keep callback
@@ -106,6 +120,14 @@ and a sink; it emits complete pieces in order, stops on a nonzero sink result,
 then returns zero for success or minus one for failure. It must support
 concurrent encoding on the same model and retain none of the input/sink
 pointers. `destroy` releases the model exactly once at the final owner.
+
+`identity` borrows an immutable NUL-terminated 64-digit lowercase SHA-256 string
+valid until model destruction. AML validates and copies it before returning.
+NoTorch computes it once from the owned byte buffer consumed by parsing; later
+path changes cannot change an already loaded model's identity. An organism
+persists this digest as text and verifies the reopened model before replacing
+its live record. Both pieces and identity remain callable after backend
+registration changes because each owner retains its original callbacks.
 
 The direct C loader passes its caller's path literally. The AML intrinsic
 performs source-relative resolution before calling it. Direct load/pieces

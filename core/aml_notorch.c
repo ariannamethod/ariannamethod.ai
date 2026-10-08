@@ -14,6 +14,10 @@ static void aml_notorch_tokenizer_destroy(void* model) {
     nt_spm_free(model);
 }
 
+static const char* aml_notorch_tokenizer_identity(const void* model) {
+    return nt_spm_identity(model);
+}
+
 static int aml_notorch_tokenizer_pieces(const void* model, const char* text, size_t bytes,
                                        AM_TokenizerEmit emit, void* context,
                                        char* error, size_t error_cap) {
@@ -63,6 +67,7 @@ void am_use_notorch(void) {
         .load = aml_notorch_tokenizer_load,
         .destroy = aml_notorch_tokenizer_destroy,
         .pieces = aml_notorch_tokenizer_pieces,
+        .identity = aml_notorch_tokenizer_identity,
     };
     am_use_notorch_sampling();
     am_set_numerical_backend(&backend);

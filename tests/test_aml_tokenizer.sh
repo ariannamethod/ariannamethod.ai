@@ -46,6 +46,7 @@ model = load_words()
 alias = preserve_words(model)
 model = 0
 PRINT alias
+PRINT tokenizer_identity(alias)
 PRINT tokenizer_pieces(alias, 'aaa')
 PRINT tokenizer_pieces(alias, '⚡👀abéà_')
 PRINT tokenizer_pieces(alias, '')
@@ -63,6 +64,7 @@ PRINT 'AML_TOKENIZER_VECTORS_OK'
 EOF
 cat > "$WORK/expected.out" <<'EOF'
 <tokenizer>
+fc30e3ec6d1e9014281c11d2c3fc4970e26137d9ca8015f6ae606eeb20fb493a
 ["a", "aa"]
 ["⚡👀", "a", "béà_"]
 []
@@ -89,6 +91,7 @@ bad_cases=(
     'tokenizer_pieces(model)' 'tokenizer_pieces(model, 1)' 'tokenizer_pieces(1, "a")'
     'tokenizer_pieces(model, "a", "b")' 'nt_tanh(model)' 'text_len(model)'
     'len(model)' 'result = model + 1' 'codepoint_isalnum(model)'
+    'tokenizer_identity()' 'tokenizer_identity(1)' 'tokenizer_identity(model, 1)'
     "tokenizer_load('$WORK/missing.model')" "tokenizer_load('$WORK/corrupt.model')"
     "tokenizer_load('$WORK/unsupported.model')"
 )

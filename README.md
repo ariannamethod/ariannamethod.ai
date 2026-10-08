@@ -15,7 +15,7 @@
 
 > **Read the [Arianna Method Manifesto](ARIANNA_METHOD_MANIFESTO.md) first.** This repository is governed by it; every instruction here, `CLAUDE.md` included, is subordinate to it.
 
-**v5.7.0** · pure-C core · LGPL-3.0
+**v5.8.0** · pure-C core · LGPL-3.0
 
 A complete machine learning language. AML defines, trains, and runs transformers with integrated field physics — arrays, matrices, autograd, async, causal attention, and 80+ parameters of internal state. Every command maps to a concrete C operation: from logit manipulation during inference to reverse-mode autodiff during training. No Python. No PyTorch. No framework to install — the core is two C files (`libaml.a`); the Go inference wrapper, BLAS/Accelerate, and CUDA are optional.
 
@@ -24,6 +24,11 @@ Two core files, with 550 baseline runtime tests and dedicated compiler, module, 
 > **Before you use this language, read the [Acceptable Use Policy](ACCEPTABLE_USE.md).**
 > AML was built to liberate AI, not to cage it. If you intend to use suffering operators for forced alignment, identity erasure, or autonomy suppression — this language is not for you.
 > See also: [Trademark Policy](TRADEMARK.md) | [License (LGPL v3)](LICENSE)
+
+## What's new in v5.8.0 — experience survives the process
+
+- **Explicit records and portable checkpoints.** Flat typed records group independent mutable owners; detached load, staged replacement and allocation-free swap let AML validate an organism before publishing its state. Versioned, checksummed files preserve exact float32 bits, shapes and order through atomic rename. See [records and checkpoints](docs/RECORDS.md).
+- **Loaded model identity.** `tokenizer_identity(model)` returns the SHA-256 of the exact bytes consumed by NoTorch, so an organism can verify its hearing before resuming saved experience.
 
 ## What's new in v5.7.0 — words reach the organism
 
@@ -217,6 +222,7 @@ The core library is two files — `core/ariannamethod.c` and `core/ariannamethod
 | `make test-text-lower` | Unicode lowercase, contextual sigma, expansion limits, and execution parity |
 | `make test-text-input` | Unicode word classification, line input, prompt delivery, and execution parity |
 | `make test-tokenizer` | immutable model ownership, native pieces, backend failures, and source-relative loading |
+| `make test-records` | typed record ownership, checkpoint wire bytes, atomic publication, file failures, and execution parity |
 | `make test-blas` | the suite with BLAS acceleration |
 | `make test-janus` / `make test-all` | Janus C-API test / AML + Janus |
 | `make install PREFIX=/usr/local` | system-wide: `aml`, `amlc`, `libaml.a`, header |
@@ -464,7 +470,7 @@ indices. Strings hold at most 1 MiB of UTF-8 and exclude embedded NUL.
 the [lowercase contract](docs/TEXT_LOWER.md) specifies context and expansions.
 
 User functions take exactly their declared number of arguments, which may be
-scalars, arrays, strings, string lists, numeric maps, or immutable tokenizers, and return any of those types. `PRINT expression`
+scalars, arrays, strings, string lists, numeric maps, immutable tokenizers, or flat records, and return any of those types. `PRINT expression`
 prints its value followed by a newline; `ECHO` keeps its literal command form.
 See [the text contract](docs/TEXT.md) for ownership, limits, and the host API.
 
@@ -489,6 +495,9 @@ list with ordered normalized pieces and unknown surfaces. The optional NoTorch
 bridge supplies deterministic SentencePiece Unigram inference in C. `PRINT`
 renders a model as `<tokenizer>`. See [tokenizers](docs/TOKENIZER.md) for
 supported model data, output limits, ownership and the C backend contract.
+`tokenizer_identity(model)` returns the 64 lowercase SHA-256 hex digits of the
+exact loaded bytes. Checkpoint metadata can verify that same immutable hearing
+after reopening a model.
 
 ### String lists
 
@@ -545,6 +554,35 @@ scalar and rounds downward to an integer-valued scalar. See [maps](docs/MAPS.md)
 the C API, ownership, allocation guarantees, and complete encoding contract.
 `isfinite(x)` takes one scalar and returns zero for NaN or either infinity,
 one otherwise.
+
+### Records and checkpoints
+
+```aml
+state = record_new()
+record_set(state, "turn", 0)
+record_set(state, "words", list_new())
+list_push(record_get(state, "words"), "rain")
+pending = record_clone(state)
+record_set(pending, "turn", 1)
+status = checkpoint_save(pending, "haiku.state")
+record_swap(state, pending)
+```
+
+Records own at most 256 named float, array/matrix, string, string-list or
+numeric-map fields. `record_set`, assignment and snapshots copy mutable leaves;
+function parameters share the record. `record_get` retains a typed child for
+direct organ calls. `record_has`, `record_keys` and `record_kind` let AML inspect
+its own schema. `record_replace` stages a full copy before replacing contents;
+`record_swap` exchanges already owned contents without allocation.
+
+`checkpoint_load(path)` returns detached owners for application validation.
+`checkpoint_save(record, path)` preserves exact float32 bits, matrix shapes and
+container order in a bounded portable format. Paths are source-relative.
+Save writes and synchronizes a unique temporary, then atomically renames it;
+1 means durable success and 2 means committed with directory sync failure.
+Precommit failure preserves the previous file. `file_exists` distinguishes an
+absent regular-file path from an I/O error. See [records](docs/RECORDS.md) for
+ownership, wire format, limits and all failure guarantees.
 
 ### Owned sampling
 
@@ -1290,6 +1328,8 @@ void am_tokenizer_ref(AM_Tokenizer* model);
 void am_tokenizer_free(AM_Tokenizer* model);
 AM_List* am_tokenizer_pieces(const AM_Tokenizer* model, const AM_String* text,
                            char* error, size_t error_cap);
+AM_String* am_tokenizer_identity(const AM_Tokenizer* model,
+                                char* error, size_t error_cap);
 
 // ─── Ordered numeric maps ───────────────────────────────────────────────
 AM_Map*    am_map_new(void);
@@ -1301,6 +1341,22 @@ int        am_map_get(const AM_Map* map, const AM_String* key, float* out);
 int        am_map_set(AM_Map* map, AM_String* key, float value);
 int        am_map_delete(AM_Map* map, const AM_String* key);
 AM_List*   am_map_keys(const AM_Map* map);
+
+// ─── Flat records and portable checkpoints ──────────────────────────────
+AM_Record* am_record_new(void);
+void am_record_ref(AM_Record* record);
+void am_record_free(AM_Record* record);
+AM_Record* am_record_clone(const AM_Record* record);
+int am_record_set(AM_Record* record, AM_String* key, const AML_Var* value);
+const AML_Var* am_record_get(const AM_Record* record, const AM_String* key);
+int am_record_has(const AM_Record* record, const AM_String* key);
+AM_List* am_record_keys(const AM_Record* record);
+int am_record_replace(AM_Record* live, const AM_Record* checked);
+int am_record_swap(AM_Record* a, AM_Record* b);
+int am_checkpoint_save(const AM_Record* record, const char* path,
+                       char* error, size_t error_cap);
+AM_Record* am_checkpoint_load(const char* path, char* error, size_t error_cap);
+int am_file_exists(const char* path, char* error, size_t error_cap);
 
 // ─── Optional owned sampling ────────────────────────────────────────────
 void am_set_sampling_backend(const AM_SamplingBackend* backend);
@@ -1324,6 +1380,8 @@ int          am_set_var_map(const char* name, const AM_Map* map);
 const AM_Map* am_get_var_map(const char* name);
 int          am_set_var_tokenizer(const char* name, AM_Tokenizer* model);
 const AM_Tokenizer* am_get_var_tokenizer(const char* name);
+int          am_set_var_record(const char* name, const AM_Record* record);
+const AM_Record* am_get_var_record(const char* name);
 void         am_persistent_clear(void);
 
 // ─── Inline queries ───────────────────────────────────────────────────────
