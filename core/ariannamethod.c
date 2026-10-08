@@ -3532,7 +3532,7 @@ static int aml_tokenizer_function(const char* name) {
 
 static int aml_list_function(const char* name) {
     static const char* names[] = {"list_new", "list_len", "list_get", "list_push",
-        "list_set", "list_find", "list_slice", "list_clone", "list_key"};
+        "list_set", "list_find", "list_slice", "list_clone", "list_sorted", "list_key"};
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (strcasecmp(name, names[i]) == 0) return 1;
     return 0;
@@ -3861,6 +3861,7 @@ static int aml_list_dispatch(AML_ExecCtx* ctx, const char* name, AML_Var* args,
     int need = 2;
     if (!strcasecmp(name, "list_new")) need = 0;
     else if (!strcasecmp(name, "list_len") || !strcasecmp(name, "list_clone") ||
+             !strcasecmp(name, "list_sorted") ||
              !strcasecmp(name, "list_key")) need = 1;
     else if (!strcasecmp(name, "list_set") || !strcasecmp(name, "list_slice")) need = 3;
     if (nargs != need) { set_error(ctx, "wrong number of list arguments"); return 1; }
@@ -3882,6 +3883,7 @@ static int aml_list_dispatch(AML_ExecCtx* ctx, const char* name, AML_Var* args,
             return 0;
         }
         if (!strcasecmp(name, "list_clone")) out->list = am_list_clone(list);
+        else if (!strcasecmp(name, "list_sorted")) out->list = am_list_sorted(list);
         else if (!strcasecmp(name, "list_slice")) {
             int start, end;
             if (aml_list_integer(ctx, &args[1], &start) || aml_list_integer(ctx, &args[2], &end))
@@ -4407,6 +4409,19 @@ static void expr_skip_ws(AML_Expr* e) {
     while (*e->p && isspace((unsigned char)*e->p)) e->p++;
 }
 
+static int expr_close(AML_Expr* e, char delimiter) {
+    expr_skip_ws(e);
+    if (e->error) return 1;
+    if (*e->p != delimiter) {
+        e->error = 1;
+        set_error(e->ctx, delimiter == ')' ? "missing closing parenthesis in scalar expression"
+                                          : "missing closing bracket in scalar expression");
+        return 1;
+    }
+    e->p++;
+    return 0;
+}
+
 static float expr_primary(AML_Expr* e) {
     expr_skip_ws(e);
     if (e->error) return 0;
@@ -4415,8 +4430,7 @@ static float expr_primary(AML_Expr* e) {
     if (*e->p == '(') {
         e->p++;
         float val = expr_or(e);
-        expr_skip_ws(e);
-        if (*e->p == ')') e->p++;
+        if (expr_close(e, ')')) return 0;
         return val;
     }
 
@@ -4443,8 +4457,7 @@ static float expr_primary(AML_Expr* e) {
         if (*e->p == '[') {
             e->p++;
             float idx_f = expr_or(e);
-            expr_skip_ws(e);
-            if (*e->p == ']') e->p++;
+            if (expr_close(e, ']')) return 0;
             int idx = (int)idx_f;
 
             if (e->ctx) {
@@ -4502,7 +4515,7 @@ static float expr_primary(AML_Expr* e) {
                 }
             }
             expr_skip_ws(e);
-            if (*e->p == ')') e->p++;
+            if (expr_close(e, ')')) return 0;
 
             // built-in functions
             if (strcasecmp(name, "abs") == 0 && nargs >= 1)
@@ -4640,6 +4653,11 @@ static float aml_eval(AML_ExecCtx* ctx, const char* text) {
     if (ctx && ctx->error[0]) return 0;
     AML_Expr e = { .p = text, .ctx = ctx, .error = 0 };
     float result = expr_or(&e);
+    expr_skip_ws(&e);
+    if (!e.error && *e.p && *e.p != '#') {
+        e.error = 1;
+        set_error(ctx, "unexpected text after scalar expression");
+    }
     if (e.error && ctx && !ctx->error[0]) set_error(ctx, "invalid scalar expression");
     return e.error ? 0.0f : result;
 }
@@ -4661,20 +4679,24 @@ static const char* aml_value_close(const char* p) {
     return NULL;
 }
 
+static const char* aml_comment_start(const char* text) {
+    char quote = 0;
+    while (*text) {
+        if (quote) {
+            if (*text == '\\' && text[1]) { text += 2; continue; }
+            if (*text == quote) quote = 0;
+        } else if (*text == '"' || *text == '\'') quote = *text;
+        else if (*text == '#') break;
+        text++;
+    }
+    return text;
+}
+
 static int aml_eval_value(AML_ExecCtx* ctx, const char* text, AML_Var* out) {
     memset(out, 0, sizeof(*out));
     while (isspace((unsigned char)*text)) text++;
     // Comments start outside quotes; '#' within a string is ordinary text.
-    const char* end = text;
-    char quote = 0;
-    while (*end) {
-        if (quote) {
-            if (*end == '\\' && end[1]) { end += 2; continue; }
-            if (*end == quote) quote = 0;
-        } else if (*end == '"' || *end == '\'') quote = *end;
-        else if (*end == '#') break;
-        end++;
-    }
+    const char* end = aml_comment_start(text);
     size_t len = (size_t)(end - text);
     while (len && isspace((unsigned char)text[len - 1])) len--;
     if (!len || len >= AML_MAX_LINE_LEN) {
@@ -6415,7 +6437,7 @@ static int aml_reserved_function(const char* name) {
         "text_len", "text_bytes", "text_equal", "text_find", "text_slice",
         "text_concat", "text_codepoint", "text_from_codepoint", "text_lower",
         "list_new", "list_len", "list_get", "list_push", "list_set", "list_find",
-        "list_slice", "list_clone", "list_key",
+        "list_slice", "list_clone", "list_sorted", "list_key",
         "map_new", "map_len", "map_has", "map_get", "map_set", "map_delete",
         "map_keys", "map_clone", "assert", "floor", "isfinite", "rng_new", "rng_uniform",
         "rng_index", "rng_categorical", "categorical_at", "nt_linear", "nt_linear_vjp",
@@ -6644,6 +6666,19 @@ static int aml_call_value(AML_ExecCtx* ctx, AML_Func* f, AML_Var* args,
 // Forward declaration for bytecode dispatch
 static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char arg_strs[][AML_MAX_LINE_LEN], int nargs);
 
+static int aml_array_function(const char* name) {
+    static const char* names[] = {
+        "zeros", "randn", "add", "mul", "scale", "matrix", "matrix_zeros",
+        "matvec", "matmul", "softmax", "rmsnorm", "silu", "gelu", "dropout",
+        "layernorm", "seq_layernorm", "spa_embed", "spa_connectedness", "relu",
+        "cross_entropy", "embedding_lookup", "row", "seq_embed", "seq_matvec",
+        "seq_rmsnorm", "causal_attention", "multi_head_attention", "seq_cross_entropy"
+    };
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+        if (!strcasecmp(name, names[i])) return 1;
+    return 0;
+}
+
 static AM_Array* aml_try_array_expr(AML_ExecCtx* ctx, const char* rhs) {
     // skip whitespace
     while (*rhs == ' ') rhs++;
@@ -6689,6 +6724,7 @@ static AM_Array* aml_try_array_expr(AML_ExecCtx* ctx, const char* rhs) {
         fname[fi] = rhs[fi]; fi++;
     }
     fname[fi] = 0;
+    if (!aml_array_function(fname)) return NULL;
     const char* after_name = rhs + fi;
     while (*after_name == ' ') after_name++;
     if (*after_name != '(') return NULL;
@@ -6698,7 +6734,7 @@ static AM_Array* aml_try_array_expr(AML_ExecCtx* ctx, const char* rhs) {
     char arg_strs[AML_MAX_PARAMS][AML_MAX_LINE_LEN];
     int nargs = 0;
     while (*ap && *ap != ')' && nargs < AML_MAX_PARAMS) {
-        while (*ap == ' ' || *ap == ',') ap++;
+        while (isspace((unsigned char)*ap)) ap++;
         if (*ap == ')') break;
         int ai = 0;
         // Capture the whole argument expression (may be a number or identifier)
@@ -6726,10 +6762,18 @@ static AM_Array* aml_try_array_expr(AML_ExecCtx* ctx, const char* rhs) {
         if (quote || paren_depth) { set_error(ctx, "invalid array argument"); return NULL; }
         // Trim trailing spaces
         while (ai > 0 && arg_strs[nargs][ai-1] == ' ') ai--;
+        if (!ai) { set_error(ctx, "empty array argument"); return NULL; }
         arg_strs[nargs][ai] = 0;
         nargs++;
+        if (*ap != ',') break;
+        ap++;
+        while (isspace((unsigned char)*ap)) ap++;
+        if (!*ap || *ap == ')') { set_error(ctx, "empty array argument"); return NULL; }
     }
     if (*ap != ')') { set_error(ctx, "invalid array argument list"); return NULL; }
+    ap++;
+    while (isspace((unsigned char)*ap)) ap++;
+    if (*ap && *ap != '#') { set_error(ctx, "unexpected text after array call"); return NULL; }
 
     return aml_array_dispatch(ctx, fname, arg_strs, nargs);
 }
@@ -6763,15 +6807,7 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
     // Numeric array intrinsics cannot consume string containers, including in
     // optional gamma/beta/bias positions that otherwise permit absent arrays.
     // Leave scalar/text/list/map/user calls to their own evaluator without effects.
-    static const char* array_names[] = {
-        "zeros", "randn", "add", "mul", "scale", "matrix", "matrix_zeros",
-        "matvec", "matmul", "softmax", "rmsnorm", "silu", "gelu", "dropout",
-        "layernorm", "seq_layernorm", "spa_embed", "spa_connectedness", "relu",
-        "cross_entropy", "embedding_lookup", "row", "seq_embed", "seq_matvec",
-        "seq_rmsnorm", "causal_attention", "multi_head_attention", "seq_cross_entropy"
-    };
-    for (size_t fi = 0; fi < sizeof(array_names) / sizeof(array_names[0]); fi++) {
-        if (strcasecmp(fname, array_names[fi])) continue;
+    if (aml_array_function(fname)) {
         for (int i = 0; i < nargs; i++) {
             AML_Var* v = resolve_var_full(ctx, arg_strs[i]);
             if (v && (v->type == AML_TYPE_LIST || v->type == AML_TYPE_MAP || v->type == AML_TYPE_TOKENIZER || v->type == AML_TYPE_RECORD)) {
@@ -6783,7 +6819,6 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
                 return NULL;
             }
         }
-        break;
     }
     // zeros(n) — create zero-initialized array
     if (strcasecmp(fname, "zeros") == 0 && nargs >= 1) {
@@ -7798,6 +7833,17 @@ static void aml_print_json_string(const AM_String* value) {
     putchar('"');
 }
 
+// Remove the statement's comment and final colon before strict evaluation.
+static float aml_eval_condition(AML_ExecCtx* ctx, const char* text) {
+    size_t len = (size_t)(aml_comment_start(text) - text);
+    while (len && isspace((unsigned char)text[len - 1])) len--;
+    if (len && text[len - 1] == ':') len--;
+    char condition[AML_MAX_LINE_LEN];
+    memcpy(condition, text, len);
+    condition[len] = 0;
+    return aml_eval(ctx, condition);
+}
+
 // Execute a single line in Level 2 context
 static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
     char* text = ctx->lines[idx].text;
@@ -7875,13 +7921,7 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
 
     // --- if/else ---
     if (strncmp(text, "if ", 3) == 0) {
-        // strip trailing ':'
-        char cond[AML_MAX_LINE_LEN];
-        snprintf(cond, sizeof(cond), "%s", text + 3);
-        int clen = (int)strlen(cond);
-        if (clen > 0 && cond[clen - 1] == ':') cond[clen - 1] = 0;
-
-        float val = aml_eval(ctx, cond);
+        float val = aml_eval_condition(ctx, text + 3);
         int body_end = aml_find_block_end(ctx->lines, ctx->nlines, idx);
 
         // check for else
@@ -7907,16 +7947,11 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
 
     // --- while ---
     if (strncmp(text, "while ", 6) == 0) {
-        char cond[AML_MAX_LINE_LEN];
-        snprintf(cond, sizeof(cond), "%s", text + 6);
-        int clen = (int)strlen(cond);
-        if (clen > 0 && cond[clen - 1] == ':') cond[clen - 1] = 0;
-
         int body_end = aml_find_block_end(ctx->lines, ctx->nlines, idx);
         int iterations = 0;
 
         while (!ctx->error[0] && !ctx->has_return) {
-            float active = aml_eval(ctx, cond);
+            float active = aml_eval_condition(ctx, text + 6);
             if (ctx->error[0] || active == 0.0f) break;
             if (iterations >= 10000) {
                 set_error_at(ctx, ctx->lines[idx].lineno, "loop iteration limit exceeded");
@@ -8030,6 +8065,10 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
         while (isspace((unsigned char)*bracket)) bracket++;
         if (*bracket == '[' && bracket > text) {
             const char* close_bracket = aml_value_close(bracket);
+            if (!close_bracket) {
+                set_error(ctx, "missing closing bracket in array assignment");
+                return idx + 1;
+            }
             if (close_bracket) {
                 const char* eq_after = close_bracket + 1;
                 while (*eq_after == ' ') eq_after++;
@@ -8598,7 +8637,8 @@ static void bc_compile_line(AML_BytecodeOp* op, const char* text, int idx) {
         }
         if (strncasecmp(sub, "APPLY_ACCUM ", 12) == 0) {
             op->opcode = BC_TAPE_APPLY_ACCUM;
-            sscanf(sub + 12, "%31s", op->args[0]); op->nargs = 1; return;
+            snprintf(op->args[0], AML_MAX_LINE_LEN, "%s", sub + 12);
+            op->nargs = 1; return;
         }
         if (strncasecmp(sub, "CLIP_GRADS ", 11) == 0 || strncasecmp(sub, "CLIP ", 5) == 0) {
             op->opcode = BC_TAPE_CLIP_GRADS;
@@ -11744,6 +11784,39 @@ AM_List* am_list_slice(const AM_List* list, int start, int end) {
 
 AM_List* am_list_clone(const AM_List* list) {
     return list ? am_list_slice(list, 0, list->len) : NULL;
+}
+
+AM_List* am_list_sorted(const AM_List* list) {
+    AM_List* out = am_list_clone(list);
+    if (!out || out->len < 2) return out;
+    AM_String** scratch = (AM_String**)malloc((size_t)out->len * sizeof(*scratch));
+    if (!scratch) { am_list_free(out); return NULL; }
+    AM_String** source = out->items;
+    AM_String** destination = scratch;
+    // Iterative stable merge: equal byte strings retain their input order.
+    // Only out owns the retained references; scratch holds borrowed pointers.
+    for (int width = 1; width < out->len; width *= 2) {
+        for (int start = 0; start < out->len; start += 2 * width) {
+            int middle = start + width;
+            if (middle > out->len) middle = out->len;
+            int end = middle + width;
+            if (end > out->len) end = out->len;
+            int left = start, right = middle;
+            for (int i = start; i < end; i++) {
+                if (left < middle && (right == end ||
+                    strcmp(source[left]->data, source[right]->data) <= 0))
+                    destination[i] = source[left++];
+                else destination[i] = source[right++];
+            }
+        }
+        AM_String** previous = source;
+        source = destination;
+        destination = previous;
+    }
+    if (source != out->items)
+        memcpy(out->items, source, (size_t)out->len * sizeof(*out->items));
+    free(scratch);
+    return out;
 }
 
 static int am_decimal_digits(int n) {

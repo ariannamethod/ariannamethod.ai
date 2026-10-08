@@ -186,6 +186,7 @@ static void test_failures_and_limit(void) {
     AM_String* item = am_string_new("owl");
     CHECK(list && item);
     CHECK(am_list_clone(NULL) == NULL && am_list_slice(NULL, 0, 1) == NULL);
+    CHECK(am_list_sorted(NULL) == NULL);
     CHECK(am_list_get(NULL, 0) == NULL && am_list_find(NULL, item) == -1);
     CHECK(am_list_find(list, NULL) == -1);
     CHECK(am_list_push(NULL, item) == -1 && am_list_push(list, NULL) == -1);
@@ -211,7 +212,7 @@ static void test_failures_and_limit(void) {
     item_equals(list, 0, "owl");
     item_equals(list, -AM_MAX_LIST_ITEMS, "owl");
     item_equals(list, -1, "owl");
-    AM_List* copy = am_list_clone(list);
+    AM_List* copy = am_list_sorted(list);
     CHECK(copy && copy->len == AM_MAX_LIST_ITEMS);
     am_list_free(list);
     CHECK(item->refcount == AM_MAX_LIST_ITEMS + 1);
@@ -220,6 +221,60 @@ static void test_failures_and_limit(void) {
     CHECK(item->refcount == 1);
     am_string_free(item);
     puts("PASS list failures: NULL/index rejection, exact 65536 capacity, refused mutation is atomic");
+}
+
+static void test_sorted(void) {
+    static const char* values[] = {
+        "é", "owl", "", "ow", "é", "a", "é", "א", "Ж", "Ω", "A", "𐀀", "\x7f", "\x1f"
+    };
+    static const int order[] = {2, 13, 10, 5, 4, 3, 1, 12, 0, 6, 9, 8, 7, 11};
+    AM_List* source = am_list_new();
+    CHECK(source != NULL);
+    AM_List* empty = am_list_sorted(source);
+    CHECK(empty && empty != source && empty->len == 0);
+    am_list_free(empty);
+    AM_String* owners[14];
+    for (int i = 0; i < 14; i++) {
+        owners[i] = am_string_new(values[i]);
+        CHECK(owners[i] && am_list_push(source, owners[i]) == i + 1);
+        // Every prefix exercises a separate run/merge boundary, including odd sizes.
+        AM_List* prefix = am_list_sorted(source);
+        CHECK(prefix && prefix != source && prefix->items != source->items && prefix->len == i + 1);
+        for (int j = 0; j <= i; j++) {
+            int rank = 0;
+            // Independent rank oracle, retaining original index for equal values.
+            for (int k = 0; k <= i; k++) {
+                int cmp = strcmp(values[k], values[j]);
+                if (cmp < 0 || (cmp == 0 && k < j)) rank++;
+            }
+            CHECK(prefix->items[rank] == owners[j]);
+            CHECK(source->items[j] == owners[j] && owners[j]->refcount == 3);
+        }
+        am_list_free(prefix);
+        for (int j = 0; j <= i; j++) CHECK(owners[j]->refcount == 2);
+    }
+    AM_List* sorted = am_list_sorted(source);
+    CHECK(sorted && sorted->len == 14);
+    for (int i = 0; i < 14; i++) {
+        CHECK(sorted->items[i] == owners[order[i]]);
+        item_equals(sorted, i, values[order[i]]);
+        item_equals(source, i, values[i]);
+    }
+    CHECK(owners[0] != owners[6]); // Equal text retains the order of distinct owners.
+    AM_String* replacement = am_string_new("changed");
+    CHECK(replacement && am_list_set(sorted, 0, replacement) == 0);
+    CHECK(am_list_push(sorted, replacement) == 15);
+    CHECK(source->len == 14 && source->items[2] == owners[2]);
+    am_string_free(replacement);
+    am_list_free(source);
+    item_equals(sorted, 1, "\x1f");
+    item_equals(sorted, 8, "é");
+    am_list_free(sorted);
+    for (int i = 0; i < 14; i++) {
+        CHECK(owners[i]->refcount == 1);
+        am_string_free(owners[i]);
+    }
+    puts("PASS list sorting: UTF-8 byte order, stable duplicate owners, empty/odd prefixes, independent retained output");
 }
 
 #ifdef AML_LIST_ALLOC_WRAP
@@ -252,11 +307,12 @@ static void test_allocation_failures(void) {
     CHECK(am_list_push(list, item) == len + 1);
     baseline = live_count;
     refs = item->refcount;
-    for (int operation = 0; operation < 2; operation++) {
+    for (int operation = 0; operation < 3; operation++) {
         succeeded = 0;
         for (int budget = 0; budget < 8; budget++) {
             allocation_budget = budget;
-            AM_List* copy = operation ? am_list_slice(list, 0, list->len) : am_list_clone(list);
+            AM_List* copy = operation == 2 ? am_list_sorted(list)
+                : operation == 1 ? am_list_slice(list, 0, list->len) : am_list_clone(list);
             allocation_budget = -1;
             if (copy) { am_list_free(copy); succeeded = 1; }
             CHECK(live_count == baseline && item->refcount == refs);
@@ -275,7 +331,7 @@ static void test_allocation_failures(void) {
     am_list_free(list);
     am_string_free(item);
     CHECK(live_count == 0);
-    puts("PASS allocation faults: constructor/clone/slice cleanup, atomic growth, allocation-free get/set");
+    puts("PASS allocation faults: constructor/clone/slice/sort cleanup, atomic growth, allocation-free get/set");
 }
 
 static int run_fault_script(int mode, const char* source) {
@@ -315,6 +371,7 @@ static void test_persistent_faults(void) {
             allocation_budget = budget;
             int rc = run_fault_script(mode,
                 "list_push(words, 'after')\n"
+                "words = list_sorted(words)\n"
                 "numbers[0] = 9\n"
                 "word = text_concat(word, 'after')\n");
             allocation_budget = -1;
@@ -328,8 +385,8 @@ static void test_persistent_faults(void) {
             CHECK(stored && data && text && length == 2);
             if (rc == 0) {
                 CHECK(stored->len == 2 && data[0] == 9 && data[1] == 2);
-                item_equals(stored, 0, "before");
-                item_equals(stored, 1, "after");
+                item_equals(stored, 0, "after");
+                item_equals(stored, 1, "before");
                 CHECK(!strcmp(text, "beforeafter"));
                 succeeded = 1;
             } else {
@@ -376,6 +433,7 @@ int main(void) {
     test_lifetimes();
     test_values_and_copies();
     test_failures_and_limit();
+    test_sorted();
 #ifdef AML_LIST_ALLOC_WRAP
     test_allocation_failures();
     test_persistent_faults();

@@ -360,6 +360,9 @@ AM_List* am_list_new(void);
 void am_list_ref(AM_List* list);
 void am_list_free(AM_List* list);
 AM_List* am_list_clone(const AM_List* list);
+// Stable ascending UTF-8 byte order; independent container, retained strings.
+// Input stays unchanged. NULL on NULL input or allocation failure.
+AM_List* am_list_sorted(const AM_List* list);
 int am_list_push(AM_List* list, AM_String* item); // retain item; new length or -1
 AM_String* am_list_get(const AM_List* list, int index); // owned reference or NULL
 int am_list_set(AM_List* list, int index, AM_String* item); // retain; 0 or -1

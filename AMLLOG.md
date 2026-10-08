@@ -12,6 +12,47 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-10-08 — words keep their order (v5.9.0)
+
+Haiku's word-cloud rings need lexical traversal independent of insertion order.
+`list_sorted(xs)` and C `am_list_sorted(xs)` return an independent list in
+ascending UTF-8 byte order. An iterative stable merge preserves empty strings,
+duplicates and the order of distinct owners with identical bytes. The copied
+container retains immutable strings; its input remains unchanged on success
+and at every refused allocation. The primitive occupies no function-table slot.
+
+The continuity fixture exposed a scalar parser accepting only a valid prefix:
+with `cursor = 1`, `((cursor * 5 + 3) % 16) / 16` printed 8 and continued
+successfully. Scalar evaluation now requires a complete expression and closing
+parentheses/index brackets. The array-call parser checks its whole span and
+argument separators before dispatch. `#` outside quoted strings and the final
+`if`/`while` colon remain statement boundaries. The command audit also found
+bytecode `TAPE APPLY_ACCUM` retaining only the first whitespace-delimited token;
+it now evaluates the same whole argument as the interpreter. `%` remains
+unsupported; the explicit `floor` remainder spelling produces 0.5.
+
+Proof on Linux x86_64 / GCC 13.3:
+
+- `make test-expressions`: **1,200** checks and **48** rejected programs through
+  interpreter, prepared stepping, bytecode, runner and compiled scalar paths.
+  Missing delimiters, unsupported operators and trailing tokens preserve the
+  destination scalar/array/field and stop before later AML statements or C main.
+  Valid nested calls execute once; quoted punctuation, inline comments,
+  conditional colons and both whole/separate command arguments retain parity.
+- `make test-lists`: **612** direct C checks, **1,606** allocation-wrapped checks,
+  **3,133** runtime checks and **72** invalid programs through all five paths.
+  Fixed Unicode/control/prefix order and an independent rank oracle check
+  stable duplicate owners and short merge boundaries. The full **65,536** item
+  limit passes. Container, item-buffer and scratch refusal preserve the source
+  and release unpublished owners. Persistent sort sweeps cover **24/25/26**
+  refused budgets across interpreter, prepared and bytecode paths.
+- ASan/UBSan pass the expression and list API gates; leak detection is disabled
+  because this host prevents process-task inspection. Allocation-wrapped gates
+  separately verify zero tracked survivors.
+- The expression-boundary audit also passes the existing **550/550** baseline,
+  compiler, imports, text, lowercase, input, lists, maps, records, sampling,
+  numerical and tokenizer suites.
+
 ## 2026-10-08 — experience survives the process (v5.8.0)
 
 Haiku can now carry its explicit owners together across process lifetimes.
@@ -69,11 +110,10 @@ Proof on Linux x86_64 / GCC 13.3:
 - Existing **550/550** baseline tests and compiler, imports, text, lowercase,
   input, lists, maps, sampling and numerical suites pass.
 
-Known follow-up from the continuity fixture: with `cursor = 1`, the unsupported
-expression `value = ((cursor * 5 + 3) % 16) / 16` currently produces 8 and exits
-successfully. The scalar parser lacks a trailing-token check shared by several
-legacy command paths. The fixture now spells the remainder using `floor`;
-strict expression-consumption diagnostics need a separate syntax-context audit.
+The continuity fixture exposed a follow-up: with `cursor = 1`, the unsupported
+expression `value = ((cursor * 5 + 3) % 16) / 16` produced 8 and exited
+successfully. The fixture spells the remainder using `floor`; the separate
+syntax-context audit and complete-consumption repair are recorded in v5.9.0.
 
 See [records and checkpoints](docs/RECORDS.md) for the precise AML/C ownership,
 wire format and commit contract, and [tokenizers](docs/TOKENIZER.md) for identity.
