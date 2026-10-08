@@ -36,6 +36,10 @@
 #include <stdint.h>  // for uint32_t (Chuck RNG)
 #include <time.h>    // for real calendar computation
 #include <sys/stat.h> // regular AML source files, including with AM_IO_DISABLED
+#include <fcntl.h>    // atomic checkpoint files, independently of named pipes
+#include <unistd.h>
+#include <errno.h>
+#include <float.h>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -109,6 +113,18 @@ static AM_TokenizerBackend g_tokenizer_backend;
 struct AM_Tokenizer {
     void* model;
     AM_TokenizerBackend backend;
+    int refcount;
+};
+
+typedef struct {
+    AM_String* key;
+    AML_Var value;
+} AM_RecordEntry;
+
+struct AM_Record {
+    AM_RecordEntry* entries;
+    int len;
+    int capacity;
     int refcount;
 };
 
@@ -760,6 +776,7 @@ static int      symtab_set_string(AML_Symtab* tab, const char* name, AM_String* 
 static int      symtab_set_list(AML_Symtab* tab, const char* name, AM_List* list);
 static int      symtab_set_map(AML_Symtab* tab, const char* name, AM_Map* map);
 static int      symtab_set_tokenizer(AML_Symtab* tab, const char* name, AM_Tokenizer* model);
+static int      symtab_set_record(AML_Symtab* tab, const char* name, AM_Record* record);
 static void     symtab_clear_arrays(AML_Symtab* tab);
 static int      symtab_snapshot(AML_Symtab* dst, const AML_Symtab* src);
 static int      symtab_copy_value(AML_Symtab* dst, const AML_Var* value);
@@ -939,6 +956,24 @@ const AM_Tokenizer* am_get_var_tokenizer(const char* name) {
     if (!name) return NULL;
     AML_Var* v = symtab_get_var(&g_persistent_globals, name);
     return v && v->type == AML_TYPE_TOKENIZER ? v->tokenizer : NULL;
+}
+
+int am_set_var_record(const char* name, const AM_Record* record) {
+    if (!name || !*name || strlen(name) >= AML_MAX_NAME || !record) return 1;
+    AM_Record* copy = am_record_clone(record);
+    if (!copy) return 2;
+    if (symtab_set_record(&g_persistent_globals, name, copy)) {
+        am_record_free(copy);
+        return 2;
+    }
+    g_persistent_enabled = 1;
+    return 0;
+}
+
+const AM_Record* am_get_var_record(const char* name) {
+    if (!name) return NULL;
+    AML_Var* v = symtab_get_var(&g_persistent_globals, name);
+    return v && v->type == AML_TYPE_RECORD ? v->record : NULL;
 }
 
 // enable/disable packs
@@ -3200,6 +3235,8 @@ static int symtab_set(AML_Symtab* tab, const char* name, float value) {
             tab->vars[i].map = NULL;
             if (tab->vars[i].type == AML_TYPE_TOKENIZER) am_tokenizer_free(tab->vars[i].tokenizer);
             tab->vars[i].tokenizer = NULL;
+            if (tab->vars[i].type == AML_TYPE_RECORD) am_record_free(tab->vars[i].record);
+            tab->vars[i].record = NULL;
             tab->vars[i].type = AML_TYPE_FLOAT;
             tab->vars[i].value = value;
             return 0;
@@ -3214,6 +3251,7 @@ static int symtab_set(AML_Symtab* tab, const char* name, float value) {
     tab->vars[tab->count].list = NULL;
     tab->vars[tab->count].map = NULL;
     tab->vars[tab->count].tokenizer = NULL;
+    tab->vars[tab->count].record = NULL;
     tab->count++;
     return 0;
 }
@@ -3234,6 +3272,8 @@ static int symtab_set_array(AML_Symtab* tab, const char* name, AM_Array* arr) {
             tab->vars[i].map = NULL;
             if (tab->vars[i].type == AML_TYPE_TOKENIZER) am_tokenizer_free(tab->vars[i].tokenizer);
             tab->vars[i].tokenizer = NULL;
+            if (tab->vars[i].type == AML_TYPE_RECORD) am_record_free(tab->vars[i].record);
+            tab->vars[i].record = NULL;
             tab->vars[i].type = AML_TYPE_ARRAY;
             tab->vars[i].value = 0;
             tab->vars[i].array = arr;
@@ -3249,6 +3289,7 @@ static int symtab_set_array(AML_Symtab* tab, const char* name, AM_Array* arr) {
     tab->vars[tab->count].list = NULL;
     tab->vars[tab->count].map = NULL;
     tab->vars[tab->count].tokenizer = NULL;
+    tab->vars[tab->count].record = NULL;
     tab->count++;
     return 0;
 }
@@ -3288,6 +3329,14 @@ static int symtab_set_tokenizer(AML_Symtab* tab, const char* name, AM_Tokenizer*
     return 0;
 }
 
+static int symtab_set_record(AML_Symtab* tab, const char* name, AM_Record* record) {
+    if (symtab_set(tab, name, 0)) return 1;
+    AML_Var* v = symtab_get_var(tab, name);
+    v->type = AML_TYPE_RECORD;
+    v->record = record;
+    return 0;
+}
+
 // Free all owned values in a symbol table.
 static void symtab_clear_arrays(AML_Symtab* tab) {
     for (int i = 0; i < tab->count; i++) {
@@ -3310,6 +3359,10 @@ static void symtab_clear_arrays(AML_Symtab* tab) {
         if (tab->vars[i].type == AML_TYPE_TOKENIZER) {
             am_tokenizer_free(tab->vars[i].tokenizer);
             tab->vars[i].tokenizer = NULL;
+        }
+        if (tab->vars[i].type == AML_TYPE_RECORD) {
+            am_record_free(tab->vars[i].record);
+            tab->vars[i].record = NULL;
         }
     }
 }
@@ -3352,6 +3405,13 @@ static int symtab_copy_value(AML_Symtab* dst, const AML_Var* v) {
         am_tokenizer_free(v->tokenizer);
         return 1;
     }
+    if (v->type == AML_TYPE_RECORD) {
+        AM_Record* record = am_record_clone(v->record);
+        if (!record) return 1;
+        if (!symtab_set_record(dst, v->name, record)) return 0;
+        am_record_free(record);
+        return 1;
+    }
     return symtab_set(dst, v->name, v->value);
 }
 
@@ -3381,8 +3441,9 @@ static AML_Var* resolve_var_full(AML_ExecCtx* ctx, const char* name) {
 static int resolve_var(AML_ExecCtx* ctx, const char* name, float* out) {
     AML_Var* value = resolve_var_full(ctx, name);
     if (value && (value->type == AML_TYPE_STRING || value->type == AML_TYPE_LIST ||
-                  value->type == AML_TYPE_MAP || value->type == AML_TYPE_TOKENIZER)) {
-        set_error(ctx, value->type == AML_TYPE_TOKENIZER ? "tokenizer used as a scalar expression" :
+                  value->type == AML_TYPE_MAP || value->type == AML_TYPE_TOKENIZER || value->type == AML_TYPE_RECORD)) {
+        set_error(ctx, value->type == AML_TYPE_RECORD ? "record used as a scalar expression" :
+            value->type == AML_TYPE_TOKENIZER ? "tokenizer used as a scalar expression" :
             value->type == AML_TYPE_MAP ? "map used as a scalar expression" :
             value->type == AML_TYPE_LIST
             ? "list used as a scalar expression" : "string used as a scalar expression");
@@ -3413,7 +3474,17 @@ static void aml_value_clear(AML_Var* v) {
     if (v->type == AML_TYPE_LIST) am_list_free(v->list);
     if (v->type == AML_TYPE_MAP) am_map_free(v->map);
     if (v->type == AML_TYPE_TOKENIZER) am_tokenizer_free(v->tokenizer);
+    if (v->type == AML_TYPE_RECORD) am_record_free(v->record);
     memset(v, 0, sizeof(*v));
+}
+
+static void aml_value_ref(AML_Var* v) {
+    if (v->type == AML_TYPE_ARRAY) am_array_ref(v->array);
+    if (v->type == AML_TYPE_STRING) am_string_ref(v->string);
+    if (v->type == AML_TYPE_LIST) am_list_ref(v->list);
+    if (v->type == AML_TYPE_MAP) am_map_ref(v->map);
+    if (v->type == AML_TYPE_TOKENIZER) am_tokenizer_ref(v->tokenizer);
+    if (v->type == AML_TYPE_RECORD) am_record_ref(v->record);
 }
 
 static void aml_clear_return(AML_ExecCtx* ctx) {
@@ -3422,11 +3493,13 @@ static void aml_clear_return(AML_ExecCtx* ctx) {
     am_list_free(ctx->return_list);
     am_map_free(ctx->return_map);
     am_tokenizer_free(ctx->return_tokenizer);
+    am_record_free(ctx->return_record);
     ctx->return_array = NULL;
     ctx->return_string = NULL;
     ctx->return_list = NULL;
     ctx->return_map = NULL;
     ctx->return_tokenizer = NULL;
+    ctx->return_record = NULL;
     ctx->return_type = AML_TYPE_FLOAT;
     ctx->return_value = 0;
     ctx->has_return = 0;
@@ -3453,7 +3526,8 @@ static int aml_text_function(const char* name) {
 }
 
 static int aml_tokenizer_function(const char* name) {
-    return !strcasecmp(name, "tokenizer_load") || !strcasecmp(name, "tokenizer_pieces");
+    return !strcasecmp(name, "tokenizer_load") || !strcasecmp(name, "tokenizer_pieces") ||
+           !strcasecmp(name, "tokenizer_identity");
 }
 
 static int aml_list_function(const char* name) {
@@ -3469,6 +3543,15 @@ static int aml_map_function(const char* name) {
         "map_set", "map_delete", "map_keys", "map_clone"};
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (strcasecmp(name, names[i]) == 0) return 1;
+    return 0;
+}
+
+static int aml_record_function(const char* name) {
+    static const char* names[] = {"record_new", "record_set", "record_get", "record_has",
+        "record_keys", "record_kind", "record_clone", "record_replace", "record_swap",
+        "checkpoint_save", "checkpoint_load", "file_exists"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+        if (!strcasecmp(name, names[i])) return 1;
     return 0;
 }
 
@@ -3605,10 +3688,29 @@ static int aml_text_dispatch(AML_ExecCtx* ctx, const char* name, AML_Var* args,
     return 0;
 }
 
+// Imported functions retain their own source directory in ctx.base_dir. This
+// resolver is shared by model loading and explicit checkpoint/file operations.
+static char* aml_resolve_value_path(AML_ExecCtx* ctx, const AML_Var* value) {
+    if (value->type != AML_TYPE_STRING || !value->string || !value->string->byte_len) {
+        set_error(ctx, "file path must be a nonempty string"); return NULL;
+    }
+    const AM_String* path = value->string;
+    size_t prefix = path->data[0] == '/' ? 0 : strlen(ctx->base_dir) + 1;
+    if (prefix + (size_t)path->byte_len > AM_MAX_STRING_BYTES) {
+        set_error(ctx, "file path limit exceeded"); return NULL;
+    }
+    char* resolved = malloc(prefix + (size_t)path->byte_len + 1);
+    if (!resolved) { set_error(ctx, "file path allocation failed"); return NULL; }
+    if (prefix) snprintf(resolved, prefix + 1, "%s/", ctx->base_dir);
+    memcpy(resolved + prefix, path->data, (size_t)path->byte_len + 1);
+    return resolved;
+}
+
 static int aml_tokenizer_dispatch(AML_ExecCtx* ctx, const char* name,
                                   AML_Var* args, int nargs, AML_Var* out) {
     int loading = !strcasecmp(name, "tokenizer_load");
-    if (nargs != (loading ? 1 : 2)) {
+    int identity = !strcasecmp(name, "tokenizer_identity");
+    if (nargs != (loading || identity ? 1 : 2)) {
         set_error(ctx, "wrong number of tokenizer arguments"); return 1;
     }
     char error[256] = {0};
@@ -3616,16 +3718,8 @@ static int aml_tokenizer_dispatch(AML_ExecCtx* ctx, const char* name,
         if (args[0].type != AML_TYPE_STRING || !args[0].string) {
             set_error(ctx, "tokenizer_load requires a path string"); return 1;
         }
-        const AM_String* path = args[0].string;
-        if (!path->byte_len) { set_error(ctx, "tokenizer path is empty"); return 1; }
-        size_t prefix = path->data[0] == '/' ? 0 : strlen(ctx->base_dir) + 1;
-        if (prefix + (size_t)path->byte_len > AM_MAX_STRING_BYTES) {
-            set_error(ctx, "tokenizer path limit exceeded"); return 1;
-        }
-        char* resolved = malloc(prefix + (size_t)path->byte_len + 1);
-        if (!resolved) { set_error(ctx, "tokenizer path allocation failed"); return 1; }
-        if (prefix) snprintf(resolved, prefix + 1, "%s/", ctx->base_dir);
-        memcpy(resolved + prefix, path->data, (size_t)path->byte_len + 1);
+        char* resolved = aml_resolve_value_path(ctx, &args[0]);
+        if (!resolved) return 1;
         out->tokenizer = am_tokenizer_load(resolved, error, sizeof(error));
         free(resolved);
         if (!out->tokenizer) {
@@ -3634,6 +3728,13 @@ static int aml_tokenizer_dispatch(AML_ExecCtx* ctx, const char* name,
             set_error(ctx, detail); return 1;
         }
         out->type = AML_TYPE_TOKENIZER;
+    } else if (identity) {
+        if (args[0].type != AML_TYPE_TOKENIZER || !args[0].tokenizer) {
+            set_error(ctx, "tokenizer_identity requires a tokenizer"); return 1;
+        }
+        out->string = am_tokenizer_identity(args[0].tokenizer, error, sizeof(error));
+        if (!out->string) { set_error(ctx, error); return 1; }
+        out->type = AML_TYPE_STRING;
     } else {
         if (args[0].type != AML_TYPE_TOKENIZER || !args[0].tokenizer ||
             args[1].type != AML_TYPE_STRING || !args[1].string) {
@@ -3644,6 +3745,103 @@ static int aml_tokenizer_dispatch(AML_ExecCtx* ctx, const char* name,
         if (!out->list) { set_error(ctx, error); return 1; }
         out->type = AML_TYPE_LIST;
     }
+    return 0;
+}
+
+static int aml_record_dispatch(AML_ExecCtx* ctx, const char* name,
+                               AML_Var* args, int nargs, AML_Var* out) {
+    int need = 2;
+    if (!strcasecmp(name, "record_new")) need = 0;
+    else if (!strcasecmp(name, "record_keys") || !strcasecmp(name, "record_clone") ||
+             !strcasecmp(name, "checkpoint_load") || !strcasecmp(name, "file_exists")) need = 1;
+    else if (!strcasecmp(name, "record_set")) need = 3;
+    if (nargs != need) { set_error(ctx, "wrong number of record/checkpoint arguments"); return 1; }
+    int saving = !strcasecmp(name, "checkpoint_save");
+    int loading = !strcasecmp(name, "checkpoint_load");
+    int exists = !strcasecmp(name, "file_exists");
+    if (saving || loading || exists) {
+        if (saving && (args[0].type != AML_TYPE_RECORD || !args[0].record)) {
+            set_error(ctx, "checkpoint_save requires a record and path"); return 1;
+        }
+        char* path = aml_resolve_value_path(ctx, &args[saving ? 1 : 0]);
+        if (!path) return 1;
+        char error[256] = {0};
+        int status = 0;
+        if (saving) status = am_checkpoint_save(args[0].record, path, error, sizeof(error));
+        else if (exists) status = am_file_exists(path, error, sizeof(error));
+        else out->record = am_checkpoint_load(path, error, sizeof(error));
+        free(path);
+        if ((loading && !out->record) || (!loading && status < 0)) {
+            set_error(ctx, error); return 1;
+        }
+        if (loading) out->type = AML_TYPE_RECORD;
+        else out->value = (float)status;
+        return 0;
+    }
+    if (!strcasecmp(name, "record_new")) out->record = am_record_new();
+    else {
+        if (args[0].type != AML_TYPE_RECORD || !args[0].record) {
+            set_error(ctx, "record operation requires a record"); return 1;
+        }
+        AM_Record* record = args[0].record;
+        if (!strcasecmp(name, "record_clone")) out->record = am_record_clone(record);
+        else if (!strcasecmp(name, "record_keys")) {
+            out->list = am_record_keys(record);
+            if (!out->list) { set_error(ctx, "record keys allocation failed"); return 1; }
+            out->type = AML_TYPE_LIST;
+            return 0;
+        } else if (!strcasecmp(name, "record_swap")) {
+            if (args[1].type != AML_TYPE_RECORD || !args[1].record ||
+                am_record_swap(record, args[1].record)) {
+                set_error(ctx, "record_swap requires two records"); return 1;
+            }
+            out->value = 1;
+            return 0;
+        } else if (!strcasecmp(name, "record_replace")) {
+            if (args[1].type != AML_TYPE_RECORD || !args[1].record) {
+                set_error(ctx, "record_replace requires two records"); return 1;
+            }
+            if (am_record_replace(record, args[1].record)) {
+                set_error(ctx, "record replacement allocation failed"); return 1;
+            }
+            am_record_ref(record);
+            out->record = record;
+        } else {
+            if (args[1].type != AML_TYPE_STRING || !args[1].string) {
+                set_error(ctx, "record key must be a string"); return 1;
+            }
+            AM_String* key = args[1].string;
+            if (!strcasecmp(name, "record_has")) {
+                out->value = (float)am_record_has(record, key);
+                return 0;
+            }
+            if (!strcasecmp(name, "record_set")) {
+                if (args[2].type < AML_TYPE_FLOAT || args[2].type > AML_TYPE_MAP) {
+                    set_error(ctx, "record leaf must be float, array, string, list, or map"); return 1;
+                }
+                if (am_record_set(record, key, &args[2])) {
+                    set_error(ctx, "record limit, invalid leaf, or allocation failure"); return 1;
+                }
+                am_record_ref(record);
+                out->record = record;
+            } else {
+                const AML_Var* value = am_record_get(record, key);
+                if (!value) { set_error(ctx, "record key not found"); return 1; }
+                if (!strcasecmp(name, "record_kind")) {
+                    const char* kinds[] = {"float", "array", "string", "list", "map"};
+                    out->string = am_string_new(kinds[value->type]);
+                    if (!out->string) { set_error(ctx, "record kind allocation failed"); return 1; }
+                    out->type = AML_TYPE_STRING;
+                } else {
+                    *out = *value;
+                    aml_value_ref(out);
+                }
+                return 0;
+            }
+        }
+    }
+    if (!out->record) { set_error(ctx, "record allocation failed"); return 1; }
+    out->type = AML_TYPE_RECORD;
     return 0;
 }
 
@@ -4108,7 +4306,7 @@ static int aml_array_scalar_dispatch(AML_ExecCtx* ctx, const char* name,
         set_error(ctx, "wrong number of array arguments"); return 1;
     }
     for (int i = 0; i < nargs; i++) {
-        if (args[i].type == AML_TYPE_STRING || args[i].type == AML_TYPE_LIST || args[i].type == AML_TYPE_MAP || args[i].type == AML_TYPE_TOKENIZER) {
+        if (args[i].type == AML_TYPE_STRING || args[i].type == AML_TYPE_LIST || args[i].type == AML_TYPE_MAP || args[i].type == AML_TYPE_TOKENIZER || args[i].type == AML_TYPE_RECORD) {
             set_error(ctx, "array operation requires an array"); return 1;
         }
     }
@@ -4179,6 +4377,7 @@ static int aml_invoke_value(AML_ExecCtx* ctx, const char* name,
     if (aml_text_function(name)) rc = aml_text_dispatch(ctx, name, args, nargs, out);
     else if (aml_list_function(name)) rc = aml_list_dispatch(ctx, name, args, nargs, out);
     else if (aml_map_function(name)) rc = aml_map_dispatch(ctx, name, args, nargs, out);
+    else if (aml_record_function(name)) rc = aml_record_dispatch(ctx, name, args, nargs, out);
     else if (aml_scalar_intrinsic_function(name)) rc = aml_scalar_intrinsic_dispatch(ctx, name, args, nargs, out);
     else if (aml_sampling_function(name)) rc = aml_sampling_dispatch(ctx, name, args, nargs, out);
     else if (aml_numerical_function(name)) rc = aml_numerical_dispatch(ctx, name, args, nargs, out);
@@ -4250,8 +4449,9 @@ static float expr_primary(AML_Expr* e) {
 
             if (e->ctx) {
                 AML_Var* var = resolve_var_full(e->ctx, name);
-                if (var && (var->type == AML_TYPE_STRING || var->type == AML_TYPE_LIST || var->type == AML_TYPE_MAP || var->type == AML_TYPE_TOKENIZER)) {
-                    set_error(e->ctx, var->type == AML_TYPE_TOKENIZER
+                if (var && (var->type == AML_TYPE_STRING || var->type == AML_TYPE_LIST || var->type == AML_TYPE_MAP || var->type == AML_TYPE_TOKENIZER || var->type == AML_TYPE_RECORD)) {
+                    set_error(e->ctx, var->type == AML_TYPE_RECORD
+                        ? "array indexing requires an array, not a record" : var->type == AML_TYPE_TOKENIZER
                         ? "array indexing requires an array, not a tokenizer" : var->type == AML_TYPE_MAP
                         ? "array indexing requires an array; use map_get for maps" : var->type == AML_TYPE_LIST
                         ? "array indexing requires an array; use list_get for lists"
@@ -4274,7 +4474,7 @@ static float expr_primary(AML_Expr* e) {
         if (*e->p == '(') {
             if (e->ctx && (aml_text_function(name) || aml_list_function(name) ||
                            aml_map_function(name) || aml_scalar_intrinsic_function(name) ||
-                           aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) ||
+                           aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) || aml_record_function(name) ||
                            aml_array_scalar_function(name) ||
                            aml_value_function(e->ctx, name))) {
                 AML_Var result = {0};
@@ -4284,7 +4484,7 @@ static float expr_primary(AML_Expr* e) {
                 }
                 if (result.type != AML_TYPE_FLOAT) {
                     aml_value_clear(&result);
-                    set_error(e->ctx, "string/array/list/map/tokenizer value used as a scalar expression");
+                    set_error(e->ctx, "string/array/list/map/tokenizer/record value used as a scalar expression");
                     e->error = 1;
                     return 0;
                 }
@@ -4516,12 +4716,13 @@ static int aml_eval_value(AML_ExecCtx* ctx, const char* text, AML_Var* out) {
                 if (v->type == AML_TYPE_LIST) am_list_ref(out->list);
                 if (v->type == AML_TYPE_MAP) am_map_ref(out->map);
                 if (v->type == AML_TYPE_TOKENIZER) am_tokenizer_ref(out->tokenizer);
+                if (v->type == AML_TYPE_RECORD) am_record_ref(out->record);
                 return 0;
             }
         }
         if (*p == '(' && (aml_text_function(name) || aml_list_function(name) ||
                           aml_map_function(name) || aml_scalar_intrinsic_function(name) ||
-                          aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) ||
+                          aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) || aml_record_function(name) ||
                           aml_array_scalar_function(name) ||
                           aml_value_function(ctx, name))) {
             const char* close = aml_value_close(p);
@@ -5697,7 +5898,7 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
         sscanf(rest, "%31s", vname);
         if (vname[0] && ctx) {
           AML_Var* v = resolve_var_full(ctx, vname);
-          if (v && (v->type == AML_TYPE_LIST || v->type == AML_TYPE_MAP || v->type == AML_TYPE_TOKENIZER)) {
+          if (v && (v->type == AML_TYPE_LIST || v->type == AML_TYPE_MAP || v->type == AML_TYPE_TOKENIZER || v->type == AML_TYPE_RECORD)) {
             set_error(ctx, "TAPE requires a numeric array");
             return;
           }
@@ -5790,7 +5991,7 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
         sscanf(rest, "%31s", vname);
         if (vname[0] && ctx) {
           AML_Var* v = resolve_var_full(ctx, vname);
-          if (v && (v->type == AML_TYPE_LIST || v->type == AML_TYPE_MAP || v->type == AML_TYPE_TOKENIZER)) {
+          if (v && (v->type == AML_TYPE_LIST || v->type == AML_TYPE_MAP || v->type == AML_TYPE_TOKENIZER || v->type == AML_TYPE_RECORD)) {
             set_error(ctx, "TAPE requires a numeric array");
             return;
           }
@@ -6219,7 +6420,9 @@ static int aml_reserved_function(const char* name) {
         "map_keys", "map_clone", "assert", "floor", "isfinite", "rng_new", "rng_uniform",
         "rng_index", "rng_categorical", "categorical_at", "nt_linear", "nt_linear_vjp",
         "nt_tanh", "nt_tanh_vjp", "nt_mse_grad", "nt_sgd", "rng_normal",
-        "tokenizer_load", "tokenizer_pieces", "codepoint_isalnum", "read_line"
+        "tokenizer_load", "tokenizer_pieces", "tokenizer_identity", "codepoint_isalnum", "read_line",
+        "record_new", "record_set", "record_get", "record_has", "record_keys", "record_kind",
+        "record_clone", "record_replace", "record_swap", "checkpoint_save", "checkpoint_load", "file_exists"
     };
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (strcasecmp(name, names[i]) == 0) return 1;
@@ -6357,6 +6560,7 @@ static int aml_call_value(AML_ExecCtx* ctx, AML_Func* f, AML_Var* args,
     AM_List* saved_return_list = ctx->return_list;
     AM_Map* saved_return_map = ctx->return_map;
     AM_Tokenizer* saved_return_tokenizer = ctx->return_tokenizer;
+    AM_Record* saved_return_record = ctx->return_record;
     int saved_return_type = ctx->return_type;
 
     // push local scope
@@ -6381,6 +6585,9 @@ static int aml_call_value(AML_ExecCtx* ctx, AML_Func* f, AML_Var* args,
         } else if (args[i].type == AML_TYPE_TOKENIZER) {
             am_tokenizer_ref(args[i].tokenizer);
             symtab_set_tokenizer(locals, f->params[i], args[i].tokenizer);
+        } else if (args[i].type == AML_TYPE_RECORD) {
+            am_record_ref(args[i].record);
+            symtab_set_record(locals, f->params[i], args[i].record);
         } else {
             symtab_set(locals, f->params[i], args[i].value);
         }
@@ -6394,6 +6601,7 @@ static int aml_call_value(AML_ExecCtx* ctx, AML_Func* f, AML_Var* args,
     ctx->return_list = NULL;
     ctx->return_map = NULL;
     ctx->return_tokenizer = NULL;
+    ctx->return_record = NULL;
     ctx->return_type = AML_TYPE_FLOAT;
 
     // execute body
@@ -6406,6 +6614,7 @@ static int aml_call_value(AML_ExecCtx* ctx, AML_Func* f, AML_Var* args,
         out->list = ctx->return_list;
         out->map = ctx->return_map;
         out->tokenizer = ctx->return_tokenizer;
+        out->record = ctx->return_record;
     }
     // Return expressions already own their references, including local aliases.
     symtab_clear_arrays(locals);
@@ -6420,6 +6629,7 @@ static int aml_call_value(AML_ExecCtx* ctx, AML_Func* f, AML_Var* args,
     ctx->return_list = saved_return_list;
     ctx->return_map = saved_return_map;
     ctx->return_tokenizer = saved_return_tokenizer;
+    ctx->return_record = saved_return_record;
     ctx->return_type = saved_return_type;
     return ctx->error[0] != 0;
 }
@@ -6533,7 +6743,7 @@ static int aml_optional_array(AML_ExecCtx* ctx, const char* expression, AM_Array
     if (aml_eval_value(ctx, expression, &value)) {
         aml_value_clear(&value); return 1;
     }
-    if (value.type == AML_TYPE_STRING || value.type == AML_TYPE_LIST || value.type == AML_TYPE_MAP || value.type == AML_TYPE_TOKENIZER) {
+    if (value.type == AML_TYPE_STRING || value.type == AML_TYPE_LIST || value.type == AML_TYPE_MAP || value.type == AML_TYPE_TOKENIZER || value.type == AML_TYPE_RECORD) {
         aml_value_clear(&value);
         set_error(ctx, "optional argument requires a numeric array"); return 1;
     }
@@ -6564,8 +6774,9 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
         if (strcasecmp(fname, array_names[fi])) continue;
         for (int i = 0; i < nargs; i++) {
             AML_Var* v = resolve_var_full(ctx, arg_strs[i]);
-            if (v && (v->type == AML_TYPE_LIST || v->type == AML_TYPE_MAP || v->type == AML_TYPE_TOKENIZER)) {
-                set_error(ctx, v->type == AML_TYPE_TOKENIZER
+            if (v && (v->type == AML_TYPE_LIST || v->type == AML_TYPE_MAP || v->type == AML_TYPE_TOKENIZER || v->type == AML_TYPE_RECORD)) {
+                set_error(ctx, v->type == AML_TYPE_RECORD
+                    ? "numeric array operation cannot consume a record" : v->type == AML_TYPE_TOKENIZER
                     ? "numeric array operation cannot consume a tokenizer" : v->type == AML_TYPE_MAP
                     ? "numeric array operation cannot consume a map"
                     : "numeric array operation cannot consume a list");
@@ -7618,6 +7829,7 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
         ctx->return_list = value.list;
         ctx->return_map = value.map;
         ctx->return_tokenizer = value.tokenizer;
+        ctx->return_record = value.record;
         return ctx->nlines;
     }
 
@@ -7645,6 +7857,8 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
                 putchar('}');
             } else if (value.type == AML_TYPE_TOKENIZER) {
                 fputs("<tokenizer>", stdout);
+            } else if (value.type == AML_TYPE_RECORD) {
+                fputs("<record>", stdout);
             } else if (value.type == AML_TYPE_ARRAY) {
                 putchar('[');
                 for (int i = 0; i < value.array->len; i++)
@@ -7847,8 +8061,9 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
 
                         // Find the array variable and write to it
                         AML_Var* var = resolve_var_full(ctx, varname);
-                        if (var && (var->type == AML_TYPE_LIST || var->type == AML_TYPE_MAP || var->type == AML_TYPE_TOKENIZER)) {
-                            set_error(ctx, var->type == AML_TYPE_TOKENIZER
+                        if (var && (var->type == AML_TYPE_LIST || var->type == AML_TYPE_MAP || var->type == AML_TYPE_TOKENIZER || var->type == AML_TYPE_RECORD)) {
+                            set_error(ctx, var->type == AML_TYPE_RECORD
+                                ? "array element write requires an array, not a record" : var->type == AML_TYPE_TOKENIZER
                                 ? "array element write requires an array, not a tokenizer" : var->type == AML_TYPE_MAP
                                 ? "array element write requires an array; use map_set for maps"
                                 : "array element write requires an array; use list_set for lists");
@@ -7920,6 +8135,15 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
                     return idx + 1;
                 }
             }
+            if (value.type == AML_TYPE_RECORD) {
+                AM_Record* copy = am_record_clone(value.record);
+                am_record_free(value.record);
+                value.record = copy;
+                if (!copy) {
+                    set_error_at(ctx, ctx->lines[idx].lineno, "record allocation failed");
+                    return idx + 1;
+                }
+            }
             AML_Symtab* tab = ctx->call_depth > 0
                 ? &ctx->locals[ctx->call_depth - 1] : &ctx->globals;
             int rc;
@@ -7928,6 +8152,7 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
             else if (value.type == AML_TYPE_LIST) rc = symtab_set_list(tab, name, value.list);
             else if (value.type == AML_TYPE_MAP) rc = symtab_set_map(tab, name, value.map);
             else if (value.type == AML_TYPE_TOKENIZER) rc = symtab_set_tokenizer(tab, name, value.tokenizer);
+            else if (value.type == AML_TYPE_RECORD) rc = symtab_set_record(tab, name, value.record);
             else rc = symtab_set(tab, name, value.value);
             if (rc) {
                 aml_value_clear(&value);
@@ -7938,7 +8163,7 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
         if (n && n < AML_MAX_NAME && *p == '(' &&
             (aml_value_function(ctx, name) || aml_text_function(name) || aml_list_function(name) ||
              aml_map_function(name) || aml_scalar_intrinsic_function(name) ||
-             aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) ||
+             aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) || aml_record_function(name) ||
              aml_array_scalar_function(name))) {
             AML_Var value = {0};
             aml_eval_value(ctx, text, &value);
@@ -8456,7 +8681,7 @@ void* am_compile(const char* script) {
 // Helper: resolve var to array (inlined, frequent operation)
 static inline AM_Array* bc_get_array(AML_ExecCtx* ctx, const char* name) {
     AML_Var* v = resolve_var_full(ctx, name);
-    if (v && (v->type == AML_TYPE_LIST || v->type == AML_TYPE_MAP || v->type == AML_TYPE_TOKENIZER)) {
+    if (v && (v->type == AML_TYPE_LIST || v->type == AML_TYPE_MAP || v->type == AML_TYPE_TOKENIZER || v->type == AML_TYPE_RECORD)) {
         set_error(ctx, "TAPE requires a numeric array");
         return NULL;
     }
@@ -11719,4 +11944,684 @@ AM_List* am_map_keys(const AM_Map* map) {
         }
     }
     return out;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FLAT TYPED RECORDS — explicit owners, detached copies, staged publication
+// ═══════════════════════════════════════════════════════════════════════════════
+
+static int am_record_text_valid(const AM_String* text) {
+    return text && text->byte_len >= 0 && text->len >= 0 &&
+        am_string_validate_bytes(text->data, (size_t)text->byte_len) == text->len;
+}
+
+static int am_record_array_valid(const AM_Array* array) {
+    if (!array || !array->data || array->len <= 0 || array->len > AM_MAX_ARRAY_SIZE) return 0;
+    if (array->rows == 0 && array->cols == 0) return 1;
+    return array->rows > 0 && array->cols > 0 &&
+        array->rows <= AM_MAX_ARRAY_SIZE / array->cols &&
+        array->rows * array->cols == array->len;
+}
+
+static int am_record_leaf_clone(AML_Var* out, const AML_Var* value) {
+    memset(out, 0, sizeof(*out));
+    if (!value) return -1;
+    out->type = value->type;
+    switch (value->type) {
+    case AML_TYPE_FLOAT:
+        memcpy(&out->value, &value->value, sizeof(float));
+        return 0;
+    case AML_TYPE_ARRAY:
+        if (!am_record_array_valid(value->array)) return -1;
+#ifdef USE_CUDA
+        ensure_cpu(value->array);
+#endif
+        out->array = am_array_clone(value->array);
+        return out->array ? 0 : -1;
+    case AML_TYPE_STRING:
+        if (!am_record_text_valid(value->string)) return -1;
+        out->string = value->string;
+        am_string_ref(out->string);
+        return 0;
+    case AML_TYPE_LIST:
+        if (!value->list || value->list->len < 0 || value->list->len > AM_MAX_LIST_ITEMS ||
+            value->list->capacity < value->list->len ||
+            (value->list->len && !value->list->items)) return -1;
+        for (int i = 0; i < value->list->len; i++)
+            if (!am_record_text_valid(value->list->items[i])) return -1;
+        out->list = am_list_clone(value->list);
+        return out->list ? 0 : -1;
+    case AML_TYPE_MAP:
+        if (!value->map || value->map->len < 0 || value->map->len > AM_MAX_MAP_ITEMS ||
+            value->map->capacity < value->map->len ||
+            (value->map->len && !value->map->entries)) return -1;
+        for (int i = 0; i < value->map->len; i++)
+            if (!am_record_text_valid(value->map->entries[i].key) ||
+                !isfinite(value->map->entries[i].value)) return -1;
+        out->map = am_map_clone(value->map);
+        return out->map ? 0 : -1;
+    default:
+        return -1;
+    }
+}
+
+AM_Record* am_record_new(void) {
+    AM_Record* record = calloc(1, sizeof(*record));
+    if (record) record->refcount = 1;
+    return record;
+}
+
+void am_record_ref(AM_Record* record) {
+    if (record) __atomic_add_fetch(&record->refcount, 1, __ATOMIC_RELAXED);
+}
+
+void am_record_free(AM_Record* record) {
+    if (!record || __atomic_sub_fetch(&record->refcount, 1, __ATOMIC_ACQ_REL) > 0) return;
+    for (int i = 0; i < record->len; i++) {
+        am_string_free(record->entries[i].key);
+        aml_value_clear(&record->entries[i].value);
+    }
+    free(record->entries);
+    free(record);
+}
+
+static int am_record_index(const AM_Record* record, const AM_String* key) {
+    if (!record || !key || !key->data || key->byte_len < 0) return -1;
+    for (int i = 0; i < record->len; i++) {
+        const AM_String* candidate = record->entries[i].key;
+        if (candidate->byte_len == key->byte_len &&
+            !memcmp(candidate->data, key->data, (size_t)key->byte_len)) return i;
+    }
+    return -1;
+}
+
+static int am_record_reserve(AM_Record* record, int count) {
+    if (count < 0 || count > AM_MAX_RECORD_FIELDS) return -1;
+    if (count <= record->capacity) return 0;
+    int capacity = record->capacity ? record->capacity * 2 : 8;
+    if (capacity < count) capacity = count;
+    if (capacity > AM_MAX_RECORD_FIELDS) capacity = AM_MAX_RECORD_FIELDS;
+    AM_RecordEntry* entries = realloc(record->entries, (size_t)capacity * sizeof(*entries));
+    if (!entries) return -1;
+    record->entries = entries;
+    record->capacity = capacity;
+    return 0;
+}
+
+int am_record_set(AM_Record* record, AM_String* key, const AML_Var* value) {
+    if (!record || !am_record_text_valid(key)) return -1;
+    int index = am_record_index(record, key);
+    if (index < 0 && record->len == AM_MAX_RECORD_FIELDS) return -1;
+    AML_Var copy = {0};
+    if (am_record_leaf_clone(&copy, value)) return -1;
+    if (index < 0) {
+        if (am_record_reserve(record, record->len + 1)) {
+            aml_value_clear(&copy);
+            return -1;
+        }
+        index = record->len++;
+        am_string_ref(key);
+        record->entries[index].key = key;
+    } else {
+        aml_value_clear(&record->entries[index].value);
+    }
+    record->entries[index].value = copy;
+    return 0;
+}
+
+const AML_Var* am_record_get(const AM_Record* record, const AM_String* key) {
+    int index = am_record_index(record, key);
+    return index < 0 ? NULL : &record->entries[index].value;
+}
+
+int am_record_has(const AM_Record* record, const AM_String* key) {
+    return am_record_index(record, key) >= 0;
+}
+
+AM_List* am_record_keys(const AM_Record* record) {
+    if (!record) return NULL;
+    AM_List* keys = am_list_new();
+    if (!keys) return NULL;
+    for (int i = 0; i < record->len; i++) {
+        if (am_list_push(keys, record->entries[i].key) < 0) {
+            am_list_free(keys);
+            return NULL;
+        }
+    }
+    return keys;
+}
+
+AM_Record* am_record_clone(const AM_Record* record) {
+    if (!record) return NULL;
+    AM_Record* copy = am_record_new();
+    if (!copy) return NULL;
+    if (am_record_reserve(copy, record->len)) { am_record_free(copy); return NULL; }
+    for (int i = 0; i < record->len; i++) {
+        if (am_record_leaf_clone(&copy->entries[i].value, &record->entries[i].value)) {
+            am_record_free(copy);
+            return NULL;
+        }
+        copy->entries[i].key = record->entries[i].key;
+        am_string_ref(copy->entries[i].key);
+        copy->len++;
+    }
+    return copy;
+}
+
+int am_record_swap(AM_Record* a, AM_Record* b) {
+    if (!a || !b) return -1;
+    AM_RecordEntry* entries = a->entries;
+    int len = a->len, capacity = a->capacity;
+    a->entries = b->entries;
+    a->len = b->len;
+    a->capacity = b->capacity;
+    b->entries = entries;
+    b->len = len;
+    b->capacity = capacity;
+    return 0;
+}
+
+int am_record_replace(AM_Record* live, const AM_Record* checked) {
+    if (!live || !checked) return -1;
+    if (live == checked) return 0;
+    AM_Record* next = am_record_clone(checked);
+    if (!next) return -1;
+    am_record_swap(live, next);
+    am_record_free(next);
+    return 0;
+}
+
+AM_String* am_tokenizer_identity(const AM_Tokenizer* model, char* error, size_t cap) {
+    am_text_error(error, cap, "");
+    if (!model || !model->model || !model->backend.identity) {
+        am_text_error(error, cap, "tokenizer identity is unavailable"); return NULL;
+    }
+    const char* identity = model->backend.identity(model->model);
+    if (!identity || strnlen(identity, 65) != 64) {
+        am_text_error(error, cap, "invalid tokenizer SHA-256 identity"); return NULL;
+    }
+    for (int i = 0; i < 64; i++) {
+        if (!((identity[i] >= '0' && identity[i] <= '9') ||
+              (identity[i] >= 'a' && identity[i] <= 'f'))) {
+            am_text_error(error, cap, "invalid tokenizer SHA-256 identity"); return NULL;
+        }
+    }
+    AM_String* result = am_string_new_bytes(identity, 64);
+    if (!result) am_text_error(error, cap, "tokenizer identity allocation failed");
+    return result;
+}
+
+// Checkpoint v1 is independent of C struct layout and the internal value tags.
+// Header: magic[8], version:u32, flags:u32, payload_bytes:u64, fields:u32,
+// CRC32:u32; all integers little-endian. CRC covers header[0:28] + payload.
+static const unsigned char am_checkpoint_magic[8] = {'A','M','L','C','P',0,'\r','\n'};
+
+typedef struct {
+    unsigned char* data;
+    size_t pos, cap, items;
+    int failed;
+} AM_CheckpointWriter;
+
+static void am_cp_u32(unsigned char* out, uint32_t value) {
+    for (int i = 0; i < 4; i++) out[i] = (unsigned char)(value >> (8 * i));
+}
+
+static void am_cp_u64(unsigned char* out, uint64_t value) {
+    for (int i = 0; i < 8; i++) out[i] = (unsigned char)(value >> (8 * i));
+}
+
+static uint32_t am_cp_get_u32(const unsigned char* in) {
+    uint32_t value = 0;
+    for (int i = 0; i < 4; i++) value |= (uint32_t)in[i] << (8 * i);
+    return value;
+}
+
+static uint64_t am_cp_get_u64(const unsigned char* in) {
+    uint64_t value = 0;
+    for (int i = 0; i < 8; i++) value |= (uint64_t)in[i] << (8 * i);
+    return value;
+}
+
+static uint32_t am_cp_crc_update(uint32_t crc, const unsigned char* data, size_t bytes) {
+    // Per-call table avoids mutable global initialization and worker races.
+    uint32_t table[256];
+    for (uint32_t i = 0; i < 256; i++) {
+        uint32_t x = i;
+        for (int bit = 0; bit < 8; bit++) x = (x >> 1) ^ (0xedb88320u & (0u - (x & 1u)));
+        table[i] = x;
+    }
+    for (size_t i = 0; i < bytes; i++) crc = table[(crc ^ data[i]) & 255] ^ (crc >> 8);
+    return crc;
+}
+
+static uint32_t am_cp_crc(const unsigned char* data, size_t bytes) {
+    uint32_t crc = am_cp_crc_update(0xffffffffu, data, 28);
+    return am_cp_crc_update(crc, data + 32, bytes - 32) ^ 0xffffffffu;
+}
+
+static void am_cp_write(AM_CheckpointWriter* writer, const void* bytes, size_t count) {
+    if (writer->failed || count > writer->cap - writer->pos) { writer->failed = 1; return; }
+    if (writer->data && count) memcpy(writer->data + writer->pos, bytes, count);
+    writer->pos += count;
+}
+
+static void am_cp_write_u32(AM_CheckpointWriter* writer, uint32_t value) {
+    unsigned char bytes[4];
+    am_cp_u32(bytes, value);
+    am_cp_write(writer, bytes, sizeof(bytes));
+}
+
+static void am_cp_write_float(AM_CheckpointWriter* writer, const float* value) {
+    uint32_t bits;
+    memcpy(&bits, value, sizeof(bits));
+    am_cp_write_u32(writer, bits);
+}
+
+static void am_cp_write_text(AM_CheckpointWriter* writer, const AM_String* text, int length) {
+    if (!am_record_text_valid(text) || writer->items == AM_MAX_CHECKPOINT_ITEMS) {
+        writer->failed = 1; return;
+    }
+    writer->items++;
+    if (length) am_cp_write_u32(writer, (uint32_t)text->byte_len);
+    am_cp_write(writer, text->data, (size_t)text->byte_len);
+}
+
+static int am_cp_tag(int type) {
+    switch (type) {
+    case AML_TYPE_FLOAT: return 1;
+    case AML_TYPE_STRING: return 2;
+    case AML_TYPE_ARRAY: return 3;
+    case AML_TYPE_LIST: return 4;
+    case AML_TYPE_MAP: return 5;
+    default: return 0;
+    }
+}
+
+static void am_cp_write_value(AM_CheckpointWriter* writer, const AML_Var* value) {
+    switch (value->type) {
+    case AML_TYPE_FLOAT:
+        am_cp_write_float(writer, &value->value);
+        break;
+    case AML_TYPE_STRING:
+        am_cp_write_text(writer, value->string, 0);
+        break;
+    case AML_TYPE_ARRAY: {
+        AM_Array* array = value->array;
+        if (!am_record_array_valid(array)) { writer->failed = 1; return; }
+#ifdef USE_CUDA
+        ensure_cpu(array);
+#endif
+        am_cp_write_u32(writer, (uint32_t)array->len);
+        am_cp_write_u32(writer, (uint32_t)array->rows);
+        am_cp_write_u32(writer, (uint32_t)array->cols);
+        for (int i = 0; i < array->len && !writer->failed; i++)
+            am_cp_write_float(writer, &array->data[i]);
+        break;
+    }
+    case AML_TYPE_LIST: {
+        const AM_List* list = value->list;
+        if (!list || list->len < 0 || list->len > AM_MAX_LIST_ITEMS ||
+            list->capacity < list->len || (list->len && !list->items)) {
+            writer->failed = 1; return;
+        }
+        am_cp_write_u32(writer, (uint32_t)list->len);
+        for (int i = 0; i < list->len && !writer->failed; i++)
+            am_cp_write_text(writer, list->items[i], 1);
+        break;
+    }
+    case AML_TYPE_MAP: {
+        const AM_Map* map = value->map;
+        if (!map || map->len < 0 || map->len > AM_MAX_MAP_ITEMS ||
+            map->capacity < map->len || (map->len && !map->entries)) {
+            writer->failed = 1; return;
+        }
+        am_cp_write_u32(writer, (uint32_t)map->len);
+        for (int i = 0; i < map->len && !writer->failed; i++) {
+            if (!isfinite(map->entries[i].value)) { writer->failed = 1; return; }
+            am_cp_write_text(writer, map->entries[i].key, 1);
+            am_cp_write_float(writer, &map->entries[i].value);
+        }
+        break;
+    }
+    default:
+        writer->failed = 1;
+    }
+}
+
+static int am_cp_encode(const AM_Record* record, AM_CheckpointWriter* writer) {
+    if (!record || record->len < 0 || record->len > AM_MAX_RECORD_FIELDS ||
+        record->capacity < record->len || (record->len && !record->entries)) return -1;
+    unsigned char header[32] = {0};
+    memcpy(header, am_checkpoint_magic, sizeof(am_checkpoint_magic));
+    am_cp_u32(header + 8, 1);
+    am_cp_u32(header + 24, (uint32_t)record->len);
+    am_cp_write(writer, header, sizeof(header));
+    for (int i = 0; i < record->len && !writer->failed; i++) {
+        const AM_RecordEntry* entry = &record->entries[i];
+        int tag = am_cp_tag(entry->value.type);
+        if (!tag || !am_record_text_valid(entry->key)) return -1;
+        unsigned char field[16] = {0};
+        am_cp_u32(field, (uint32_t)entry->key->byte_len);
+        field[4] = (unsigned char)tag;
+        size_t start = writer->pos;
+        am_cp_write(writer, field, sizeof(field));
+        am_cp_write_text(writer, entry->key, 0);
+        size_t body = writer->pos;
+        am_cp_write_value(writer, &entry->value);
+        if (writer->data && !writer->failed)
+            am_cp_u64(writer->data + start + 8, (uint64_t)(writer->pos - body));
+    }
+    if (writer->failed) return -1;
+    if (writer->data) {
+        am_cp_u64(writer->data + 16, (uint64_t)(writer->pos - 32));
+        am_cp_u32(writer->data + 28, am_cp_crc(writer->data, writer->pos));
+    }
+    return 0;
+}
+
+typedef struct {
+    const unsigned char* data;
+    size_t pos, end, items;
+    const char* failure;
+} AM_CheckpointReader;
+
+static const unsigned char* am_cp_read(AM_CheckpointReader* reader, size_t count) {
+    if (reader->failure || count > reader->end - reader->pos) {
+        if (!reader->failure) reader->failure = "checkpoint truncated value";
+        return NULL;
+    }
+    const unsigned char* data = reader->data + reader->pos;
+    reader->pos += count;
+    return data;
+}
+
+static uint32_t am_cp_read_u32(AM_CheckpointReader* reader) {
+    const unsigned char* data = am_cp_read(reader, 4);
+    return data ? am_cp_get_u32(data) : 0;
+}
+
+static AM_String* am_cp_read_text(AM_CheckpointReader* reader, uint32_t bytes) {
+    if (bytes > AM_MAX_STRING_BYTES || reader->items == AM_MAX_CHECKPOINT_ITEMS) {
+        reader->failure = "checkpoint string/item limit exceeded"; return NULL;
+    }
+    const unsigned char* data = am_cp_read(reader, bytes);
+    if (!data) return NULL;
+    if (am_string_validate_bytes((const char*)data, bytes) < 0) {
+        reader->failure = "checkpoint invalid UTF-8 or NUL"; return NULL;
+    }
+    reader->items++;
+    AM_String* text = am_string_new_bytes((const char*)data, bytes);
+    if (!text) reader->failure = "checkpoint string allocation failed";
+    return text;
+}
+
+static int am_cp_read_value(AM_CheckpointReader* reader, int tag, AML_Var* value) {
+    memset(value, 0, sizeof(*value));
+    if (tag == 1) {
+        if (reader->end - reader->pos != 4) goto invalid;
+        uint32_t bits = am_cp_read_u32(reader);
+        memcpy(&value->value, &bits, sizeof(bits));
+    } else if (tag == 2) {
+        size_t bytes = reader->end - reader->pos;
+        if (bytes > AM_MAX_STRING_BYTES) goto invalid;
+        value->type = AML_TYPE_STRING;
+        value->string = am_cp_read_text(reader, (uint32_t)bytes);
+        if (!value->string) return -1;
+    } else if (tag == 3) {
+        uint32_t len = am_cp_read_u32(reader);
+        uint32_t rows = am_cp_read_u32(reader);
+        uint32_t cols = am_cp_read_u32(reader);
+        if (reader->failure) return -1;
+        if (!len || len > AM_MAX_ARRAY_SIZE ||
+            !((!rows && !cols) || (rows && cols && rows <= AM_MAX_ARRAY_SIZE / cols && rows * cols == len)) ||
+            reader->end - reader->pos != (size_t)len * 4) goto invalid;
+        value->type = AML_TYPE_ARRAY;
+        value->array = am_array_new((int)len);
+        if (!value->array) goto allocation;
+        value->array->rows = (int)rows;
+        value->array->cols = (int)cols;
+        for (uint32_t i = 0; i < len; i++) {
+            uint32_t bits = am_cp_read_u32(reader);
+            memcpy(&value->array->data[i], &bits, sizeof(bits));
+        }
+    } else if (tag == 4 || tag == 5) {
+        uint32_t count = am_cp_read_u32(reader);
+        if (reader->failure) return -1;
+        if (count > (uint32_t)(tag == 4 ? AM_MAX_LIST_ITEMS : AM_MAX_MAP_ITEMS) ||
+            count > AM_MAX_CHECKPOINT_ITEMS - reader->items ||
+            count > (reader->end - reader->pos) / (tag == 4 ? 4 : 8)) goto invalid;
+        value->type = tag == 4 ? AML_TYPE_LIST : AML_TYPE_MAP;
+        if (tag == 4) { if (!(value->list = am_list_new())) goto allocation; }
+        else { if (!(value->map = am_map_new())) goto allocation; }
+        for (uint32_t i = 0; i < count; i++) {
+            uint32_t bytes = am_cp_read_u32(reader);
+            if (reader->failure) return -1;
+            AM_String* item = am_cp_read_text(reader, bytes);
+            if (!item) return -1;
+            if (tag == 4) {
+                int status = am_list_push(value->list, item);
+                am_string_free(item);
+                if (status < 0) goto allocation;
+            } else {
+                uint32_t bits = am_cp_read_u32(reader);
+                float number;
+                memcpy(&number, &bits, sizeof(bits));
+                if (reader->failure || !isfinite(number) || am_map_has(value->map, item)) {
+                    am_string_free(item);
+                    goto invalid;
+                }
+                int status = am_map_set(value->map, item, number);
+                am_string_free(item);
+                if (status) goto allocation;
+            }
+        }
+    } else goto invalid;
+    if (reader->failure) return -1;
+    if (reader->pos != reader->end) goto invalid;
+    return 0;
+invalid:
+    if (!reader->failure) reader->failure = "checkpoint invalid type, shape, count, or duplicate key";
+    return -1;
+allocation:
+    reader->failure = "checkpoint value allocation failed";
+    return -1;
+}
+
+static AM_Record* am_cp_decode(const unsigned char* data, size_t bytes,
+                               char* error, size_t cap) {
+    if (bytes < 32 || bytes > AM_MAX_CHECKPOINT_BYTES ||
+        memcmp(data, am_checkpoint_magic, 8) || am_cp_get_u32(data + 8) != 1 ||
+        am_cp_get_u32(data + 12) != 0 || am_cp_get_u64(data + 16) != bytes - 32 ||
+        am_cp_get_u32(data + 24) > AM_MAX_RECORD_FIELDS ||
+        am_cp_get_u32(data + 28) != am_cp_crc(data, bytes)) {
+        am_text_error(error, cap, "checkpoint invalid header, size, version, or checksum");
+        return NULL;
+    }
+    AM_Record* record = am_record_new();
+    uint32_t count = am_cp_get_u32(data + 24);
+    if (!record || am_record_reserve(record, (int)count)) {
+        am_record_free(record);
+        am_text_error(error, cap, "checkpoint record allocation failed"); return NULL;
+    }
+    AM_CheckpointReader reader = {data, 32, bytes, 0, NULL};
+    for (uint32_t i = 0; i < count && !reader.failure; i++) {
+        const unsigned char* field = am_cp_read(&reader, 16);
+        if (!field) break;
+        uint32_t key_bytes = am_cp_get_u32(field);
+        uint64_t value_bytes = am_cp_get_u64(field + 8);
+        if (field[4] < 1 || field[4] > 5 || field[5] || field[6] || field[7]) {
+            reader.failure = "checkpoint unknown type or nonzero reserved field"; break;
+        }
+        AM_String* key = am_cp_read_text(&reader, key_bytes);
+        if (!key) break;
+        if (value_bytes > reader.end - reader.pos || am_record_has(record, key)) {
+            am_string_free(key);
+            reader.failure = "checkpoint invalid value length or duplicate field"; break;
+        }
+        AM_CheckpointReader body = {data, reader.pos, reader.pos + (size_t)value_bytes, reader.items, NULL};
+        AML_Var value = {0};
+        if (am_cp_read_value(&body, field[4], &value)) {
+            aml_value_clear(&value);
+            am_string_free(key);
+            reader.failure = body.failure; break;
+        }
+        record->entries[record->len].key = key;
+        record->entries[record->len].value = value;
+        record->len++;
+        reader.pos = body.pos;
+        reader.items = body.items;
+    }
+    if (!reader.failure && reader.pos != bytes) reader.failure = "checkpoint trailing payload bytes";
+    if (reader.failure) {
+        am_record_free(record);
+        am_text_error(error, cap, reader.failure); return NULL;
+    }
+    return record;
+}
+
+static int am_checkpoint_host_valid(void) {
+    return sizeof(float) == 4 && FLT_RADIX == 2 && FLT_MANT_DIG == 24 && FLT_MAX_EXP == 128;
+}
+
+static int am_checkpoint_path_valid(const char* path) {
+    if (!path || !*path) return 0;
+    size_t bytes = strnlen(path, AM_MAX_STRING_BYTES + 1);
+    return bytes <= AM_MAX_STRING_BYTES && am_string_validate_bytes(path, bytes) >= 0;
+}
+
+static void am_checkpoint_io_error(char* error, size_t cap, const char* operation, int number) {
+    if (error && cap) snprintf(error, cap, "checkpoint %s: %s", operation, strerror(number));
+}
+
+int am_file_exists(const char* path, char* error, size_t cap) {
+    am_text_error(error, cap, "");
+    if (!am_checkpoint_path_valid(path)) {
+        am_text_error(error, cap, "file_exists requires a nonempty UTF-8 path"); return -1;
+    }
+    struct stat st;
+    if (stat(path, &st)) {
+        int number = errno;
+        if (number == ENOENT || number == ENOTDIR) return 0;
+        am_checkpoint_io_error(error, cap, "file_exists failed", number); return -1;
+    }
+    if (!S_ISREG(st.st_mode)) { am_text_error(error, cap, "file_exists path is not a regular file"); return -1; }
+    return 1;
+}
+
+AM_Record* am_checkpoint_load(const char* path, char* error, size_t cap) {
+    am_text_error(error, cap, "");
+    if (!am_checkpoint_host_valid() || !am_checkpoint_path_valid(path)) {
+        am_text_error(error, cap, "checkpoint requires IEEE binary32 and a nonempty UTF-8 path"); return NULL;
+    }
+    // O_NONBLOCK prevents an unexpected FIFO path from blocking before fstat.
+    int fd = open(path, O_RDONLY | O_NONBLOCK);
+    if (fd < 0) { am_checkpoint_io_error(error, cap, "open failed", errno); return NULL; }
+    struct stat st;
+    if (fstat(fd, &st)) {
+        int number = errno;
+        close(fd);
+        am_checkpoint_io_error(error, cap, "stat failed", number); return NULL;
+    }
+    if (!S_ISREG(st.st_mode) || st.st_size < 32 || (uint64_t)st.st_size > AM_MAX_CHECKPOINT_BYTES) {
+        close(fd);
+        am_text_error(error, cap, "checkpoint requires a regular file of 32 bytes to 64 MiB"); return NULL;
+    }
+    size_t bytes = (size_t)st.st_size, pos = 0;
+    unsigned char* data = malloc(bytes);
+    if (!data) { close(fd); am_text_error(error, cap, "checkpoint input allocation failed"); return NULL; }
+    int number = 0;
+    while (pos < bytes) {
+        ssize_t count = read(fd, data + pos, bytes - pos);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) { number = count < 0 ? errno : EIO; break; }
+        pos += (size_t)count;
+    }
+    if (!number) {
+        unsigned char extra;
+        ssize_t count;
+        do { count = read(fd, &extra, 1); } while (count < 0 && errno == EINTR);
+        if (count != 0) number = count < 0 ? errno : EIO;
+    }
+    if (close(fd) && !number) number = errno;
+    if (number) {
+        free(data);
+        am_checkpoint_io_error(error, cap, "read/close failed", number); return NULL;
+    }
+    AM_Record* record = am_cp_decode(data, bytes, error, cap);
+    free(data);
+    return record;
+}
+
+int am_checkpoint_save(const AM_Record* record, const char* path, char* error, size_t cap) {
+    am_text_error(error, cap, "");
+    if (!am_checkpoint_host_valid() || !am_checkpoint_path_valid(path)) {
+        am_text_error(error, cap, "checkpoint requires IEEE binary32 and a nonempty UTF-8 path"); return -1;
+    }
+    AM_CheckpointWriter measure = {NULL, 0, AM_MAX_CHECKPOINT_BYTES, 0, 0};
+    if (am_cp_encode(record, &measure)) {
+        am_text_error(error, cap, "checkpoint invalid record or byte/item limit exceeded"); return -1;
+    }
+    unsigned char* data = malloc(measure.pos);
+    if (!data) { am_text_error(error, cap, "checkpoint output allocation failed"); return -1; }
+    AM_CheckpointWriter writer = {data, 0, measure.pos, 0, 0};
+    if (am_cp_encode(record, &writer) || writer.pos != measure.pos) {
+        free(data);
+        am_text_error(error, cap, "checkpoint record changed during save"); return -1;
+    }
+    const char* slash = strrchr(path, '/');
+    size_t directory_bytes = slash ? (size_t)(slash - path) : 1;
+    if (slash == path) directory_bytes = 1;
+    if (slash && !slash[1]) {
+        free(data);
+        am_text_error(error, cap, "checkpoint destination needs a file name"); return -1;
+    }
+    char* directory = malloc(directory_bytes + 1);
+    static const char suffix[] = "/.aml-checkpoint-XXXXXX";
+    char* temporary = malloc(directory_bytes + sizeof(suffix));
+    if (!directory || !temporary) {
+        free(data); free(directory); free(temporary);
+        am_text_error(error, cap, "checkpoint path allocation failed"); return -1;
+    }
+    if (slash) memcpy(directory, path, directory_bytes);
+    else directory[0] = '.';
+    directory[directory_bytes] = 0;
+    memcpy(temporary, directory, directory_bytes);
+    memcpy(temporary + directory_bytes, suffix, sizeof(suffix));
+    int fd = mkstemp(temporary);
+    if (fd < 0) {
+        int number = errno;
+        free(data); free(directory); free(temporary);
+        am_checkpoint_io_error(error, cap, "temporary create failed", number); return -1;
+    }
+    int number = 0;
+    size_t pos = 0;
+    while (pos < writer.pos) {
+        ssize_t count = write(fd, data + pos, writer.pos - pos);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) { number = count < 0 ? errno : EIO; break; }
+        pos += (size_t)count;
+    }
+    if (!number && fsync(fd)) number = errno;
+    if (close(fd) && !number) number = errno;
+    free(data);
+    if (!number && rename(temporary, path)) number = errno;
+    if (number) {
+        unlink(temporary);
+        free(directory); free(temporary);
+        am_checkpoint_io_error(error, cap, "save before commit failed", number); return -1;
+    }
+    // Rename is the commit point. From here, failures report status 2: the new
+    // complete checkpoint is visible, with directory durability unconfirmed.
+    free(temporary);
+    int dir_fd = open(directory, O_RDONLY);
+    free(directory);
+    if (dir_fd < 0) {
+        am_checkpoint_io_error(error, cap, "committed; directory open failed", errno); return 2;
+    }
+    int sync_error = fsync(dir_fd) ? errno : 0;
+    if (close(dir_fd) && !sync_error) sync_error = errno;
+    if (sync_error) {
+        am_checkpoint_io_error(error, cap, "committed; directory sync/close failed", sync_error); return 2;
+    }
+    return 1;
 }

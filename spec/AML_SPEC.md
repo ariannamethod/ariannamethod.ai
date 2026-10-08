@@ -1,6 +1,6 @@
 # AML — Arianna Method Language
 
-**Version:** 5.7.0 (Immutable tokenizers and live text input)
+**Version:** 5.8.0 (Explicit records and portable checkpoints)
 **Extension:** `.aml`
 **Status:** Living specification
 
@@ -81,13 +81,13 @@ limits, and compiled-program file requirements.
 
 Strings are immutable validated UTF-8, with at most 1 MiB of content and no
 embedded NUL. Variables, arguments, and returns carry their actual scalar,
-array, string, string-list, numeric-map, or immutable-tokenizer type. User functions require exactly their declared arity.
+array, string, string-list, numeric-map, immutable-tokenizer, or flat-record type. User functions require exactly their declared arity.
 `PRINT value` writes UTF-8 strings, numeric scalars, or bracketed numeric arrays,
 then a newline. String lists print as JSON arrays of UTF-8 strings with escaped
 quotes, backslashes, and control bytes. `ECHO` keeps its literal command semantics.
 Numeric maps print as JSON objects with the same escaped keys and finite
 numeric values, in insertion order.
-Tokenizer values print as `<tokenizer>`.
+Tokenizer values print as `<tokenizer>`; records print as `<record>`.
 
 The nine expression intrinsics are `text_len`, `text_bytes`, `text_equal`,
 `text_find`, `text_slice`, `text_concat`, `text_codepoint`, and
@@ -129,7 +129,12 @@ affects future loads. Configure registration before execution and keep callback
 code loaded while owners exist. The NoTorch bridge supplies deterministic
 Unigram inference, model normalization and unknown surface pieces. Scalar,
 array, text, list and map operations reject tokenizer operands.
-[TOKENIZER.md](../docs/TOKENIZER.md) defines backend ownership and model support.
+`tokenizer_identity(model)` returns a new immutable string containing 64
+lowercase SHA-256 hex digits. The optional backend callback supplies the digest
+of exactly the model bytes consumed at load; existing models keep their copied
+callback. Missing identity support, invalid callback output, wrong arguments
+and allocation failure are explicit errors. [TOKENIZER.md](../docs/TOKENIZER.md)
+defines backend ownership and model support.
 
 String lists are ordered mutable containers of immutable text, with a maximum
 of 65,536 items. Their eight intrinsics are `list_new`, `list_len`, `list_get`,
@@ -161,6 +166,46 @@ Map assignment, persistent storage, and worker launch clone the container;
 function parameters share it. Failed set growth preserves the prior map.
 Numeric operations reject maps. [MAPS.md](../docs/MAPS.md) defines ownership,
 host APIs, execution bounds, and operation-level allocation guarantees.
+
+Flat records group at most 256 ordered string-keyed fields. Leaves are scalar
+float, numeric array/matrix, UTF-8 string, string list, or numeric map; nested
+records and tokenizer handles are rejected. `record_new()` creates an owner;
+`record_set(r, key, value)` copies mutable leaves before publishing and returns
+r. `record_get(r, key)` retains the typed leaf; `record_has` returns 0/1;
+`record_keys` returns an independent ordered string list; `record_kind` returns
+`"float"`, `"array"`, `"string"`, `"list"` or `"map"`. Missing get/kind keys fail.
+`record_clone` deep-copies mutable contents. Assignment, persistent storage and
+worker snapshots also copy records, while function parameters retain shared
+owners. Existing leaf assignment semantics remain unchanged.
+
+`record_replace(live, checked)` stages an independent complete copy, then
+replaces live contents and returns live. Failed staging leaves all old fields
+intact. `record_swap(a, b)` exchanges only contents, allocates nothing, returns
+1 and treats self-swap as a no-op. Wrapper identities and reference counts stay
+in place; previously retained children remain valid. Mutation and publication
+require one execution context or a synchronized embedding host.
+
+`checkpoint_save(record, path)` serializes the explicit record in portable
+version-1 form, preserving float32 bits, matrix shape and all ordered contents.
+The format admits 64 MiB total, 256 fields and 1,048,576 aggregate string/key
+objects, with each existing leaf limit enforced. A CRC32 covers its versioned
+header and payload. Save encodes before creating a mode-0600 temporary in the
+destination directory, writes/synchronizes/closes it, renames it to commit, then
+synchronizes/closes the directory. Return 1 means durable success; 2 means the
+complete file committed but directory sync/close failed. Precommit errors
+preserve the prior destination and remove the temporary.
+
+`checkpoint_load(path)` returns a complete detached record after exact bounded
+reading, checksum and structural validation. Truncation, trailing bytes,
+unknown versions/flags/tags, duplicate keys, malformed UTF-8/NUL, invalid shapes
+and exceeded limits fail without publishing owners. Scalar/array float bits
+include nonfinite values; maps retain their finite-value rule. Application
+schema and cross-owner validation remain AML code before replace/swap.
+`file_exists(path)` returns 1 for a regular file, 0 only for `ENOENT`/`ENOTDIR`,
+and raises for other failures or nonregular paths. All intrinsic paths use the
+original statement's source directory, including imports and compiled programs.
+[RECORDS.md](../docs/RECORDS.md) specifies wire bytes, C ownership and failure
+contracts. Record/checkpoint/file names are case-insensitive reserved intrinsics.
 
 `list_key(xs)` constructs an injective string encoding: decimal item count
 then `:`, followed by each item's decimal UTF-8 byte length, `:`, and its
@@ -228,7 +273,7 @@ arithmetic contracts.
 The numeric array queries `len`, `sum`, `rows`, and `cols` take exactly one typed
 argument; `dot` takes exactly two. Parenthesized and returned values retain
 their type. Optional gamma/beta/bias array arguments are evaluated once and
-reject text/list/map/tokenizer values before the numeric operation updates output or tape.
+reject text/list/map/tokenizer/record values before the numeric operation updates output or tape.
 Existing scalar and undefined-name placeholders retain their absent-array
 behavior.
 

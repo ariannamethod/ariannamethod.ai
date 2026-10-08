@@ -106,7 +106,10 @@ static int pieces(const void* data, const char* text, size_t bytes,
     return emit(context, "🌧", strlen("🌧"));
 }
 static AM_TokenizerBackend table(int kind) {
-    AM_TokenizerBackend result = {kind == 1 ? load_a : load_b, destroy, pieces}; return result;
+    AM_TokenizerBackend result = {
+        .load = kind == 1 ? load_a : load_b, .destroy = destroy, .pieces = pieces,
+        .identity = NULL
+    }; return result;
 }
 static void install(int kind) {
     AM_TokenizerBackend backend = table(kind); am_set_tokenizer_backend(&backend);
@@ -181,6 +184,50 @@ static void test_failed_output(void) {
     CHECK(result && result->len == AM_MAX_LIST_ITEMS && result->items[AM_MAX_LIST_ITEMS - 1]->byte_len == 0);
     am_list_free(result); am_string_free(boundary); am_string_free(good); am_tokenizer_free(model);
 }
+static int identity_mode;
+static const char* identity(const void* data) {
+    const Model* model = data; CHECK(model && model->guard == 0x575);
+    static const char* values[] = {
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "0123456789abcdeg0123456789abcdef0123456789abcdef0123456789abcdef",
+        "0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef",
+        "123", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0", NULL
+    };
+    return values[identity_mode];
+}
+static void test_identity(void) {
+    install(1); char error[128];
+    AM_Tokenizer* absent = am_tokenizer_load("without-identity", error, sizeof(error)); CHECK(absent);
+    CHECK(am_tokenizer_identity(absent, error, sizeof(error)) == NULL && error[0]);
+    AM_TokenizerBackend backend = table(1); backend.identity = identity;
+    am_set_tokenizer_backend(&backend); memset(&backend, 0, sizeof(backend));
+    AM_Tokenizer* model = am_tokenizer_load("with-identity", error, sizeof(error)); CHECK(model);
+    install(2); /* The old model retains its copied identity callback. */
+    identity_mode = 0;
+    AM_String* value = am_tokenizer_identity(model, error, sizeof(error));
+    CHECK(value && !strcmp(value->data, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"));
+    am_string_free(value);
+    CHECK(am_tokenizer_identity(absent, error, sizeof(error)) == NULL && error[0]);
+    for (identity_mode = 1; identity_mode <= 5; identity_mode++)
+        CHECK(am_tokenizer_identity(model, error, sizeof(error)) == NULL && error[0]);
+    CHECK(am_tokenizer_identity(NULL, error, sizeof(error)) == NULL && error[0]);
+    identity_mode = 0;
+#ifdef AML_TOKENIZER_ALLOC_WRAP
+    int succeeded = 0;
+    for (int budget = 0; budget < 8; budget++) {
+        CHECK(tracked_count == 0); allocation_budget = budget;
+        value = am_tokenizer_identity(model, error, sizeof(error)); allocation_budget = -1;
+        if (value) { CHECK(value->byte_len == 64); succeeded = 1; } else CHECK(error[0]);
+        am_string_free(value); CHECK(tracked_count == 0);
+        AM_String* text = am_string_new("still usable"); CHECK(text);
+        AM_List* result = am_tokenizer_pieces(model, text, error, sizeof(error));
+        expect(result, 1, "still usable"); am_list_free(result); am_string_free(text);
+        if (succeeded) break;
+    }
+    CHECK(succeeded);
+#endif
+    am_tokenizer_free(model); am_tokenizer_free(absent);
+}
 static int run(int mode, const char* source) {
     if (mode == 0) return am_exec(source);
     if (mode == 1) {
@@ -217,7 +264,8 @@ static void test_runtime(int mode) {
         "model + 1", "1 + model", "len(model)", "sum(model)", "text_len(model)",
         "list_len(model)", "map_len(model)", "floor(model)", "isfinite(model)",
         "nt_tanh(model)", "codepoint_isalnum(model)", "list_push(kept, model)",
-        "text_concat('x', model)"
+        "text_concat('x', model)", "tokenizer_identity(model)",
+        "tokenizer_identity()", "tokenizer_identity(1)", "tokenizer_identity(model, 1)"
     };
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
         char source[512]; snprintf(source, sizeof(source), "sentinel = 0\nkept = %s\nsentinel = 1\n", bad[i]);
@@ -290,7 +338,7 @@ static void test_allocations(void) {
 }
 int main(void) {
     am_init(); am_persistent_mode(1);
-    test_lifetime(); test_failed_output(); test_allocations();
+    test_lifetime(); test_failed_output(); test_identity(); test_allocations();
     for (int mode = 0; mode < 3; mode++) test_runtime(mode);
     test_workers(); test_origins();
     am_persistent_mode(0); am_set_tokenizer_backend(NULL);

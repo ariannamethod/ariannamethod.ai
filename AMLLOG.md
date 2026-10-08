@@ -12,6 +12,72 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-10-08 — experience survives the process (v5.8.0)
+
+Haiku can now carry its explicit owners together across process lifetimes.
+Flat typed records hold float, array/matrix, UTF-8 string, string-list and
+numeric-map leaves. Set, assignment, persistent storage and worker snapshots
+copy mutable leaves; direct typed getters and function parameters retain owners
+for organ calls. `record_kind` exposes exact field kinds for AML schema checks.
+`record_replace` stages every leaf before publication. `record_swap` exchanges
+already owned contents without allocation, so a saved pending turn can become
+live after the file commits without a second allocation boundary.
+
+Portable version-1 checkpoints preserve exact float32 bits, matrix shapes and
+all insertion order. A fixed little-endian header and CRC32 cover a bounded
+64 MiB file, 256 fields and 1,048,576 aggregate text/key objects. Loading checks
+the complete structure into detached owners. Unknown versions/tags, duplicate
+keys, invalid text/shapes, nonfinite map values, corruption, truncation and
+trailing bytes fail explicitly. Application schema, RNG representation, model
+identity and cross-owner checks remain AML code before publication.
+
+Saving validates and encodes before creating a unique mode-0600 temporary,
+writes/synchronizes/closes it, then renames it in the destination directory.
+Precommit failure preserves the old file and cleans up the temporary. Status 1
+means file and directory durability; status 2 means rename committed but the
+directory sync/close failed. `file_exists` distinguishes absence from errors.
+All intrinsic file paths retain imported and compiled source origins.
+
+`tokenizer_identity` copies a checked SHA-256 string from an optional callback
+on the immutable loaded owner. The canonical bridge uses the exact model bytes
+consumed by NoTorch's loader, introduced in [NoTorch #165](https://github.com/ariannamethod/notorch/pull/165),
+commit `9380e86017d466f456ae54514aa841f00c26ea9e`. Existing three-callback source
+initializers remain valid, with identity support absent until supplied.
+
+A final C-boundary review also caught an invalid text object's cached length
+of -1 comparing equal to the UTF-8 validator's failure code. Records now require
+a nonnegative cached length; both malformed field keys and string leaves reject.
+
+Proof on Linux x86_64 / GCC 13.3:
+
+- `make test-records`: **979** record API checks, **2062** with allocation
+  refusal, **824** runtime checks and **53** invalid calls. Checkpoints pass
+  **1835** ordinary, **4139** allocation and **2015** injected I/O checks.
+  An independent golden encoder agrees byte for byte; every truncation and
+  single-bit mutation rejects, along with **24** structural corruptions whose
+  checksums were recomputed. Failure sweeps preserve previous owners/files and
+  leave no tracked allocations. Direct C and prepared-AML swaps work with
+  allocation refused. All five execution paths agree on records, persisted
+  leaves, source-relative imported functions and foreign working directories.
+- `make test-tokenizer`: **908** mock API and **1050** allocation checks,
+  **70** native checks, five execution paths and **18** rejected fixtures.
+  Identity covers absent callbacks, malformed output, copied callback lifetime,
+  allocation refusal and the independently pinned 97-byte model's SHA-256.
+- ASan/UBSan over instrumented core record/checkpoint gates pass; leak detection
+  is disabled because this environment prevents process-task inspection.
+  Dedicated allocation-refusal gates check zero tracked survivors separately.
+- Existing **550/550** baseline tests and compiler, imports, text, lowercase,
+  input, lists, maps, sampling and numerical suites pass.
+
+Known follow-up from the continuity fixture: with `cursor = 1`, the unsupported
+expression `value = ((cursor * 5 + 3) % 16) / 16` currently produces 8 and exits
+successfully. The scalar parser lacks a trailing-token check shared by several
+legacy command paths. The fixture now spells the remainder using `floor`;
+strict expression-consumption diagnostics need a separate syntax-context audit.
+
+See [records and checkpoints](docs/RECORDS.md) for the precise AML/C ownership,
+wire format and commit contract, and [tokenizers](docs/TOKENIZER.md) for identity.
+
 ## 2026-10-08 — words reach the organism (v5.7.0)
 
 Haiku's hearing can now carry its original Unigram model into AML. The optional

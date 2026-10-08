@@ -312,10 +312,16 @@ typedef struct {
 #define AML_TYPE_LIST   3
 #define AML_TYPE_MAP    4
 #define AML_TYPE_TOKENIZER 5
+#define AML_TYPE_RECORD 6
 #define AM_MAX_ARRAY_SIZE  1048576  // 1M floats = 4MB
 #define AM_MAX_STRING_BYTES 1048576
 #define AM_MAX_LIST_ITEMS 65536
 #define AM_MAX_MAP_ITEMS 65536
+#define AM_MAX_RECORD_FIELDS 256
+#define AM_MAX_CHECKPOINT_BYTES 67108864
+#define AM_MAX_CHECKPOINT_ITEMS 1048576
+
+typedef struct AM_Record AM_Record;
 
 // Immutable validated UTF-8. len counts Unicode codepoints, byte_len bytes.
 // Each owner keeps one atomic reference; embedded NUL is outside the text domain.
@@ -382,6 +388,9 @@ typedef struct {
     int (*pieces)(const void* model, const char* text, size_t bytes,
                   AM_TokenizerEmit emit, void* context,
                   char* error, size_t error_cap);
+    // Optional immutable content identity: borrowed 64 lowercase SHA-256 hex
+    // digits plus NUL, valid until destroy. Computed from the loaded bytes.
+    const char* (*identity)(const void* model);
 } AM_TokenizerBackend;
 
 void am_set_tokenizer_backend(const AM_TokenizerBackend* backend);
@@ -390,6 +399,8 @@ void am_tokenizer_ref(AM_Tokenizer* model);
 void am_tokenizer_free(AM_Tokenizer* model);
 AM_List* am_tokenizer_pieces(const AM_Tokenizer* model, const AM_String* text,
                            char* error, size_t error_cap);
+AM_String* am_tokenizer_identity(const AM_Tokenizer* model,
+                                char* error, size_t error_cap);
 
 // Ordered UTF-8 string -> finite float map. Keys are immutable retained text.
 // Entries keep insertion order; buckets store entry indices plus one (0 = empty).
@@ -492,17 +503,47 @@ typedef struct {
     char origin[AML_MAX_SOURCE_PATH]; // absolute source file; survives IMPORT expansion
 } AML_Line;
 
-// Variable — float, array, UTF-8 string, string list, map, or immutable tokenizer
+// Variable — float, array, UTF-8 string, string list, map, tokenizer, or record
 typedef struct {
     char      name[AML_MAX_NAME];
-    int       type;     // AML_TYPE_FLOAT / ARRAY / STRING / LIST / MAP / TOKENIZER
+    int       type;     // AML_TYPE_* value tag
     float     value;    // used when type == FLOAT
     AM_Array* array;    // used when type == ARRAY (heap allocated)
     AM_String* string;  // used when type == STRING (one owned reference)
     AM_List*   list;    // used when type == LIST (one owned reference)
     AM_Map*    map;     // used when type == MAP (one owned reference)
     AM_Tokenizer* tokenizer; // used when type == TOKENIZER (one owned reference)
+    AM_Record* record;  // used when type == RECORD (one owned reference)
 } AML_Var;
+
+// Ordered flat named values. Supported leaves: float, array/matrix, string,
+// string list, numeric map. Nested records and opaque models are rejected.
+// Set/clone/replace copy all mutable leaves, retaining immutable strings.
+// Replacing contents stages the whole copy before publication. Mutation belongs
+// to one execution context or a synchronized host; references are atomic.
+AM_Record* am_record_new(void);
+void am_record_ref(AM_Record* record);
+void am_record_free(AM_Record* record);
+AM_Record* am_record_clone(const AM_Record* record);
+int am_record_set(AM_Record* record, AM_String* key, const AML_Var* value); // 0/-1
+// Borrowed value until any record mutation; never free it.
+const AML_Var* am_record_get(const AM_Record* record, const AM_String* key);
+int am_record_has(const AM_Record* record, const AM_String* key); // 1/0
+AM_List* am_record_keys(const AM_Record* record); // owned ordered list
+int am_record_replace(AM_Record* live, const AM_Record* checked); // 0/-1
+// Allocation-free content exchange; wrapper identities/refcounts stay in place.
+int am_record_swap(AM_Record* a, AM_Record* b); // 0/-1, self-swap is a no-op
+
+// Portable versioned checkpoints: bounded, checksummed, little-endian IEEE-754
+// binary32, exact float bits/shapes/order. Load constructs detached owners.
+// C paths are literal; AML intrinsic paths resolve from the calling source.
+// Save returns 1 after file+directory sync, 2 if rename committed but directory
+// sync failed, -1 before commit (prior destination unchanged, temp removed).
+int am_checkpoint_save(const AM_Record* record, const char* path,
+                       char* error, size_t error_cap);
+AM_Record* am_checkpoint_load(const char* path, char* error, size_t error_cap);
+// 1 regular file, 0 ENOENT/ENOTDIR, -1 other error or nonregular path.
+int am_file_exists(const char* path, char* error, size_t error_cap);
 
 // Symbol table
 typedef struct {
@@ -545,6 +586,7 @@ typedef struct {
     AM_List*     return_list;       // owned string list return value
     AM_Map*      return_map;        // owned numeric map return value
     AM_Tokenizer* return_tokenizer;  // owned immutable tokenizer return value
+    AM_Record*   return_record;     // owned flat record return value
     int          return_type;       // AML_TYPE_* value tag
 } AML_ExecCtx;
 
@@ -1325,6 +1367,8 @@ const AM_Map* am_get_var_map(const char* name);
 // borrowed getter stays valid until persistent mutation/reset; retain to keep it.
 int am_set_var_tokenizer(const char* name, AM_Tokenizer* model);
 const AM_Tokenizer* am_get_var_tokenizer(const char* name);
+int am_set_var_record(const char* name, const AM_Record* record);
+const AM_Record* am_get_var_record(const char* name);
 
 // Clear the calling thread's persistent globals (frees arrays, strings, lists).
 void am_persistent_clear(void);
