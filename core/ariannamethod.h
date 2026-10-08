@@ -20,6 +20,7 @@
 
 #include <stdlib.h>  // for rand(), RAND_MAX
 #include <stdint.h>  // for ordered-map hashes
+#include <stdio.h>   // for checked UTF-8 line input
 #include <math.h>    // for fabsf, sinf, sqrtf, fmaxf, fminf, expf
 #ifdef __cplusplus
 extern "C" {
@@ -310,6 +311,7 @@ typedef struct {
 #define AML_TYPE_STRING 2
 #define AML_TYPE_LIST   3
 #define AML_TYPE_MAP    4
+#define AML_TYPE_TOKENIZER 5
 #define AM_MAX_ARRAY_SIZE  1048576  // 1M floats = 4MB
 #define AM_MAX_STRING_BYTES 1048576
 #define AM_MAX_LIST_ITEMS 65536
@@ -335,6 +337,9 @@ AM_String* am_string_from_codepoint(int codepoint);
 // Unicode 15.0 default lowercase, including expansions and contextual sigma.
 // Returns a fresh owned string, or NULL on invalid input, limit, or allocation.
 AM_String* am_string_lower(const AM_String* text);
+// Unicode 15 Letter/Number membership. Returns -1 for a non-scalar codepoint.
+// U+0000 is a scalar and returns zero; strings retain their no-NUL domain.
+int am_codepoint_isalnum(int codepoint);
 
 // Mutable string container. Items are immutable retained strings. List refs
 // are atomic; mutation belongs to one execution context or a synchronized host.
@@ -355,6 +360,36 @@ int am_list_set(AM_List* list, int index, AM_String* item); // retain; 0 or -1
 int am_list_find(const AM_List* list, const AM_String* item); // first index or -1
 AM_List* am_list_slice(const AM_List* list, int start, int end); // owned container
 AM_String* am_list_key(const AM_List* list); // canonical composite key, owned text
+
+// Read one UTF-8 line, removing only its final LF. Returns an owned empty list
+// at EOF or a one-element list (including an empty line); NULL on read, UTF-8,
+// no-NUL, byte-limit, or allocation failure. Input consumption is an I/O effect.
+// The optional error buffer receives a NUL-terminated diagnostic.
+AM_List* am_read_line(FILE* input, char* error, size_t error_cap);
+
+// Immutable tokenizer models are retained through ordinary value lifetimes.
+// Each model copies its backend callbacks, so replacing registration affects
+// future loads only. Keep callback code loaded until its last model is released.
+// Configure registration before executing programs or starting workers.
+typedef struct AM_Tokenizer AM_Tokenizer;
+typedef int (*AM_TokenizerEmit)(void* context, const char* utf8, size_t bytes);
+typedef struct {
+    void* (*load)(const char* path, char* error, size_t error_cap);
+    void (*destroy)(void* model);
+    // Borrowed inputs and sink. Emit complete UTF-8 pieces in order; stop on
+    // nonzero sink status. Return zero on success, -1 on failure. Do not retain
+    // input/sink pointers. Concurrent calls on one immutable model are allowed.
+    int (*pieces)(const void* model, const char* text, size_t bytes,
+                  AM_TokenizerEmit emit, void* context,
+                  char* error, size_t error_cap);
+} AM_TokenizerBackend;
+
+void am_set_tokenizer_backend(const AM_TokenizerBackend* backend);
+AM_Tokenizer* am_tokenizer_load(const char* path, char* error, size_t error_cap);
+void am_tokenizer_ref(AM_Tokenizer* model);
+void am_tokenizer_free(AM_Tokenizer* model);
+AM_List* am_tokenizer_pieces(const AM_Tokenizer* model, const AM_String* text,
+                           char* error, size_t error_cap);
 
 // Ordered UTF-8 string -> finite float map. Keys are immutable retained text.
 // Entries keep insertion order; buckets store entry indices plus one (0 = empty).
@@ -433,7 +468,7 @@ typedef struct {
 } AM_NumericalBackend;
 
 void am_set_numerical_backend(const AM_NumericalBackend* backend);
-// Optional NoTorch bridge: register both owned sampling and numerical values.
+// Optional NoTorch bridge: register sampling, numerical values, and tokenizers.
 void am_use_notorch(void);
 
 typedef struct {
@@ -457,15 +492,16 @@ typedef struct {
     char origin[AML_MAX_SOURCE_PATH]; // absolute source file; survives IMPORT expansion
 } AML_Line;
 
-// Variable — supports float, array, immutable UTF-8 string, string list, or map
+// Variable — float, array, UTF-8 string, string list, map, or immutable tokenizer
 typedef struct {
     char      name[AML_MAX_NAME];
-    int       type;     // AML_TYPE_FLOAT / ARRAY / STRING / LIST / MAP
+    int       type;     // AML_TYPE_FLOAT / ARRAY / STRING / LIST / MAP / TOKENIZER
     float     value;    // used when type == FLOAT
     AM_Array* array;    // used when type == ARRAY (heap allocated)
     AM_String* string;  // used when type == STRING (one owned reference)
     AM_List*   list;    // used when type == LIST (one owned reference)
     AM_Map*    map;     // used when type == MAP (one owned reference)
+    AM_Tokenizer* tokenizer; // used when type == TOKENIZER (one owned reference)
 } AML_Var;
 
 // Symbol table
@@ -508,7 +544,8 @@ typedef struct {
     AM_String*   return_string;     // owned string return value
     AM_List*     return_list;       // owned string list return value
     AM_Map*      return_map;        // owned numeric map return value
-    int          return_type;       // AML_TYPE_FLOAT / ARRAY / STRING / LIST / MAP
+    AM_Tokenizer* return_tokenizer;  // owned immutable tokenizer return value
+    int          return_type;       // AML_TYPE_* value tag
 } AML_ExecCtx;
 
 // AM_State field map entry (for reading state in expressions)
@@ -1284,6 +1321,10 @@ int am_set_var_list(const char* name, const AM_List* list);
 const AM_List* am_get_var_list(const char* name);
 int am_set_var_map(const char* name, const AM_Map* map);
 const AM_Map* am_get_var_map(const char* name);
+// Retain an immutable model in the calling thread's persistent store. The
+// borrowed getter stays valid until persistent mutation/reset; retain to keep it.
+int am_set_var_tokenizer(const char* name, AM_Tokenizer* model);
+const AM_Tokenizer* am_get_var_tokenizer(const char* name);
 
 // Clear the calling thread's persistent globals (frees arrays, strings, lists).
 void am_persistent_clear(void);

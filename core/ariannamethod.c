@@ -104,6 +104,18 @@ static _Thread_local char g_source_path[AML_MAX_SOURCE_PATH] = "";
 // the execution context, so workers never advance a shared global RNG state.
 static AM_SamplingBackend g_sampling_backend;
 static AM_NumericalBackend g_numerical_backend;
+static AM_TokenizerBackend g_tokenizer_backend;
+
+struct AM_Tokenizer {
+    void* model;
+    AM_TokenizerBackend backend;
+    int refcount;
+};
+
+void am_set_tokenizer_backend(const AM_TokenizerBackend* backend) {
+    if (backend) g_tokenizer_backend = *backend;
+    else memset(&g_tokenizer_backend, 0, sizeof(g_tokenizer_backend));
+}
 
 void am_set_sampling_backend(const AM_SamplingBackend* backend) {
     if (backend) g_sampling_backend = *backend;
@@ -747,6 +759,7 @@ static int      symtab_set_array(AML_Symtab* tab, const char* name, AM_Array* ar
 static int      symtab_set_string(AML_Symtab* tab, const char* name, AM_String* str);
 static int      symtab_set_list(AML_Symtab* tab, const char* name, AM_List* list);
 static int      symtab_set_map(AML_Symtab* tab, const char* name, AM_Map* map);
+static int      symtab_set_tokenizer(AML_Symtab* tab, const char* name, AM_Tokenizer* model);
 static void     symtab_clear_arrays(AML_Symtab* tab);
 static int      symtab_snapshot(AML_Symtab* dst, const AML_Symtab* src);
 static int      symtab_copy_value(AML_Symtab* dst, const AML_Var* value);
@@ -906,6 +919,26 @@ const AM_Map* am_get_var_map(const char* name) {
     if (!name) return NULL;
     AML_Var* v = symtab_get_var(&g_persistent_globals, name);
     return v && v->type == AML_TYPE_MAP ? v->map : NULL;
+}
+
+int am_set_var_tokenizer(const char* name, AM_Tokenizer* model) {
+    if (!name || !*name || strlen(name) >= AML_MAX_NAME || !model) return 1;
+    if (!(isalpha((unsigned char)*name) || *name == '_')) return 1;
+    for (const char* p = name + 1; *p; p++)
+        if (!(isalnum((unsigned char)*p) || *p == '_')) return 1;
+    am_tokenizer_ref(model);
+    if (symtab_set_tokenizer(&g_persistent_globals, name, model)) {
+        am_tokenizer_free(model);
+        return 1;
+    }
+    g_persistent_enabled = 1;
+    return 0;
+}
+
+const AM_Tokenizer* am_get_var_tokenizer(const char* name) {
+    if (!name) return NULL;
+    AML_Var* v = symtab_get_var(&g_persistent_globals, name);
+    return v && v->type == AML_TYPE_TOKENIZER ? v->tokenizer : NULL;
 }
 
 // enable/disable packs
@@ -3165,6 +3198,8 @@ static int symtab_set(AML_Symtab* tab, const char* name, float value) {
             tab->vars[i].list = NULL;
             if (tab->vars[i].type == AML_TYPE_MAP) am_map_free(tab->vars[i].map);
             tab->vars[i].map = NULL;
+            if (tab->vars[i].type == AML_TYPE_TOKENIZER) am_tokenizer_free(tab->vars[i].tokenizer);
+            tab->vars[i].tokenizer = NULL;
             tab->vars[i].type = AML_TYPE_FLOAT;
             tab->vars[i].value = value;
             return 0;
@@ -3178,6 +3213,7 @@ static int symtab_set(AML_Symtab* tab, const char* name, float value) {
     tab->vars[tab->count].string = NULL;
     tab->vars[tab->count].list = NULL;
     tab->vars[tab->count].map = NULL;
+    tab->vars[tab->count].tokenizer = NULL;
     tab->count++;
     return 0;
 }
@@ -3196,6 +3232,8 @@ static int symtab_set_array(AML_Symtab* tab, const char* name, AM_Array* arr) {
             tab->vars[i].list = NULL;
             if (tab->vars[i].type == AML_TYPE_MAP) am_map_free(tab->vars[i].map);
             tab->vars[i].map = NULL;
+            if (tab->vars[i].type == AML_TYPE_TOKENIZER) am_tokenizer_free(tab->vars[i].tokenizer);
+            tab->vars[i].tokenizer = NULL;
             tab->vars[i].type = AML_TYPE_ARRAY;
             tab->vars[i].value = 0;
             tab->vars[i].array = arr;
@@ -3210,6 +3248,7 @@ static int symtab_set_array(AML_Symtab* tab, const char* name, AM_Array* arr) {
     tab->vars[tab->count].string = NULL;
     tab->vars[tab->count].list = NULL;
     tab->vars[tab->count].map = NULL;
+    tab->vars[tab->count].tokenizer = NULL;
     tab->count++;
     return 0;
 }
@@ -3241,7 +3280,15 @@ static int symtab_set_map(AML_Symtab* tab, const char* name, AM_Map* map) {
     return 0;
 }
 
-// Free all owned arrays, strings, lists, and maps in a symbol table.
+static int symtab_set_tokenizer(AML_Symtab* tab, const char* name, AM_Tokenizer* model) {
+    if (symtab_set(tab, name, 0)) return 1;
+    AML_Var* v = symtab_get_var(tab, name);
+    v->type = AML_TYPE_TOKENIZER;
+    v->tokenizer = model;
+    return 0;
+}
+
+// Free all owned values in a symbol table.
 static void symtab_clear_arrays(AML_Symtab* tab) {
     for (int i = 0; i < tab->count; i++) {
         if (tab->vars[i].type == AML_TYPE_ARRAY && tab->vars[i].array) {
@@ -3259,6 +3306,10 @@ static void symtab_clear_arrays(AML_Symtab* tab) {
         if (tab->vars[i].type == AML_TYPE_MAP) {
             am_map_free(tab->vars[i].map);
             tab->vars[i].map = NULL;
+        }
+        if (tab->vars[i].type == AML_TYPE_TOKENIZER) {
+            am_tokenizer_free(tab->vars[i].tokenizer);
+            tab->vars[i].tokenizer = NULL;
         }
     }
 }
@@ -3295,10 +3346,16 @@ static int symtab_copy_value(AML_Symtab* dst, const AML_Var* v) {
         am_map_free(map);
         return 1;
     }
+    if (v->type == AML_TYPE_TOKENIZER) {
+        am_tokenizer_ref(v->tokenizer);
+        if (!symtab_set_tokenizer(dst, v->name, v->tokenizer)) return 0;
+        am_tokenizer_free(v->tokenizer);
+        return 1;
+    }
     return symtab_set(dst, v->name, v->value);
 }
 
-// Mutable containers are copied; immutable strings retain atomic references.
+// Mutable containers are copied; immutable strings/models retain atomic references.
 static int symtab_snapshot(AML_Symtab* dst, const AML_Symtab* src) {
     memset(dst, 0, sizeof(*dst));
     for (int i = 0; i < src->count; i++) {
@@ -3324,8 +3381,9 @@ static AML_Var* resolve_var_full(AML_ExecCtx* ctx, const char* name) {
 static int resolve_var(AML_ExecCtx* ctx, const char* name, float* out) {
     AML_Var* value = resolve_var_full(ctx, name);
     if (value && (value->type == AML_TYPE_STRING || value->type == AML_TYPE_LIST ||
-                  value->type == AML_TYPE_MAP)) {
-        set_error(ctx, value->type == AML_TYPE_MAP ? "map used as a scalar expression" :
+                  value->type == AML_TYPE_MAP || value->type == AML_TYPE_TOKENIZER)) {
+        set_error(ctx, value->type == AML_TYPE_TOKENIZER ? "tokenizer used as a scalar expression" :
+            value->type == AML_TYPE_MAP ? "map used as a scalar expression" :
             value->type == AML_TYPE_LIST
             ? "list used as a scalar expression" : "string used as a scalar expression");
         *out = 0;
@@ -3354,6 +3412,7 @@ static void aml_value_clear(AML_Var* v) {
     if (v->type == AML_TYPE_STRING) am_string_free(v->string);
     if (v->type == AML_TYPE_LIST) am_list_free(v->list);
     if (v->type == AML_TYPE_MAP) am_map_free(v->map);
+    if (v->type == AML_TYPE_TOKENIZER) am_tokenizer_free(v->tokenizer);
     memset(v, 0, sizeof(*v));
 }
 
@@ -3362,10 +3421,12 @@ static void aml_clear_return(AML_ExecCtx* ctx) {
     am_string_free(ctx->return_string);
     am_list_free(ctx->return_list);
     am_map_free(ctx->return_map);
+    am_tokenizer_free(ctx->return_tokenizer);
     ctx->return_array = NULL;
     ctx->return_string = NULL;
     ctx->return_list = NULL;
     ctx->return_map = NULL;
+    ctx->return_tokenizer = NULL;
     ctx->return_type = AML_TYPE_FLOAT;
     ctx->return_value = 0;
     ctx->has_return = 0;
@@ -3385,10 +3446,14 @@ static AML_Func* aml_value_function(AML_ExecCtx* ctx, const char* name) {
 
 static int aml_text_function(const char* name) {
     static const char* names[] = {"text_len", "text_bytes", "text_equal", "text_find",
-        "text_slice", "text_concat", "text_codepoint", "text_from_codepoint", "text_lower"};
+        "text_slice", "text_concat", "text_codepoint", "text_from_codepoint", "text_lower", "codepoint_isalnum", "read_line"};
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (strcasecmp(name, names[i]) == 0) return 1;
     return 0;
+}
+
+static int aml_tokenizer_function(const char* name) {
+    return !strcasecmp(name, "tokenizer_load") || !strcasecmp(name, "tokenizer_pieces");
 }
 
 static int aml_list_function(const char* name) {
@@ -3472,9 +3537,27 @@ static int aml_text_dispatch(AML_ExecCtx* ctx, const char* name, AML_Var* args,
                              int nargs, AML_Var* out) {
     int need = 2;
     if (!strcasecmp(name, "text_len") || !strcasecmp(name, "text_bytes") ||
-        !strcasecmp(name, "text_from_codepoint") || !strcasecmp(name, "text_lower")) need = 1;
+        !strcasecmp(name, "text_from_codepoint") || !strcasecmp(name, "text_lower") ||
+        !strcasecmp(name, "codepoint_isalnum")) need = 1;
+    if (!strcasecmp(name, "read_line")) need = 0;
     if (!strcasecmp(name, "text_slice")) need = 3;
     if (nargs != need) { set_error(ctx, "wrong number of text arguments"); return 1; }
+    if (!strcasecmp(name, "read_line")) {
+        if (fflush(stdout) != 0) { set_error(ctx, "line input could not flush stdout"); return 1; }
+        char error[256] = {0};
+        out->list = am_read_line(stdin, error, sizeof(error));
+        if (!out->list) { set_error(ctx, error); return 1; }
+        out->type = AML_TYPE_LIST;
+        return 0;
+    }
+    if (!strcasecmp(name, "codepoint_isalnum")) {
+        int cp;
+        if (aml_text_integer(ctx, &args[0], &cp)) return 1;
+        int result = am_codepoint_isalnum(cp);
+        if (result < 0) { set_error(ctx, "invalid Unicode scalar codepoint"); return 1; }
+        out->value = (float)result;
+        return 0;
+    }
     if (!strcasecmp(name, "text_from_codepoint")) {
         int cp;
         if (aml_text_integer(ctx, &args[0], &cp)) return 1;
@@ -3519,6 +3602,48 @@ static int aml_text_dispatch(AML_ExecCtx* ctx, const char* name, AML_Var* args,
     }
     if (!out->string) { set_error(ctx, "string limit exceeded or allocation failed"); return 1; }
     out->type = AML_TYPE_STRING;
+    return 0;
+}
+
+static int aml_tokenizer_dispatch(AML_ExecCtx* ctx, const char* name,
+                                  AML_Var* args, int nargs, AML_Var* out) {
+    int loading = !strcasecmp(name, "tokenizer_load");
+    if (nargs != (loading ? 1 : 2)) {
+        set_error(ctx, "wrong number of tokenizer arguments"); return 1;
+    }
+    char error[256] = {0};
+    if (loading) {
+        if (args[0].type != AML_TYPE_STRING || !args[0].string) {
+            set_error(ctx, "tokenizer_load requires a path string"); return 1;
+        }
+        const AM_String* path = args[0].string;
+        if (!path->byte_len) { set_error(ctx, "tokenizer path is empty"); return 1; }
+        size_t prefix = path->data[0] == '/' ? 0 : strlen(ctx->base_dir) + 1;
+        if (prefix + (size_t)path->byte_len > AM_MAX_STRING_BYTES) {
+            set_error(ctx, "tokenizer path limit exceeded"); return 1;
+        }
+        char* resolved = malloc(prefix + (size_t)path->byte_len + 1);
+        if (!resolved) { set_error(ctx, "tokenizer path allocation failed"); return 1; }
+        if (prefix) snprintf(resolved, prefix + 1, "%s/", ctx->base_dir);
+        memcpy(resolved + prefix, path->data, (size_t)path->byte_len + 1);
+        out->tokenizer = am_tokenizer_load(resolved, error, sizeof(error));
+        free(resolved);
+        if (!out->tokenizer) {
+            char detail[256];
+            snprintf(detail, sizeof(detail), "tokenizer_load: %.239s", error);
+            set_error(ctx, detail); return 1;
+        }
+        out->type = AML_TYPE_TOKENIZER;
+    } else {
+        if (args[0].type != AML_TYPE_TOKENIZER || !args[0].tokenizer ||
+            args[1].type != AML_TYPE_STRING || !args[1].string) {
+            set_error(ctx, "tokenizer_pieces requires a tokenizer and text"); return 1;
+        }
+        out->list = am_tokenizer_pieces(args[0].tokenizer, args[1].string,
+                                        error, sizeof(error));
+        if (!out->list) { set_error(ctx, error); return 1; }
+        out->type = AML_TYPE_LIST;
+    }
     return 0;
 }
 
@@ -3983,7 +4108,7 @@ static int aml_array_scalar_dispatch(AML_ExecCtx* ctx, const char* name,
         set_error(ctx, "wrong number of array arguments"); return 1;
     }
     for (int i = 0; i < nargs; i++) {
-        if (args[i].type == AML_TYPE_STRING || args[i].type == AML_TYPE_LIST || args[i].type == AML_TYPE_MAP) {
+        if (args[i].type == AML_TYPE_STRING || args[i].type == AML_TYPE_LIST || args[i].type == AML_TYPE_MAP || args[i].type == AML_TYPE_TOKENIZER) {
             set_error(ctx, "array operation requires an array"); return 1;
         }
     }
@@ -4057,6 +4182,7 @@ static int aml_invoke_value(AML_ExecCtx* ctx, const char* name,
     else if (aml_scalar_intrinsic_function(name)) rc = aml_scalar_intrinsic_dispatch(ctx, name, args, nargs, out);
     else if (aml_sampling_function(name)) rc = aml_sampling_dispatch(ctx, name, args, nargs, out);
     else if (aml_numerical_function(name)) rc = aml_numerical_dispatch(ctx, name, args, nargs, out);
+    else if (aml_tokenizer_function(name)) rc = aml_tokenizer_dispatch(ctx, name, args, nargs, out);
     else if (aml_array_scalar_function(name)) rc = aml_array_scalar_dispatch(ctx, name, args, nargs, out);
     else {
         AML_Func* f = aml_value_function(ctx, name);
@@ -4124,8 +4250,9 @@ static float expr_primary(AML_Expr* e) {
 
             if (e->ctx) {
                 AML_Var* var = resolve_var_full(e->ctx, name);
-                if (var && (var->type == AML_TYPE_STRING || var->type == AML_TYPE_LIST || var->type == AML_TYPE_MAP)) {
-                    set_error(e->ctx, var->type == AML_TYPE_MAP
+                if (var && (var->type == AML_TYPE_STRING || var->type == AML_TYPE_LIST || var->type == AML_TYPE_MAP || var->type == AML_TYPE_TOKENIZER)) {
+                    set_error(e->ctx, var->type == AML_TYPE_TOKENIZER
+                        ? "array indexing requires an array, not a tokenizer" : var->type == AML_TYPE_MAP
                         ? "array indexing requires an array; use map_get for maps" : var->type == AML_TYPE_LIST
                         ? "array indexing requires an array; use list_get for lists"
                         : "array indexing requires an array; use text_codepoint/text_slice for text");
@@ -4147,7 +4274,7 @@ static float expr_primary(AML_Expr* e) {
         if (*e->p == '(') {
             if (e->ctx && (aml_text_function(name) || aml_list_function(name) ||
                            aml_map_function(name) || aml_scalar_intrinsic_function(name) ||
-                           aml_sampling_function(name) || aml_numerical_function(name) ||
+                           aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) ||
                            aml_array_scalar_function(name) ||
                            aml_value_function(e->ctx, name))) {
                 AML_Var result = {0};
@@ -4157,7 +4284,7 @@ static float expr_primary(AML_Expr* e) {
                 }
                 if (result.type != AML_TYPE_FLOAT) {
                     aml_value_clear(&result);
-                    set_error(e->ctx, "string/array/list/map value used as a scalar expression");
+                    set_error(e->ctx, "string/array/list/map/tokenizer value used as a scalar expression");
                     e->error = 1;
                     return 0;
                 }
@@ -4388,12 +4515,13 @@ static int aml_eval_value(AML_ExecCtx* ctx, const char* text, AML_Var* out) {
                 if (v->type == AML_TYPE_STRING) am_string_ref(out->string);
                 if (v->type == AML_TYPE_LIST) am_list_ref(out->list);
                 if (v->type == AML_TYPE_MAP) am_map_ref(out->map);
+                if (v->type == AML_TYPE_TOKENIZER) am_tokenizer_ref(out->tokenizer);
                 return 0;
             }
         }
         if (*p == '(' && (aml_text_function(name) || aml_list_function(name) ||
                           aml_map_function(name) || aml_scalar_intrinsic_function(name) ||
-                          aml_sampling_function(name) || aml_numerical_function(name) ||
+                          aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) ||
                           aml_array_scalar_function(name) ||
                           aml_value_function(ctx, name))) {
             const char* close = aml_value_close(p);
@@ -5569,7 +5697,7 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
         sscanf(rest, "%31s", vname);
         if (vname[0] && ctx) {
           AML_Var* v = resolve_var_full(ctx, vname);
-          if (v && (v->type == AML_TYPE_LIST || v->type == AML_TYPE_MAP)) {
+          if (v && (v->type == AML_TYPE_LIST || v->type == AML_TYPE_MAP || v->type == AML_TYPE_TOKENIZER)) {
             set_error(ctx, "TAPE requires a numeric array");
             return;
           }
@@ -5662,7 +5790,7 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
         sscanf(rest, "%31s", vname);
         if (vname[0] && ctx) {
           AML_Var* v = resolve_var_full(ctx, vname);
-          if (v && (v->type == AML_TYPE_LIST || v->type == AML_TYPE_MAP)) {
+          if (v && (v->type == AML_TYPE_LIST || v->type == AML_TYPE_MAP || v->type == AML_TYPE_TOKENIZER)) {
             set_error(ctx, "TAPE requires a numeric array");
             return;
           }
@@ -6090,7 +6218,8 @@ static int aml_reserved_function(const char* name) {
         "map_new", "map_len", "map_has", "map_get", "map_set", "map_delete",
         "map_keys", "map_clone", "assert", "floor", "isfinite", "rng_new", "rng_uniform",
         "rng_index", "rng_categorical", "categorical_at", "nt_linear", "nt_linear_vjp",
-        "nt_tanh", "nt_tanh_vjp", "nt_mse_grad", "nt_sgd", "rng_normal"
+        "nt_tanh", "nt_tanh_vjp", "nt_mse_grad", "nt_sgd", "rng_normal",
+        "tokenizer_load", "tokenizer_pieces", "codepoint_isalnum", "read_line"
     };
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (strcasecmp(name, names[i]) == 0) return 1;
@@ -6227,6 +6356,7 @@ static int aml_call_value(AML_ExecCtx* ctx, AML_Func* f, AML_Var* args,
     AM_String* saved_return_string = ctx->return_string;
     AM_List* saved_return_list = ctx->return_list;
     AM_Map* saved_return_map = ctx->return_map;
+    AM_Tokenizer* saved_return_tokenizer = ctx->return_tokenizer;
     int saved_return_type = ctx->return_type;
 
     // push local scope
@@ -6248,6 +6378,9 @@ static int aml_call_value(AML_ExecCtx* ctx, AML_Func* f, AML_Var* args,
         } else if (args[i].type == AML_TYPE_MAP) {
             am_map_ref(args[i].map);
             symtab_set_map(locals, f->params[i], args[i].map);
+        } else if (args[i].type == AML_TYPE_TOKENIZER) {
+            am_tokenizer_ref(args[i].tokenizer);
+            symtab_set_tokenizer(locals, f->params[i], args[i].tokenizer);
         } else {
             symtab_set(locals, f->params[i], args[i].value);
         }
@@ -6260,6 +6393,7 @@ static int aml_call_value(AML_ExecCtx* ctx, AML_Func* f, AML_Var* args,
     ctx->return_string = NULL;
     ctx->return_list = NULL;
     ctx->return_map = NULL;
+    ctx->return_tokenizer = NULL;
     ctx->return_type = AML_TYPE_FLOAT;
 
     // execute body
@@ -6271,6 +6405,7 @@ static int aml_call_value(AML_ExecCtx* ctx, AML_Func* f, AML_Var* args,
         out->string = ctx->return_string;
         out->list = ctx->return_list;
         out->map = ctx->return_map;
+        out->tokenizer = ctx->return_tokenizer;
     }
     // Return expressions already own their references, including local aliases.
     symtab_clear_arrays(locals);
@@ -6284,6 +6419,7 @@ static int aml_call_value(AML_ExecCtx* ctx, AML_Func* f, AML_Var* args,
     ctx->return_string = saved_return_string;
     ctx->return_list = saved_return_list;
     ctx->return_map = saved_return_map;
+    ctx->return_tokenizer = saved_return_tokenizer;
     ctx->return_type = saved_return_type;
     return ctx->error[0] != 0;
 }
@@ -6397,7 +6533,7 @@ static int aml_optional_array(AML_ExecCtx* ctx, const char* expression, AM_Array
     if (aml_eval_value(ctx, expression, &value)) {
         aml_value_clear(&value); return 1;
     }
-    if (value.type == AML_TYPE_STRING || value.type == AML_TYPE_LIST || value.type == AML_TYPE_MAP) {
+    if (value.type == AML_TYPE_STRING || value.type == AML_TYPE_LIST || value.type == AML_TYPE_MAP || value.type == AML_TYPE_TOKENIZER) {
         aml_value_clear(&value);
         set_error(ctx, "optional argument requires a numeric array"); return 1;
     }
@@ -6428,8 +6564,9 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
         if (strcasecmp(fname, array_names[fi])) continue;
         for (int i = 0; i < nargs; i++) {
             AML_Var* v = resolve_var_full(ctx, arg_strs[i]);
-            if (v && (v->type == AML_TYPE_LIST || v->type == AML_TYPE_MAP)) {
-                set_error(ctx, v->type == AML_TYPE_MAP
+            if (v && (v->type == AML_TYPE_LIST || v->type == AML_TYPE_MAP || v->type == AML_TYPE_TOKENIZER)) {
+                set_error(ctx, v->type == AML_TYPE_TOKENIZER
+                    ? "numeric array operation cannot consume a tokenizer" : v->type == AML_TYPE_MAP
                     ? "numeric array operation cannot consume a map"
                     : "numeric array operation cannot consume a list");
                 return NULL;
@@ -7480,6 +7617,7 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
         ctx->return_string = value.string;
         ctx->return_list = value.list;
         ctx->return_map = value.map;
+        ctx->return_tokenizer = value.tokenizer;
         return ctx->nlines;
     }
 
@@ -7505,6 +7643,8 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
                     printf(": %.9g", (double)value.map->entries[i].value);
                 }
                 putchar('}');
+            } else if (value.type == AML_TYPE_TOKENIZER) {
+                fputs("<tokenizer>", stdout);
             } else if (value.type == AML_TYPE_ARRAY) {
                 putchar('[');
                 for (int i = 0; i < value.array->len; i++)
@@ -7707,8 +7847,9 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
 
                         // Find the array variable and write to it
                         AML_Var* var = resolve_var_full(ctx, varname);
-                        if (var && (var->type == AML_TYPE_LIST || var->type == AML_TYPE_MAP)) {
-                            set_error(ctx, var->type == AML_TYPE_MAP
+                        if (var && (var->type == AML_TYPE_LIST || var->type == AML_TYPE_MAP || var->type == AML_TYPE_TOKENIZER)) {
+                            set_error(ctx, var->type == AML_TYPE_TOKENIZER
+                                ? "array element write requires an array, not a tokenizer" : var->type == AML_TYPE_MAP
                                 ? "array element write requires an array; use map_set for maps"
                                 : "array element write requires an array; use list_set for lists");
                             return idx + 1;
@@ -7786,6 +7927,7 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
             else if (value.type == AML_TYPE_ARRAY) rc = symtab_set_array(tab, name, value.array);
             else if (value.type == AML_TYPE_LIST) rc = symtab_set_list(tab, name, value.list);
             else if (value.type == AML_TYPE_MAP) rc = symtab_set_map(tab, name, value.map);
+            else if (value.type == AML_TYPE_TOKENIZER) rc = symtab_set_tokenizer(tab, name, value.tokenizer);
             else rc = symtab_set(tab, name, value.value);
             if (rc) {
                 aml_value_clear(&value);
@@ -7796,7 +7938,8 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
         if (n && n < AML_MAX_NAME && *p == '(' &&
             (aml_value_function(ctx, name) || aml_text_function(name) || aml_list_function(name) ||
              aml_map_function(name) || aml_scalar_intrinsic_function(name) ||
-             aml_sampling_function(name) || aml_numerical_function(name))) {
+             aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) ||
+             aml_array_scalar_function(name))) {
             AML_Var value = {0};
             aml_eval_value(ctx, text, &value);
             aml_value_clear(&value);
@@ -8313,7 +8456,7 @@ void* am_compile(const char* script) {
 // Helper: resolve var to array (inlined, frequent operation)
 static inline AM_Array* bc_get_array(AML_ExecCtx* ctx, const char* name) {
     AML_Var* v = resolve_var_full(ctx, name);
-    if (v && (v->type == AML_TYPE_LIST || v->type == AML_TYPE_MAP)) {
+    if (v && (v->type == AML_TYPE_LIST || v->type == AML_TYPE_MAP || v->type == AML_TYPE_TOKENIZER)) {
         set_error(ctx, "TAPE requires a numeric array");
         return NULL;
     }
@@ -9758,15 +9901,17 @@ void am_pipe_close(const char* name) {
 }
 
 void am_pipe_close_all(void) {
+    int closed = 0;
     for (int i = 0; i < g_pipe_count; i++) {
         if (g_pipes[i].active) {
+            closed++;
             if (g_pipes[i].fd >= 0) close(g_pipes[i].fd);
             g_pipes[i].fd = -1;
             g_pipes[i].active = 0;
         }
     }
     g_pipe_count = 0;
-    fprintf(stderr, "[LILITH] all pipes closed\n");
+    if (closed) fprintf(stderr, "[LILITH] all pipes closed\n");
 }
 
 float am_pipe_last_value(void) { return g_pipe_last_value; }
@@ -10425,24 +10570,175 @@ static AM_String* am_string_alloc(int byte_len, int len) {
     return text;
 }
 
-AM_String* am_string_new(const char* utf8) {
-    if (!utf8) return NULL;
-    int byte_len = 0;
-    while (byte_len <= AM_MAX_STRING_BYTES && utf8[byte_len]) byte_len++;
-    if (byte_len > AM_MAX_STRING_BYTES) return NULL;
-
+static int am_string_validate_bytes(const char* utf8, size_t bytes) {
+    if (!utf8 || bytes > AM_MAX_STRING_BYTES) return -1;
+    int byte_len = (int)bytes;
     int len = 0, pos = 0;
     while (pos < byte_len) {
         int cp;
         int width = am_string_decode_utf8((const unsigned char*)utf8 + pos,
                                           byte_len - pos, &cp);
-        if (width < 0) return NULL;
+        if (width < 0) return -1;
         pos += width;
         len++;
     }
-    AM_String* text = am_string_alloc(byte_len, len);
-    if (text) memcpy(text->data, utf8, (size_t)byte_len);
+    return len;
+}
+
+static AM_String* am_string_new_bytes(const char* utf8, size_t bytes) {
+    int len = am_string_validate_bytes(utf8, bytes);
+    if (len < 0) return NULL;
+    AM_String* text = am_string_alloc((int)bytes, len);
+    if (text && bytes) memcpy(text->data, utf8, bytes);
     return text;
+}
+
+AM_String* am_string_new(const char* utf8) {
+    if (!utf8) return NULL;
+    size_t bytes = 0;
+    while (bytes <= AM_MAX_STRING_BYTES && utf8[bytes]) bytes++;
+    return am_string_new_bytes(utf8, bytes);
+}
+
+static void am_text_error(char* error, size_t cap, const char* message) {
+    if (error && cap) snprintf(error, cap, "%s", message);
+}
+
+AM_List* am_read_line(FILE* input, char* error, size_t error_cap) {
+    am_text_error(error, error_cap, "");
+    if (!input) { am_text_error(error, error_cap, "line input is unavailable"); return NULL; }
+    AM_List* result = am_list_new();
+    if (!result) { am_text_error(error, error_cap, "line allocation failed"); return NULL; }
+    size_t capacity = 256, size = 0;
+    char* bytes = malloc(capacity);
+    if (!bytes) {
+        am_list_free(result);
+        am_text_error(error, error_cap, "line allocation failed"); return NULL;
+    }
+    int ch = EOF;
+    const char* failure = NULL;
+    // POSIX stdio locks the complete line, including buffer growth, so workers
+    // cannot consume alternating bytes. Single-threaded WASM needs no lock.
+#ifndef __EMSCRIPTEN__
+    flockfile(input);
+#endif
+    while ((ch = fgetc(input)) != EOF && ch != '\n') {
+        if (ch == 0) { failure = "line input contains NUL"; break; }
+        if (size == AM_MAX_STRING_BYTES) { failure = "line input exceeds 1 MiB"; break; }
+        if (size == capacity) {
+            size_t next_capacity = capacity * 2;
+            if (next_capacity > AM_MAX_STRING_BYTES) next_capacity = AM_MAX_STRING_BYTES;
+            char* next = realloc(bytes, next_capacity);
+            if (!next) { failure = "line allocation failed"; break; }
+            bytes = next;
+            capacity = next_capacity;
+        }
+        bytes[size++] = (char)ch;
+    }
+    if (!failure && ferror(input)) failure = "line input read failed";
+#ifndef __EMSCRIPTEN__
+    funlockfile(input);
+#endif
+    if (!failure && !(ch == EOF && size == 0)) {
+        if (am_string_validate_bytes(bytes, size) < 0) failure = "line input is not valid UTF-8";
+        else {
+            AM_String* line = am_string_new_bytes(bytes, size);
+            if (!line) failure = "line allocation failed";
+            else {
+                if (am_list_push(result, line) < 0) failure = "line allocation failed";
+                am_string_free(line);
+            }
+        }
+    }
+    free(bytes);
+    if (failure) {
+        am_list_free(result);
+        am_text_error(error, error_cap, failure);
+        return NULL;
+    }
+    return result;
+}
+
+AM_Tokenizer* am_tokenizer_load(const char* path, char* error, size_t error_cap) {
+    am_text_error(error, error_cap, "");
+    if (!path || !*path || strnlen(path, AM_MAX_STRING_BYTES + 1) > AM_MAX_STRING_BYTES) {
+        am_text_error(error, error_cap, "invalid tokenizer path"); return NULL;
+    }
+    AM_TokenizerBackend backend = g_tokenizer_backend;
+    if (!backend.load || !backend.destroy || !backend.pieces) {
+        am_text_error(error, error_cap, "tokenizer backend unavailable; use NoTorch-enabled AML");
+        return NULL;
+    }
+    AM_Tokenizer* result = malloc(sizeof(*result));
+    if (!result) { am_text_error(error, error_cap, "tokenizer allocation failed"); return NULL; }
+    result->backend = backend;
+    result->refcount = 1;
+    char detail[256] = {0};
+    result->model = backend.load(path, detail, sizeof(detail));
+    detail[sizeof(detail) - 1] = 0;
+    if (!result->model) {
+        free(result);
+        am_text_error(error, error_cap, detail[0] ? detail : "tokenizer backend load failed");
+        return NULL;
+    }
+    return result;
+}
+
+void am_tokenizer_ref(AM_Tokenizer* model) {
+    if (model) __atomic_add_fetch(&model->refcount, 1, __ATOMIC_RELAXED);
+}
+
+void am_tokenizer_free(AM_Tokenizer* model) {
+    if (!model || __atomic_sub_fetch(&model->refcount, 1, __ATOMIC_ACQ_REL) > 0) return;
+    model->backend.destroy(model->model);
+    free(model);
+}
+
+typedef struct {
+    AM_List* list;
+    size_t bytes;
+    const char* failure;
+} AM_TokenizerSink;
+
+static int am_tokenizer_emit(void* context, const char* utf8, size_t bytes) {
+    AM_TokenizerSink* sink = context;
+    if (sink->failure) return -1;
+    if (bytes > AM_MAX_STRING_BYTES - sink->bytes || sink->list->len == AM_MAX_LIST_ITEMS) {
+        sink->failure = "tokenizer pieces exceed AML output limits"; return -1;
+    }
+    if (am_string_validate_bytes(utf8, bytes) < 0) {
+        sink->failure = "tokenizer backend emitted invalid UTF-8 or NUL"; return -1;
+    }
+    AM_String* piece = am_string_new_bytes(utf8, bytes);
+    if (!piece) { sink->failure = "tokenizer piece allocation failed"; return -1; }
+    int rc = am_list_push(sink->list, piece);
+    am_string_free(piece);
+    if (rc < 0) { sink->failure = "tokenizer piece allocation failed"; return -1; }
+    sink->bytes += bytes;
+    return 0;
+}
+
+AM_List* am_tokenizer_pieces(const AM_Tokenizer* model, const AM_String* text,
+                           char* error, size_t error_cap) {
+    am_text_error(error, error_cap, "");
+    if (!model || !model->model || !text || text->byte_len < 0 ||
+        am_string_validate_bytes(text->data, (size_t)text->byte_len) < 0) {
+        am_text_error(error, error_cap, "tokenizer requires a model and valid UTF-8 text");
+        return NULL;
+    }
+    AM_TokenizerSink sink = {am_list_new(), 0, NULL};
+    if (!sink.list) { am_text_error(error, error_cap, "tokenizer list allocation failed"); return NULL; }
+    char detail[256] = {0};
+    int rc = model->backend.pieces(model->model, text->data, (size_t)text->byte_len,
+                                   am_tokenizer_emit, &sink, detail, sizeof(detail));
+    detail[sizeof(detail) - 1] = 0;
+    if (sink.failure || rc != 0) {
+        am_list_free(sink.list);
+        am_text_error(error, error_cap, sink.failure ? sink.failure :
+                       detail[0] ? detail : "tokenizer backend encoding failed");
+        return NULL;
+    }
+    return sink.list;
 }
 
 void am_string_ref(AM_String* text) {
@@ -10817,6 +11113,197 @@ static const AM_UnicodeRange am_case_ignorable_ranges[] = {
 
 // Default Unicode 15 lowercasing: U+0130 expands; U+03A3 uses original context.
 // UTF-8 input and output are locale-independent. All tables are immutable.
+// Unicode 15.0 Letter/Number membership; generate_alnum_tables.py.
+static const AM_UnicodeRange am_alnum_ranges[] = {
+    {0x30,0x39}, {0x41,0x5A}, {0x61,0x7A}, {0xAA,0xAA},
+    {0xB2,0xB3}, {0xB5,0xB5}, {0xB9,0xBA}, {0xBC,0xBE},
+    {0xC0,0xD6}, {0xD8,0xF6}, {0xF8,0x2C1}, {0x2C6,0x2D1},
+    {0x2E0,0x2E4}, {0x2EC,0x2EC}, {0x2EE,0x2EE}, {0x370,0x374},
+    {0x376,0x377}, {0x37A,0x37D}, {0x37F,0x37F}, {0x386,0x386},
+    {0x388,0x38A}, {0x38C,0x38C}, {0x38E,0x3A1}, {0x3A3,0x3F5},
+    {0x3F7,0x481}, {0x48A,0x52F}, {0x531,0x556}, {0x559,0x559},
+    {0x560,0x588}, {0x5D0,0x5EA}, {0x5EF,0x5F2}, {0x620,0x64A},
+    {0x660,0x669}, {0x66E,0x66F}, {0x671,0x6D3}, {0x6D5,0x6D5},
+    {0x6E5,0x6E6}, {0x6EE,0x6FC}, {0x6FF,0x6FF}, {0x710,0x710},
+    {0x712,0x72F}, {0x74D,0x7A5}, {0x7B1,0x7B1}, {0x7C0,0x7EA},
+    {0x7F4,0x7F5}, {0x7FA,0x7FA}, {0x800,0x815}, {0x81A,0x81A},
+    {0x824,0x824}, {0x828,0x828}, {0x840,0x858}, {0x860,0x86A},
+    {0x870,0x887}, {0x889,0x88E}, {0x8A0,0x8C9}, {0x904,0x939},
+    {0x93D,0x93D}, {0x950,0x950}, {0x958,0x961}, {0x966,0x96F},
+    {0x971,0x980}, {0x985,0x98C}, {0x98F,0x990}, {0x993,0x9A8},
+    {0x9AA,0x9B0}, {0x9B2,0x9B2}, {0x9B6,0x9B9}, {0x9BD,0x9BD},
+    {0x9CE,0x9CE}, {0x9DC,0x9DD}, {0x9DF,0x9E1}, {0x9E6,0x9F1},
+    {0x9F4,0x9F9}, {0x9FC,0x9FC}, {0xA05,0xA0A}, {0xA0F,0xA10},
+    {0xA13,0xA28}, {0xA2A,0xA30}, {0xA32,0xA33}, {0xA35,0xA36},
+    {0xA38,0xA39}, {0xA59,0xA5C}, {0xA5E,0xA5E}, {0xA66,0xA6F},
+    {0xA72,0xA74}, {0xA85,0xA8D}, {0xA8F,0xA91}, {0xA93,0xAA8},
+    {0xAAA,0xAB0}, {0xAB2,0xAB3}, {0xAB5,0xAB9}, {0xABD,0xABD},
+    {0xAD0,0xAD0}, {0xAE0,0xAE1}, {0xAE6,0xAEF}, {0xAF9,0xAF9},
+    {0xB05,0xB0C}, {0xB0F,0xB10}, {0xB13,0xB28}, {0xB2A,0xB30},
+    {0xB32,0xB33}, {0xB35,0xB39}, {0xB3D,0xB3D}, {0xB5C,0xB5D},
+    {0xB5F,0xB61}, {0xB66,0xB6F}, {0xB71,0xB77}, {0xB83,0xB83},
+    {0xB85,0xB8A}, {0xB8E,0xB90}, {0xB92,0xB95}, {0xB99,0xB9A},
+    {0xB9C,0xB9C}, {0xB9E,0xB9F}, {0xBA3,0xBA4}, {0xBA8,0xBAA},
+    {0xBAE,0xBB9}, {0xBD0,0xBD0}, {0xBE6,0xBF2}, {0xC05,0xC0C},
+    {0xC0E,0xC10}, {0xC12,0xC28}, {0xC2A,0xC39}, {0xC3D,0xC3D},
+    {0xC58,0xC5A}, {0xC5D,0xC5D}, {0xC60,0xC61}, {0xC66,0xC6F},
+    {0xC78,0xC7E}, {0xC80,0xC80}, {0xC85,0xC8C}, {0xC8E,0xC90},
+    {0xC92,0xCA8}, {0xCAA,0xCB3}, {0xCB5,0xCB9}, {0xCBD,0xCBD},
+    {0xCDD,0xCDE}, {0xCE0,0xCE1}, {0xCE6,0xCEF}, {0xCF1,0xCF2},
+    {0xD04,0xD0C}, {0xD0E,0xD10}, {0xD12,0xD3A}, {0xD3D,0xD3D},
+    {0xD4E,0xD4E}, {0xD54,0xD56}, {0xD58,0xD61}, {0xD66,0xD78},
+    {0xD7A,0xD7F}, {0xD85,0xD96}, {0xD9A,0xDB1}, {0xDB3,0xDBB},
+    {0xDBD,0xDBD}, {0xDC0,0xDC6}, {0xDE6,0xDEF}, {0xE01,0xE30},
+    {0xE32,0xE33}, {0xE40,0xE46}, {0xE50,0xE59}, {0xE81,0xE82},
+    {0xE84,0xE84}, {0xE86,0xE8A}, {0xE8C,0xEA3}, {0xEA5,0xEA5},
+    {0xEA7,0xEB0}, {0xEB2,0xEB3}, {0xEBD,0xEBD}, {0xEC0,0xEC4},
+    {0xEC6,0xEC6}, {0xED0,0xED9}, {0xEDC,0xEDF}, {0xF00,0xF00},
+    {0xF20,0xF33}, {0xF40,0xF47}, {0xF49,0xF6C}, {0xF88,0xF8C},
+    {0x1000,0x102A}, {0x103F,0x1049}, {0x1050,0x1055}, {0x105A,0x105D},
+    {0x1061,0x1061}, {0x1065,0x1066}, {0x106E,0x1070}, {0x1075,0x1081},
+    {0x108E,0x108E}, {0x1090,0x1099}, {0x10A0,0x10C5}, {0x10C7,0x10C7},
+    {0x10CD,0x10CD}, {0x10D0,0x10FA}, {0x10FC,0x1248}, {0x124A,0x124D},
+    {0x1250,0x1256}, {0x1258,0x1258}, {0x125A,0x125D}, {0x1260,0x1288},
+    {0x128A,0x128D}, {0x1290,0x12B0}, {0x12B2,0x12B5}, {0x12B8,0x12BE},
+    {0x12C0,0x12C0}, {0x12C2,0x12C5}, {0x12C8,0x12D6}, {0x12D8,0x1310},
+    {0x1312,0x1315}, {0x1318,0x135A}, {0x1369,0x137C}, {0x1380,0x138F},
+    {0x13A0,0x13F5}, {0x13F8,0x13FD}, {0x1401,0x166C}, {0x166F,0x167F},
+    {0x1681,0x169A}, {0x16A0,0x16EA}, {0x16EE,0x16F8}, {0x1700,0x1711},
+    {0x171F,0x1731}, {0x1740,0x1751}, {0x1760,0x176C}, {0x176E,0x1770},
+    {0x1780,0x17B3}, {0x17D7,0x17D7}, {0x17DC,0x17DC}, {0x17E0,0x17E9},
+    {0x17F0,0x17F9}, {0x1810,0x1819}, {0x1820,0x1878}, {0x1880,0x1884},
+    {0x1887,0x18A8}, {0x18AA,0x18AA}, {0x18B0,0x18F5}, {0x1900,0x191E},
+    {0x1946,0x196D}, {0x1970,0x1974}, {0x1980,0x19AB}, {0x19B0,0x19C9},
+    {0x19D0,0x19DA}, {0x1A00,0x1A16}, {0x1A20,0x1A54}, {0x1A80,0x1A89},
+    {0x1A90,0x1A99}, {0x1AA7,0x1AA7}, {0x1B05,0x1B33}, {0x1B45,0x1B4C},
+    {0x1B50,0x1B59}, {0x1B83,0x1BA0}, {0x1BAE,0x1BE5}, {0x1C00,0x1C23},
+    {0x1C40,0x1C49}, {0x1C4D,0x1C7D}, {0x1C80,0x1C88}, {0x1C90,0x1CBA},
+    {0x1CBD,0x1CBF}, {0x1CE9,0x1CEC}, {0x1CEE,0x1CF3}, {0x1CF5,0x1CF6},
+    {0x1CFA,0x1CFA}, {0x1D00,0x1DBF}, {0x1E00,0x1F15}, {0x1F18,0x1F1D},
+    {0x1F20,0x1F45}, {0x1F48,0x1F4D}, {0x1F50,0x1F57}, {0x1F59,0x1F59},
+    {0x1F5B,0x1F5B}, {0x1F5D,0x1F5D}, {0x1F5F,0x1F7D}, {0x1F80,0x1FB4},
+    {0x1FB6,0x1FBC}, {0x1FBE,0x1FBE}, {0x1FC2,0x1FC4}, {0x1FC6,0x1FCC},
+    {0x1FD0,0x1FD3}, {0x1FD6,0x1FDB}, {0x1FE0,0x1FEC}, {0x1FF2,0x1FF4},
+    {0x1FF6,0x1FFC}, {0x2070,0x2071}, {0x2074,0x2079}, {0x207F,0x2089},
+    {0x2090,0x209C}, {0x2102,0x2102}, {0x2107,0x2107}, {0x210A,0x2113},
+    {0x2115,0x2115}, {0x2119,0x211D}, {0x2124,0x2124}, {0x2126,0x2126},
+    {0x2128,0x2128}, {0x212A,0x212D}, {0x212F,0x2139}, {0x213C,0x213F},
+    {0x2145,0x2149}, {0x214E,0x214E}, {0x2150,0x2189}, {0x2460,0x249B},
+    {0x24EA,0x24FF}, {0x2776,0x2793}, {0x2C00,0x2CE4}, {0x2CEB,0x2CEE},
+    {0x2CF2,0x2CF3}, {0x2CFD,0x2CFD}, {0x2D00,0x2D25}, {0x2D27,0x2D27},
+    {0x2D2D,0x2D2D}, {0x2D30,0x2D67}, {0x2D6F,0x2D6F}, {0x2D80,0x2D96},
+    {0x2DA0,0x2DA6}, {0x2DA8,0x2DAE}, {0x2DB0,0x2DB6}, {0x2DB8,0x2DBE},
+    {0x2DC0,0x2DC6}, {0x2DC8,0x2DCE}, {0x2DD0,0x2DD6}, {0x2DD8,0x2DDE},
+    {0x2E2F,0x2E2F}, {0x3005,0x3007}, {0x3021,0x3029}, {0x3031,0x3035},
+    {0x3038,0x303C}, {0x3041,0x3096}, {0x309D,0x309F}, {0x30A1,0x30FA},
+    {0x30FC,0x30FF}, {0x3105,0x312F}, {0x3131,0x318E}, {0x3192,0x3195},
+    {0x31A0,0x31BF}, {0x31F0,0x31FF}, {0x3220,0x3229}, {0x3248,0x324F},
+    {0x3251,0x325F}, {0x3280,0x3289}, {0x32B1,0x32BF}, {0x3400,0x4DBF},
+    {0x4E00,0xA48C}, {0xA4D0,0xA4FD}, {0xA500,0xA60C}, {0xA610,0xA62B},
+    {0xA640,0xA66E}, {0xA67F,0xA69D}, {0xA6A0,0xA6EF}, {0xA717,0xA71F},
+    {0xA722,0xA788}, {0xA78B,0xA7CA}, {0xA7D0,0xA7D1}, {0xA7D3,0xA7D3},
+    {0xA7D5,0xA7D9}, {0xA7F2,0xA801}, {0xA803,0xA805}, {0xA807,0xA80A},
+    {0xA80C,0xA822}, {0xA830,0xA835}, {0xA840,0xA873}, {0xA882,0xA8B3},
+    {0xA8D0,0xA8D9}, {0xA8F2,0xA8F7}, {0xA8FB,0xA8FB}, {0xA8FD,0xA8FE},
+    {0xA900,0xA925}, {0xA930,0xA946}, {0xA960,0xA97C}, {0xA984,0xA9B2},
+    {0xA9CF,0xA9D9}, {0xA9E0,0xA9E4}, {0xA9E6,0xA9FE}, {0xAA00,0xAA28},
+    {0xAA40,0xAA42}, {0xAA44,0xAA4B}, {0xAA50,0xAA59}, {0xAA60,0xAA76},
+    {0xAA7A,0xAA7A}, {0xAA7E,0xAAAF}, {0xAAB1,0xAAB1}, {0xAAB5,0xAAB6},
+    {0xAAB9,0xAABD}, {0xAAC0,0xAAC0}, {0xAAC2,0xAAC2}, {0xAADB,0xAADD},
+    {0xAAE0,0xAAEA}, {0xAAF2,0xAAF4}, {0xAB01,0xAB06}, {0xAB09,0xAB0E},
+    {0xAB11,0xAB16}, {0xAB20,0xAB26}, {0xAB28,0xAB2E}, {0xAB30,0xAB5A},
+    {0xAB5C,0xAB69}, {0xAB70,0xABE2}, {0xABF0,0xABF9}, {0xAC00,0xD7A3},
+    {0xD7B0,0xD7C6}, {0xD7CB,0xD7FB}, {0xF900,0xFA6D}, {0xFA70,0xFAD9},
+    {0xFB00,0xFB06}, {0xFB13,0xFB17}, {0xFB1D,0xFB1D}, {0xFB1F,0xFB28},
+    {0xFB2A,0xFB36}, {0xFB38,0xFB3C}, {0xFB3E,0xFB3E}, {0xFB40,0xFB41},
+    {0xFB43,0xFB44}, {0xFB46,0xFBB1}, {0xFBD3,0xFD3D}, {0xFD50,0xFD8F},
+    {0xFD92,0xFDC7}, {0xFDF0,0xFDFB}, {0xFE70,0xFE74}, {0xFE76,0xFEFC},
+    {0xFF10,0xFF19}, {0xFF21,0xFF3A}, {0xFF41,0xFF5A}, {0xFF66,0xFFBE},
+    {0xFFC2,0xFFC7}, {0xFFCA,0xFFCF}, {0xFFD2,0xFFD7}, {0xFFDA,0xFFDC},
+    {0x10000,0x1000B}, {0x1000D,0x10026}, {0x10028,0x1003A}, {0x1003C,0x1003D},
+    {0x1003F,0x1004D}, {0x10050,0x1005D}, {0x10080,0x100FA}, {0x10107,0x10133},
+    {0x10140,0x10178}, {0x1018A,0x1018B}, {0x10280,0x1029C}, {0x102A0,0x102D0},
+    {0x102E1,0x102FB}, {0x10300,0x10323}, {0x1032D,0x1034A}, {0x10350,0x10375},
+    {0x10380,0x1039D}, {0x103A0,0x103C3}, {0x103C8,0x103CF}, {0x103D1,0x103D5},
+    {0x10400,0x1049D}, {0x104A0,0x104A9}, {0x104B0,0x104D3}, {0x104D8,0x104FB},
+    {0x10500,0x10527}, {0x10530,0x10563}, {0x10570,0x1057A}, {0x1057C,0x1058A},
+    {0x1058C,0x10592}, {0x10594,0x10595}, {0x10597,0x105A1}, {0x105A3,0x105B1},
+    {0x105B3,0x105B9}, {0x105BB,0x105BC}, {0x10600,0x10736}, {0x10740,0x10755},
+    {0x10760,0x10767}, {0x10780,0x10785}, {0x10787,0x107B0}, {0x107B2,0x107BA},
+    {0x10800,0x10805}, {0x10808,0x10808}, {0x1080A,0x10835}, {0x10837,0x10838},
+    {0x1083C,0x1083C}, {0x1083F,0x10855}, {0x10858,0x10876}, {0x10879,0x1089E},
+    {0x108A7,0x108AF}, {0x108E0,0x108F2}, {0x108F4,0x108F5}, {0x108FB,0x1091B},
+    {0x10920,0x10939}, {0x10980,0x109B7}, {0x109BC,0x109CF}, {0x109D2,0x10A00},
+    {0x10A10,0x10A13}, {0x10A15,0x10A17}, {0x10A19,0x10A35}, {0x10A40,0x10A48},
+    {0x10A60,0x10A7E}, {0x10A80,0x10A9F}, {0x10AC0,0x10AC7}, {0x10AC9,0x10AE4},
+    {0x10AEB,0x10AEF}, {0x10B00,0x10B35}, {0x10B40,0x10B55}, {0x10B58,0x10B72},
+    {0x10B78,0x10B91}, {0x10BA9,0x10BAF}, {0x10C00,0x10C48}, {0x10C80,0x10CB2},
+    {0x10CC0,0x10CF2}, {0x10CFA,0x10D23}, {0x10D30,0x10D39}, {0x10E60,0x10E7E},
+    {0x10E80,0x10EA9}, {0x10EB0,0x10EB1}, {0x10F00,0x10F27}, {0x10F30,0x10F45},
+    {0x10F51,0x10F54}, {0x10F70,0x10F81}, {0x10FB0,0x10FCB}, {0x10FE0,0x10FF6},
+    {0x11003,0x11037}, {0x11052,0x1106F}, {0x11071,0x11072}, {0x11075,0x11075},
+    {0x11083,0x110AF}, {0x110D0,0x110E8}, {0x110F0,0x110F9}, {0x11103,0x11126},
+    {0x11136,0x1113F}, {0x11144,0x11144}, {0x11147,0x11147}, {0x11150,0x11172},
+    {0x11176,0x11176}, {0x11183,0x111B2}, {0x111C1,0x111C4}, {0x111D0,0x111DA},
+    {0x111DC,0x111DC}, {0x111E1,0x111F4}, {0x11200,0x11211}, {0x11213,0x1122B},
+    {0x1123F,0x11240}, {0x11280,0x11286}, {0x11288,0x11288}, {0x1128A,0x1128D},
+    {0x1128F,0x1129D}, {0x1129F,0x112A8}, {0x112B0,0x112DE}, {0x112F0,0x112F9},
+    {0x11305,0x1130C}, {0x1130F,0x11310}, {0x11313,0x11328}, {0x1132A,0x11330},
+    {0x11332,0x11333}, {0x11335,0x11339}, {0x1133D,0x1133D}, {0x11350,0x11350},
+    {0x1135D,0x11361}, {0x11400,0x11434}, {0x11447,0x1144A}, {0x11450,0x11459},
+    {0x1145F,0x11461}, {0x11480,0x114AF}, {0x114C4,0x114C5}, {0x114C7,0x114C7},
+    {0x114D0,0x114D9}, {0x11580,0x115AE}, {0x115D8,0x115DB}, {0x11600,0x1162F},
+    {0x11644,0x11644}, {0x11650,0x11659}, {0x11680,0x116AA}, {0x116B8,0x116B8},
+    {0x116C0,0x116C9}, {0x11700,0x1171A}, {0x11730,0x1173B}, {0x11740,0x11746},
+    {0x11800,0x1182B}, {0x118A0,0x118F2}, {0x118FF,0x11906}, {0x11909,0x11909},
+    {0x1190C,0x11913}, {0x11915,0x11916}, {0x11918,0x1192F}, {0x1193F,0x1193F},
+    {0x11941,0x11941}, {0x11950,0x11959}, {0x119A0,0x119A7}, {0x119AA,0x119D0},
+    {0x119E1,0x119E1}, {0x119E3,0x119E3}, {0x11A00,0x11A00}, {0x11A0B,0x11A32},
+    {0x11A3A,0x11A3A}, {0x11A50,0x11A50}, {0x11A5C,0x11A89}, {0x11A9D,0x11A9D},
+    {0x11AB0,0x11AF8}, {0x11C00,0x11C08}, {0x11C0A,0x11C2E}, {0x11C40,0x11C40},
+    {0x11C50,0x11C6C}, {0x11C72,0x11C8F}, {0x11D00,0x11D06}, {0x11D08,0x11D09},
+    {0x11D0B,0x11D30}, {0x11D46,0x11D46}, {0x11D50,0x11D59}, {0x11D60,0x11D65},
+    {0x11D67,0x11D68}, {0x11D6A,0x11D89}, {0x11D98,0x11D98}, {0x11DA0,0x11DA9},
+    {0x11EE0,0x11EF2}, {0x11F02,0x11F02}, {0x11F04,0x11F10}, {0x11F12,0x11F33},
+    {0x11F50,0x11F59}, {0x11FB0,0x11FB0}, {0x11FC0,0x11FD4}, {0x12000,0x12399},
+    {0x12400,0x1246E}, {0x12480,0x12543}, {0x12F90,0x12FF0}, {0x13000,0x1342F},
+    {0x13441,0x13446}, {0x14400,0x14646}, {0x16800,0x16A38}, {0x16A40,0x16A5E},
+    {0x16A60,0x16A69}, {0x16A70,0x16ABE}, {0x16AC0,0x16AC9}, {0x16AD0,0x16AED},
+    {0x16B00,0x16B2F}, {0x16B40,0x16B43}, {0x16B50,0x16B59}, {0x16B5B,0x16B61},
+    {0x16B63,0x16B77}, {0x16B7D,0x16B8F}, {0x16E40,0x16E96}, {0x16F00,0x16F4A},
+    {0x16F50,0x16F50}, {0x16F93,0x16F9F}, {0x16FE0,0x16FE1}, {0x16FE3,0x16FE3},
+    {0x17000,0x187F7}, {0x18800,0x18CD5}, {0x18D00,0x18D08}, {0x1AFF0,0x1AFF3},
+    {0x1AFF5,0x1AFFB}, {0x1AFFD,0x1AFFE}, {0x1B000,0x1B122}, {0x1B132,0x1B132},
+    {0x1B150,0x1B152}, {0x1B155,0x1B155}, {0x1B164,0x1B167}, {0x1B170,0x1B2FB},
+    {0x1BC00,0x1BC6A}, {0x1BC70,0x1BC7C}, {0x1BC80,0x1BC88}, {0x1BC90,0x1BC99},
+    {0x1D2C0,0x1D2D3}, {0x1D2E0,0x1D2F3}, {0x1D360,0x1D378}, {0x1D400,0x1D454},
+    {0x1D456,0x1D49C}, {0x1D49E,0x1D49F}, {0x1D4A2,0x1D4A2}, {0x1D4A5,0x1D4A6},
+    {0x1D4A9,0x1D4AC}, {0x1D4AE,0x1D4B9}, {0x1D4BB,0x1D4BB}, {0x1D4BD,0x1D4C3},
+    {0x1D4C5,0x1D505}, {0x1D507,0x1D50A}, {0x1D50D,0x1D514}, {0x1D516,0x1D51C},
+    {0x1D51E,0x1D539}, {0x1D53B,0x1D53E}, {0x1D540,0x1D544}, {0x1D546,0x1D546},
+    {0x1D54A,0x1D550}, {0x1D552,0x1D6A5}, {0x1D6A8,0x1D6C0}, {0x1D6C2,0x1D6DA},
+    {0x1D6DC,0x1D6FA}, {0x1D6FC,0x1D714}, {0x1D716,0x1D734}, {0x1D736,0x1D74E},
+    {0x1D750,0x1D76E}, {0x1D770,0x1D788}, {0x1D78A,0x1D7A8}, {0x1D7AA,0x1D7C2},
+    {0x1D7C4,0x1D7CB}, {0x1D7CE,0x1D7FF}, {0x1DF00,0x1DF1E}, {0x1DF25,0x1DF2A},
+    {0x1E030,0x1E06D}, {0x1E100,0x1E12C}, {0x1E137,0x1E13D}, {0x1E140,0x1E149},
+    {0x1E14E,0x1E14E}, {0x1E290,0x1E2AD}, {0x1E2C0,0x1E2EB}, {0x1E2F0,0x1E2F9},
+    {0x1E4D0,0x1E4EB}, {0x1E4F0,0x1E4F9}, {0x1E7E0,0x1E7E6}, {0x1E7E8,0x1E7EB},
+    {0x1E7ED,0x1E7EE}, {0x1E7F0,0x1E7FE}, {0x1E800,0x1E8C4}, {0x1E8C7,0x1E8CF},
+    {0x1E900,0x1E943}, {0x1E94B,0x1E94B}, {0x1E950,0x1E959}, {0x1EC71,0x1ECAB},
+    {0x1ECAD,0x1ECAF}, {0x1ECB1,0x1ECB4}, {0x1ED01,0x1ED2D}, {0x1ED2F,0x1ED3D},
+    {0x1EE00,0x1EE03}, {0x1EE05,0x1EE1F}, {0x1EE21,0x1EE22}, {0x1EE24,0x1EE24},
+    {0x1EE27,0x1EE27}, {0x1EE29,0x1EE32}, {0x1EE34,0x1EE37}, {0x1EE39,0x1EE39},
+    {0x1EE3B,0x1EE3B}, {0x1EE42,0x1EE42}, {0x1EE47,0x1EE47}, {0x1EE49,0x1EE49},
+    {0x1EE4B,0x1EE4B}, {0x1EE4D,0x1EE4F}, {0x1EE51,0x1EE52}, {0x1EE54,0x1EE54},
+    {0x1EE57,0x1EE57}, {0x1EE59,0x1EE59}, {0x1EE5B,0x1EE5B}, {0x1EE5D,0x1EE5D},
+    {0x1EE5F,0x1EE5F}, {0x1EE61,0x1EE62}, {0x1EE64,0x1EE64}, {0x1EE67,0x1EE6A},
+    {0x1EE6C,0x1EE72}, {0x1EE74,0x1EE77}, {0x1EE79,0x1EE7C}, {0x1EE7E,0x1EE7E},
+    {0x1EE80,0x1EE89}, {0x1EE8B,0x1EE9B}, {0x1EEA1,0x1EEA3}, {0x1EEA5,0x1EEA9},
+    {0x1EEAB,0x1EEBB}, {0x1F100,0x1F10C}, {0x1FBF0,0x1FBF9}, {0x20000,0x2A6DF},
+    {0x2A700,0x2B739}, {0x2B740,0x2B81D}, {0x2B820,0x2CEA1}, {0x2CEB0,0x2EBE0},
+    {0x2F800,0x2FA1D}, {0x30000,0x3134A}, {0x31350,0x323AF},
+};
+
 static int am_unicode_in_ranges(uint32_t cp, const AM_UnicodeRange* ranges, size_t count) {
     size_t lo = 0, hi = count;
     while (lo < hi) {
@@ -10826,6 +11313,12 @@ static int am_unicode_in_ranges(uint32_t cp, const AM_UnicodeRange* ranges, size
         else return 1;
     }
     return 0;
+}
+
+int am_codepoint_isalnum(int cp) {
+    if (cp < 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return -1;
+    return am_unicode_in_ranges((uint32_t)cp, am_alnum_ranges,
+                                 sizeof(am_alnum_ranges) / sizeof(am_alnum_ranges[0]));
 }
 
 static int am_unicode_is_cased(uint32_t cp) {

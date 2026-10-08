@@ -12,6 +12,62 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-10-08 — words reach the organism (v5.7.0)
+
+Haiku's hearing can now carry its original Unigram model into AML. The optional
+NoTorch bridge registers an independent tokenizer backend beside sampling and
+numerical values. `tokenizer_load` resolves a model from its statement's source
+directory; `tokenizer_pieces` returns ordinary ordered UTF-8 strings, including
+normalized unknown surfaces. NoTorch owns model parsing, normalization and
+deterministic segmentation. AML owns the model value, output list and publication.
+
+Each immutable tokenizer copies its three backend callbacks and carries atomic
+references through assignment, functions, returns, persistent globals and worker
+snapshots. Replacing registration affects future loads; existing owners retain
+their original model and callbacks. Output is checked before publication, with
+65,536 pieces and 1 MiB of aggregate UTF-8 as its bounds. Wrong types, bad model
+files, rejected backend output and allocation failures produce explicit errors.
+
+`read_line` brings live standard input into AML as `[text]`, preserving blank
+lines and CR while distinguishing `[]` at EOF. Its prompt flush occurs before
+waiting for input; concurrent readers lock the complete line. UTF-8, NUL,
+byte limits and I/O failures are checked before returning a value.
+`codepoint_isalnum` supplies Unicode 15 Letter/Number membership: 137,935 scalar
+members in 747 immutable ranges, verified independently against Python 3.12.
+
+The integration gate also exposed standalone `len(model)` being silently
+ignored while the assigned expression correctly failed. The statement
+recognizer now routes `len`, `sum`, `rows`, `cols` and `dot` through their typed
+expression path. Fresh CLI startup no longer prints the pipe-close summary
+when there were no active pipes; closing an active pipe keeps its diagnostic.
+
+Proof on Linux x86_64 / GCC 13.3:
+
+- `make test-tokenizer`: **823** mock API/runtime checks and **928** checks
+  with allocation refusal. All **13** ordinary and **15** allocation-test model
+  lifetimes release exactly once; tracked allocation sweeps leave zero blocks.
+  The **97-byte** SentencePiece 0.2.2 fixture supplies **12** native vectors and
+  **1,000** concurrent encodings (**69** native checks). Piece output, equal-score
+  order, unknown surfaces, copied list mutation, backend registration and
+  imported-relative model loading agree through all five execution paths.
+  Fifteen malformed call/model fixtures stop before continued AML or C-main
+  effects. A standalone runner and an incomplete prefix report missing backend.
+- `make test-text-input`: **2,228,843** API/runtime checks and **2,229,147**
+  allocation-wrapped checks, including all **1,114,112** Unicode positions.
+  Exact and exceeded limits, blank/final/CR lines, whole-line concurrent reads,
+  EOF and stream failures pass. Eleven malformed calls and four invalid streams
+  stop through all five paths. Runner and compiled pipe tests receive the prompt
+  before supplying input. Fresh runner and compiled output stay free of startup
+  diagnostics.
+- ASan/UBSan pass the new tokenizer API and input gates with leak detection
+  disabled; the environment prevents LeakSanitizer's process-task inspection.
+  Dedicated allocation refusal gates independently verify zero tracked survivors.
+- Existing **550/550** baseline runtime tests, compiler, imports, text,
+  lowercase, lists, maps, sampling and numerical suites pass.
+
+See [tokenizers](docs/TOKENIZER.md) and [text input](docs/TEXT_INPUT.md) for
+the AML/C contracts, fixture provenance and reproducible gates.
+
 ## 2026-10-07 — experience reaches the weights (v5.6.0)
 
 Haiku's MathBrain and RAE now compose their learning in AML over seven

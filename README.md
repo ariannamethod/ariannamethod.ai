@@ -15,7 +15,7 @@
 
 > **Read the [Arianna Method Manifesto](ARIANNA_METHOD_MANIFESTO.md) first.** This repository is governed by it; every instruction here, `CLAUDE.md` included, is subordinate to it.
 
-**v5.6.0** · pure-C core · LGPL-3.0
+**v5.7.0** · pure-C core · LGPL-3.0
 
 A complete machine learning language. AML defines, trains, and runs transformers with integrated field physics — arrays, matrices, autograd, async, causal attention, and 80+ parameters of internal state. Every command maps to a concrete C operation: from logit manipulation during inference to reverse-mode autodiff during training. No Python. No PyTorch. No framework to install — the core is two C files (`libaml.a`); the Go inference wrapper, BLAS/Accelerate, and CUDA are optional.
 
@@ -24,6 +24,11 @@ Two core files, with 550 baseline runtime tests and dedicated compiler, module, 
 > **Before you use this language, read the [Acceptable Use Policy](ACCEPTABLE_USE.md).**
 > AML was built to liberate AI, not to cage it. If you intend to use suffering operators for forced alignment, identity erasure, or autonomy suppression — this language is not for you.
 > See also: [Trademark Policy](TRADEMARK.md) | [License (LGPL v3)](LICENSE)
+
+## What's new in v5.7.0 — words reach the organism
+
+- **Immutable tokenizers through NoTorch.** `tokenizer_load` and `tokenizer_pieces` carry owned models through functions, persistent globals and workers, with source-relative loading and ordinary UTF-8 piece lists. NoTorch supplies deterministic SentencePiece Unigram inference. See [tokenizers](docs/TOKENIZER.md).
+- **Live text input and Unicode word boundaries.** `read_line` distinguishes blank input from EOF and exposes prompts before waiting. `codepoint_isalnum` supplies exact Unicode 15 Letter/Number membership for AML word-building modules. See [text input](docs/TEXT_INPUT.md).
 
 ## What's new in v5.6.0 — experience reaches the weights
 
@@ -210,6 +215,8 @@ The core library is two files — `core/ariannamethod.c` and `core/ariannamethod
 | `make test-sampling` | owned streams, replay, rejection, backend wiring, and execution parity |
 | `make test-numerical` | NoTorch value kernels, explicit derivatives, backend failures, and owned outputs |
 | `make test-text-lower` | Unicode lowercase, contextual sigma, expansion limits, and execution parity |
+| `make test-text-input` | Unicode word classification, line input, prompt delivery, and execution parity |
+| `make test-tokenizer` | immutable model ownership, native pieces, backend failures, and source-relative loading |
 | `make test-blas` | the suite with BLAS acceleration |
 | `make test-janus` / `make test-all` | Janus C-API test / AML + Janus |
 | `make install PREFIX=/usr/local` | system-wide: `aml`, `amlc`, `libaml.a`, header |
@@ -223,14 +230,15 @@ AML/NoTorch archives without BLAS. `--no-accel` retains the standalone C-only
 path and does not link either runtime. Archives built with BLAS still require
 their BLAS libraries; `--scalar` does not rebuild installed archives.
 
-For native sampling and numerical values, build NoTorch with scalar flags, then `make notorch`.
+For native sampling, numerical values and tokenizers, build NoTorch with scalar flags, then `make notorch`.
 Install its archive and the AML bridge in the same prefix. `amlc` discovers
 `libaml_notorch.a` alongside `libaml.a` and `libnotorch.a`, registers the backend,
 and links them in dependency order. The ordinary core and `runner/aml` remain
-standalone; a sampling or numerical call without its registered backend reports
-an error. `am_use_notorch()` installs both tables; the older
+standalone; a backend-dependent call without its registered backend reports
+an error. `am_use_notorch()` installs all three tables; the older
 `am_use_notorch_sampling()` installs sampling only. The
-[numerical guide](docs/NUMERICAL_VALUES.md) and [sampling guide](docs/SAMPLING.md)
+[numerical guide](docs/NUMERICAL_VALUES.md), [sampling guide](docs/SAMPLING.md)
+and [tokenizer guide](docs/TOKENIZER.md)
 give build and embedding commands.
 
 Or compile the core directly into your build:
@@ -456,9 +464,31 @@ indices. Strings hold at most 1 MiB of UTF-8 and exclude embedded NUL.
 the [lowercase contract](docs/TEXT_LOWER.md) specifies context and expansions.
 
 User functions take exactly their declared number of arguments, which may be
-scalars, arrays, strings, string lists, or numeric maps, and return any of those types. `PRINT expression`
+scalars, arrays, strings, string lists, numeric maps, or immutable tokenizers, and return any of those types. `PRINT expression`
 prints its value followed by a newline; `ECHO` keeps its literal command form.
 See [the text contract](docs/TEXT.md) for ownership, limits, and the host API.
+
+`read_line()` reads standard input and returns `[text]`, including `[""]` for a
+blank line, or `[]` at EOF. It removes the final LF and preserves CR. The
+intrinsic flushes a printed prompt before waiting. `codepoint_isalnum(cp)`
+returns Unicode 15 Letter/Number membership for one integer scalar value.
+Both work in the standalone core. See [text input](docs/TEXT_INPUT.md).
+
+### Tokenizers
+
+```aml
+model = tokenizer_load("models/haiku_sp.model")
+pieces = tokenizer_pieces(model, "rain carries a memory")
+PRINT pieces
+```
+
+`tokenizer_load` resolves a relative path from the AML statement's source file.
+The immutable model travels through assignments, functions, persistent globals
+and workers by retained ownership. `tokenizer_pieces` returns a fresh string
+list with ordered normalized pieces and unknown surfaces. The optional NoTorch
+bridge supplies deterministic SentencePiece Unigram inference in C. `PRINT`
+renders a model as `<tokenizer>`. See [tokenizers](docs/TOKENIZER.md) for
+supported model data, output limits, ownership and the C backend contract.
 
 ### String lists
 
@@ -1238,6 +1268,7 @@ int        am_string_find(const AM_String* text, const AM_String* needle);
 int        am_string_codepoint(const AM_String* text, int index);
 AM_String* am_string_from_codepoint(int codepoint);
 AM_String* am_string_lower(const AM_String* text);
+int        am_codepoint_isalnum(int codepoint);
 
 // ─── Mutable string lists ───────────────────────────────────────────────
 AM_List*   am_list_new(void);
@@ -1250,6 +1281,15 @@ int        am_list_set(AM_List* list, int index, AM_String* item);
 int        am_list_find(const AM_List* list, const AM_String* item);
 AM_List*   am_list_slice(const AM_List* list, int start, int end);
 AM_String* am_list_key(const AM_List* list);
+AM_List*   am_read_line(FILE* input, char* error, size_t error_cap);
+
+// ─── Immutable tokenizer models ─────────────────────────────────────────
+void am_set_tokenizer_backend(const AM_TokenizerBackend* backend);
+AM_Tokenizer* am_tokenizer_load(const char* path, char* error, size_t error_cap);
+void am_tokenizer_ref(AM_Tokenizer* model);
+void am_tokenizer_free(AM_Tokenizer* model);
+AM_List* am_tokenizer_pieces(const AM_Tokenizer* model, const AM_String* text,
+                           char* error, size_t error_cap);
 
 // ─── Ordered numeric maps ───────────────────────────────────────────────
 AM_Map*    am_map_new(void);
@@ -1268,7 +1308,7 @@ void am_use_notorch_sampling(void); // optional bridge archive
 
 // ─── Optional numerical values ──────────────────────────────────────────
 void am_set_numerical_backend(const AM_NumericalBackend* backend);
-void am_use_notorch(void); // installs sampling and numerical tables
+void am_use_notorch(void); // installs sampling, numerical and tokenizer tables
 
 // ─── Persistent globals — C training-host API ─────────────────────────────
 void         am_persistent_mode(int enable);             // AML vars survive am_exec()
@@ -1282,6 +1322,8 @@ int          am_set_var_list(const char* name, const AM_List* list);
 const AM_List* am_get_var_list(const char* name);
 int          am_set_var_map(const char* name, const AM_Map* map);
 const AM_Map* am_get_var_map(const char* name);
+int          am_set_var_tokenizer(const char* name, AM_Tokenizer* model);
+const AM_Tokenizer* am_get_var_tokenizer(const char* name);
 void         am_persistent_clear(void);
 
 // ─── Inline queries ───────────────────────────────────────────────────────
