@@ -116,6 +116,10 @@ test-amlc: all
 test-expressions: all
 	bash tests/test_aml_expressions.sh
 
+.PHONY: test-workers
+test-workers: all
+	bash tests/test_aml_workers.sh
+
 test-imports: all
 	bash tests/test_aml_imports.sh
 
@@ -148,6 +152,10 @@ test-sampling: notorch
 
 test-numerical: notorch
 	NOTORCH_LIB="$(abspath $(NOTORCH_LIB))" NOTORCH_INCLUDE="$(abspath $(NOTORCH_INCLUDE))" NOTORCH_LDFLAGS="$(NOTORCH_LDFLAGS)" bash tests/test_aml_numerical.sh
+
+.PHONY: test-parliament
+test-parliament: notorch
+	NOTORCH_LIB="$(abspath $(NOTORCH_LIB))" NOTORCH_INCLUDE="$(abspath $(NOTORCH_INCLUDE))" NOTORCH_LDFLAGS="$(NOTORCH_LDFLAGS)" bash tests/test_aml_parliament.sh
 
 core/test_aml: core/test_aml.c core/ariannamethod.c core/ariannamethod.h
 	$(CC) $(CFLAGS) core/test_aml.c core/ariannamethod.c -o $@ $(LDFLAGS)

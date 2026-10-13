@@ -1,0 +1,13 @@
+# Small geometric fixture, independent of any model weights or application.
+elected = nt_parliament_elect([-2,-1,1,2], [0,0,0,0], [1,1,1,1], 2, 0.5)
+assert(len(elected) == 6, "election result")
+a = [1,1,1,1]
+b = [1,1,1,1]
+x = [1,2]
+result = nt_parliament_inject(a,b,[0.5,0.5],x,1,1)
+assert(result[0] == 4 and result[1] == 5, "two low rank voices")
+assert(x[0] == 1 and x[1] == 2, "source remains owned")
+step = nt_oja([0.25,-0.125,0.5,0.25], [0.125,0.5,-0.25,0.125], x, [0.125,-0.25], [0], 1, 0, 0.5)
+assert(len(step) == 9 and step[8] == 0, "explicit rank cursor")
+assert(step[0] == 0.25 and step[4] == 0.125, "zero learning rate")
+PRINT "AML_PARLIAMENT_VALUES_OK"

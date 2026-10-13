@@ -1,0 +1,95 @@
+# Owned jobs keep their code, launch values and result across teardown.
+def twice(value):
+    return value * 2
+
+def launch(value):
+    state = record_new()
+    words = list_new()
+    list_push(words, 'before')
+    record_set(state, 'words', words)
+    record_set(state, 'number', value)
+    SPAWN tail:
+        assert(text_equal(list_get(record_get(state, 'words'), 0), 'before'), 'launch-time word')
+        list_push(record_get(state, 'words'), 'worker')
+        record_set(state, 'number', twice(record_get(state, 'number')))
+        return state
+    list_push(record_get(state, 'words'), 'parent')
+    record_set(state, 'number', 99)
+    AWAIT tail INTO completed
+    assert(record_get(state, 'number') == 99, 'parent owns its state')
+    assert(list_len(record_get(completed, 'words')) == 2, 'returned list survives worker')
+    assert(text_equal(list_get(record_get(completed, 'words'), 1), 'worker'), 'returned private leaf')
+    return completed
+
+i = 0
+while i < 80:
+    result = launch(i)
+    assert(record_get(result, 'number') == i * 2, 'captured argument and helper')
+    i = i + 1
+
+# Each nested worker owns and joins its own children, reusing the same name.
+SPAWN family:
+    SPAWN family:
+        return 'grandchild'
+    AWAIT family INTO child
+    return text_concat(child, ' survives')
+AWAIT family INTO family_result
+assert(text_equal(family_result, 'grandchild survives'), 'nested owner')
+
+# The launching function's frame disappears before the worker uses its locals.
+CHANNEL CREATE departed_gate 1
+def depart(argument):
+    SPAWN departed:
+        CHANNEL READ departed_gate ready
+        return twice(argument)
+depart(23)
+CHANNEL WRITE departed_gate 1
+AWAIT departed INTO departed_value
+assert(departed_value == 46, 'departed frame remains captured')
+CHANNEL CLOSE departed_gate
+
+# Captured parameters shadow globals in the block, not inside another helper.
+scope_value = 11
+def global_scope():
+    return scope_value
+def shadow(scope_value):
+    SPAWN shadowed:
+        return scope_value + global_scope()
+    AWAIT shadowed INTO sum_value
+    return sum_value
+assert(shadow(7) == 18, 'worker retains function scope rules')
+
+# Owned result transfer handles an alias into a record about to be destroyed.
+SPAWN leaf:
+    state = record_new()
+    words = list_new()
+    list_push(words, 'held')
+    record_set(state, 'words', words)
+    return record_get(state, 'words')
+AWAIT leaf INTO words
+list_push(words, 'after teardown')
+assert(list_len(words) == 2, 'leaf result lifetime')
+
+SPAWN text:
+    return 'שלום 🌱'
+AWAIT text INTO greeting
+assert(text_equal(greeting, 'שלום 🌱'), 'UTF-8 result')
+SPAWN array:
+    matrix_value = matrix_zeros(2, 3)
+    matrix_value[5] = 7
+    return matrix_value
+AWAIT array INTO numbers
+assert(rows(numbers) == 2, 'matrix result rows')
+assert(cols(numbers) == 3, 'matrix result cols')
+assert(numbers[5] == 7, 'matrix result values')
+SPAWN map:
+    m = map_new()
+    map_set(m, 'own', 7)
+    return m
+AWAIT map INTO counts
+assert(map_get(counts, 'own') == 7, 'map result')
+SPAWN scalar:
+    return -0.0
+AWAIT scalar INTO zero
+assert(text_equal(text_fixed(zero, 1), '-0.0'), 'scalar preserves bits')
+PRINT 'AML_WORKERS_OK'

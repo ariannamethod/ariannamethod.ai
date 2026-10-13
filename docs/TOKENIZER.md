@@ -70,7 +70,8 @@ in [NoTorch PR #165](https://github.com/ariannamethod/notorch/pull/165), commit
 [`9380e86017d466f456ae54514aa841f00c26ea9e`](https://github.com/ariannamethod/notorch/commit/9380e86017d466f456ae54514aa841f00c26ea9e).
 Build and install that revision or a descendant before linking this bridge.
 
-`am_use_notorch()` registers tokenizer, sampling and numerical backends together.
+`am_use_notorch()` registers tokenizer, sampling, numerical and parliament
+backends together.
 The optional runner and compiler already call it. Install the bridge, AML and
 NoTorch archives in one prefix for `amlc --scalar`; the link order remains
 `libaml_notorch.a libaml.a libnotorch.a`. `am_use_notorch_sampling()` preserves

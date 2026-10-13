@@ -1,6 +1,6 @@
 # AML — Arianna Method Language
 
-**Version:** 5.10.0 (Exact fixed text and growing function tables)
+**Version:** 5.11.0 (Owned workers and parliament numerical values)
 **Extension:** `.aml`
 **Status:** Living specification
 
@@ -273,8 +273,9 @@ A missing backend is an explicit runtime error; existing `randn` and tensor
 initialization keep their current streams. See [SAMPLING.md](../docs/SAMPLING.md).
 
 Numerical values use an independent optional `AM_NumericalBackend` table.
-`am_use_notorch()` registers canonical NoTorch numerical, sampling and tokenizer tables; the sampling-only
-registration keeps its existing contract. Registration copies the tables,
+`am_use_notorch()` registers canonical NoTorch numerical, sampling, tokenizer
+and parliament tables; the sampling-only registration keeps its existing
+contract. Registration copies the tables,
 survives initialization, and must finish before workers run. A missing or
 incomplete numerical table fails explicitly.
 
@@ -299,6 +300,27 @@ RNG limbs publish only after the whole result passes validation. Ordinary eager
 argument evaluation and preceding statements retain their effects on failure.
 [NUMERICAL_VALUES.md](../docs/NUMERICAL_VALUES.md) defines the C callback and
 arithmetic contracts.
+
+Parliament values use a separate optional `AM_ParliamentBackend`, registered
+with `am_set_parliament_backend`. The original seven-callback
+`AM_NumericalBackend` retains its C layout. Each parliament callback is checked
+when invoked; a missing callback reports `parliament backend unavailable`.
+
+| Expression | Fresh result |
+| --- | --- |
+| `nt_parliament_elect(votes, resonance, alive, minimum, consensus)` | Packed `[gates E, next_consensus, elected_count]` |
+| `nt_parliament_inject(A, B, gates, x, rank, alpha)` | `x + alpha * sum(gate[e] * A[e] @ (B[e] @ x))` |
+| `nt_oja(A, B, x, dy, noise, cursor, lr, signal)` | Packed `[updated A, updated B, next_cursor]` for one expert |
+
+These operations validate finite typed arrays and scalar dimensions before
+calling NoTorch. Election requires enough live experts for the declared
+minimum and validates unit output gate mass and the selected population.
+Oja receives its rank window and noise explicitly; no hidden counter or random
+draw enters the result. Backend failures and malformed output preserve the
+assignment's previous value. Experts, immune memory, receipts and publication
+belong to AML; the callbacks operate on caller-owned numeric buffers without a
+global tape. [PARLIAMENT_VALUES.md](../docs/PARLIAMENT_VALUES.md) defines bounds,
+packed layouts and the canonical numerical contracts.
 
 The numeric array queries `len`, `sum`, `rows`, and `cols` take exactly one typed
 argument; `dot` takes exactly two. Parenthesized and returned values retain
@@ -1354,45 +1376,72 @@ TAPE CLEAR
 
 ## 20. Async — SPAWN / AWAIT / CHANNEL
 
-Parallel execution via pthreads. Each `SPAWN` block runs in its own thread with a launch-time snapshot of global variables and shared global field state. Arrays and string-list containers are copied; immutable strings retain atomic references. Persistent host variables belong to the calling thread; worker changes remain in that worker and its store is released at exit. Threads communicate through thread-safe bounded float queues (CHANNEL). Disableable at compile time with `#define AM_ASYNC_DISABLED`.
+Each `SPAWN` block runs in its own pthread with detached mutable values,
+prepared helper code and source origins. Global variables and the currently
+visible function-local frame are captured separately; called helpers retain
+normal AML global/local resolution. Arrays, lists, maps and records are copied;
+immutable strings and tokenizers retain atomic references. The process field,
+tape and channels retain shared ownership. Build with `AM_ASYNC_DISABLED` to
+omit the async APIs.
 
 ```aml
-SPAWN <name>:
-    <indented_block>
+SPAWN tail:
+    return consolidate(candidate)
+AWAIT tail INTO completed
 ```
-Launches the indented block in a background thread. Local variable changes do not affect the spawner; global field changes are not thread-safe without synchronization — use CHANNEL for cross-thread data.
 
 | Command | Syntax | Description |
 |---------|--------|-------------|
-| `AWAIT` | `AWAIT <name> [name2 ...]` | Wait for the named thread(s) |
-| `AWAIT` | `AWAIT` | Wait for all active spawned threads |
-| `CHANNEL CREATE` | `CHANNEL CREATE <name> [capacity]` | Create a named channel (capacity default 64 = `AM_CHANNEL_BUF`) |
-| `CHANNEL WRITE` | `CHANNEL WRITE <name> <value_expr>` | Write a float (blocks if full) |
-| `CHANNEL READ` | `CHANNEL READ <name> <var>` | Read one float into `<var>` (blocks if empty) |
-| `CHANNEL TRY` | `CHANNEL TRY <name> <var>` | Non-blocking read: takes one float if the queue is non-empty, otherwise leaves `<var>` **untouched** and continues |
-| `CHANNEL DEPTH` | `CHANNEL DEPTH <name> <var>` | Queued values into `<var>` (`-1` if there is no such channel) |
-| `CHANNEL CLOSE` | `CHANNEL CLOSE <name>` | Deactivate a channel |
+| `SPAWN` | `SPAWN name:` plus indented block | Launch a job with owned source and launch values |
+| `AWAIT` | `AWAIT name INTO variable` | Join once and transfer the explicitly returned AML value |
+| `AWAIT` | `AWAIT name [name2 ...]` | Join named children, discard results, preserve the first error |
+| `AWAIT` | `AWAIT` | Drain this program's pending children |
+| `CHANNEL CREATE` | `CHANNEL CREATE name [capacity]` | Create a unique live queue; capacity 1–64, default 64 |
+| `CHANNEL WRITE` | `CHANNEL WRITE name expression` | Write a float, waiting with a one-second deadline when full |
+| `CHANNEL READ` | `CHANNEL READ name variable` | Read one float, waiting with a one-second deadline when empty |
+| `CHANNEL TRY` | `CHANNEL TRY name variable` | Read immediately; an empty live queue leaves the destination unchanged |
+| `CHANNEL DEPTH` | `CHANNEL DEPTH name variable` | Queue size, or `-1` for a missing queue |
+| `CHANNEL CLOSE` | `CHANNEL CLOSE [name]` | Close one or all queues and wake blocked readers/writers |
 
-An `AWAIT` joins every requested pending worker and propagates the first failure
-into the awaiting execution context. The worker's diagnostic is copied before
-thread exit and restored in the awaiting thread. The C API's `am_spawn_await`
-returns the worker status; the existing void `am_spawn_await_all` exposes a
-failure through `am_get_error()`.
+Worker names are 1–31 non-whitespace characters excluding `:`. Pending names
+are unique within their owning execution context. The process admits 16
+outstanding jobs. A completed job retains its result slot until joined; a
+successful or failed join frees that slot for subsequent jobs.
 
-`CHANNEL READ` polls 1000 x 1 ms before giving up, which is ~2 s of wall time in practice — correct for a spawned thread, ruinous
-for a single-threaded host running the program inside a scheduled quantum, where one empty read
-stalls everything (measured: ~1.9 s wall on an empty channel versus 0 ms on a full one). Such a
-host should ask `CHANNEL DEPTH` or use `CHANNEL TRY`, whose C forms are `am_channel_depth` and
-`am_channel_try_read`. `CHANNEL READ` is unchanged; the non-blocking pair is additive.
+A worker block can return a float, array/matrix, UTF-8 string, string list,
+numeric map, immutable tokenizer or flat record. The result owns its references
+across worker teardown and is transferred into the awaiting scope exactly
+once. Missing jobs, duplicate awaits, missing explicit returns and worker
+execution errors leave the destination unchanged and stop the awaiting
+program. `AWAIT` validates syntax and destination capacity before consuming a
+result. An application validates and publishes a completed owner separately.
 
-```aml
-CHANNEL CREATE bus 16
-SPAWN earth:
-    forward(batch_earth)
-    CHANNEL WRITE bus 1.0
-AWAIT earth
-CHANNEL READ bus v1
-```
+Normal completion, error completion and `am_program_close` drain the program's
+children before freeing parent storage. A worker drains its children before
+returning. Two resumable programs have separate child sets. A parent execution
+error takes precedence over a later child-drain error. The original child source
+diagnostic survives through the waiting parent. Stepping still yields only
+between top-level statements; a loop, function or await completes within one
+step.
+
+C hosts launch source with `am_spawn_launch`; this copies the source and the
+calling thread's persistent globals. `am_spawn_await_value(name, out)` transfers
+an owned `AML_Var`, replacing a valid prior value only on success.
+`am_value_clear(out)` releases it. `am_spawn_await` discards a result.
+`am_spawn_drain()` returns the first failure after joining this C thread's
+pending jobs; `am_spawn_await_all()` retains its void signature and leaves a
+failure in `am_get_error()`. Each C thread has its own job names.
+
+Channel registry operations are synchronized. Closure wakes blocked transfers;
+slot generations keep a waiter on a closed queue from entering a replacement
+queue. Missing/closed channels, malformed commands, capacity errors and blocking
+transfer timeouts are AML errors. `CHANNEL TRY` distinguishes an empty live
+queue from a missing queue. Its C API returns `-1` for empty and `-2` for an
+error; blocking read/write return zero on success or `-2` with a diagnostic.
+Failed reads keep their output unchanged. `am_init` closes channels and joins
+workers before resetting field/tape storage.
+
+Detailed contracts and executable evidence: [owned workers](../docs/WORKERS.md).
 
 ## 21. Field Persistence — LOAD / SAVE
 

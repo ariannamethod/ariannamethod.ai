@@ -12,6 +12,76 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-10-14 — work returns to its owner (v5.11.0)
+
+Haiku's completed experience can now travel across an owned worker boundary.
+`SPAWN` copies the prepared function table and source lines with their origins,
+globals and the current visible local frame. Captured locals remain a separate
+scope: a worker block sees its launching argument, while an inherited helper
+still resolves its own arguments and original globals. Mutable values receive
+independent owners; immutable text and tokenizer models retain references.
+
+The worker block can `return` any AML value. `AWAIT name INTO completed`
+transfers that value after joining; aliases into worker-owned records survive
+context and persistent-store teardown. A failed execution or missing return
+leaves the destination unchanged. Joined slots are reusable, so the 16-slot
+bound applies to outstanding jobs throughout a conversation. Each program owns
+its child set and drains it at normal completion, error completion or explicit
+host close. A child drains its own children before publishing its result.
+
+Channels now synchronize creation and closure alongside reads/writes. Closing
+a queue wakes blocked transfers; generation checks keep those waiters away
+from a replacement queue reusing the slot. Missing queues, malformed commands,
+capacity errors and timed-out blocking transfers become explicit AML errors.
+An empty live `CHANNEL TRY` preserves its existing nonblocking behavior.
+Full initialization closes channels and joins workers before resetting field
+and tape storage. The process field and tape retain their shared ownership;
+Haiku carries private organ state in records and caller-owned numerical values.
+
+Three canonical NoTorch operations give AML organs their parliament arithmetic:
+`nt_parliament_elect`, `nt_parliament_inject` and `nt_oja`. They return fresh
+arrays with validated layouts, finite values and election domains. The rank
+cursor and Oja noise are explicit inputs. Experts, immune memory, receipts,
+learning policy and publication remain application-owned AML state. The
+separate `AM_ParliamentBackend` registration table preserves the original
+seven-callback `AM_NumericalBackend` layout. `am_use_notorch()` registers both,
+together with sampling and immutable tokenizers.
+
+Proof on Linux x86_64 / GCC 13.3:
+
+- `make test-workers`: **1,319** runtime/C-host checks and **1,339** with
+  injected launch allocation and `pthread_create` failures. Parent values
+  survive refused launches, and the next job can reuse the slot.
+- The worker fixture completes **80** sequential typed jobs through interpreter,
+  prepared stepping, bytecode, CLI and compiled scalar paths. Further fixtures
+  cover nested same-named workers, a departed launching frame, helper/global
+  scope, imported source origins, UTF-8, signed zero, matrix shape, maps and
+  returned record leaves.
+- Direct host gates cover **96** repeated jobs, **16** simultaneous pending
+  slots, four C host threads, separate resumable-program owners, early close,
+  destination preservation, tokenizer destruction exactly once, and channel
+  close/reuse with blocked readers and writers.
+- Final worker runtime and source fixtures pass ASan/UBSan. Leak scanning is
+  disabled because this host refuses process-task inspection. The
+  `AM_ASYNC_DISABLED` core also compiles.
+- `make test-parliament`: **656** checks compare every returned value with
+  canonical NoTorch calls through interpreter, bytecode and resumable hosts.
+  Missing and malformed backend callbacks, invalid election gate mass,
+  dimensions and failed assignment publication are exercised; runner and
+  compiled scalar fixtures agree.
+  An old-header host registers its original 56-byte numerical table directly
+  before a guard page without an overread; its source still compiles with
+  `-Wall -Wextra -Werror`.
+- Existing **550/550** baseline, **1,201** expression checks with **48** rejected
+  programs, **1,017** import checks and compiler suites pass. The expression
+  fixture now explicitly closes its queue before its next host-mode run;
+  duplicate live-channel creation reports an error.
+
+The transpiler and runners use their existing shared execution path, carrying
+the same worker ownership and registered NoTorch operations into compiled
+programs. See [workers](docs/WORKERS.md) and
+[parliament values](docs/PARLIAMENT_VALUES.md) for the executable contracts.
+
 ## 2026-10-13 — memory names its states (v5.10.0)
 
 Haiku's Phase4 transition memory names climate states with fixed decimal

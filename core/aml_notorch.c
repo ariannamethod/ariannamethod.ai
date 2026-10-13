@@ -63,6 +63,11 @@ void am_use_notorch(void) {
         .sgd = nt_sgd_values,
         .normal = nt_rng_normal_values,
     };
+    const AM_ParliamentBackend parliament = {
+        .parliament_elect = nt_parliament_elect_values,
+        .parliament_inject = nt_parliament_inject_values,
+        .oja = nt_oja_values,
+    };
     const AM_TokenizerBackend tokenizer = {
         .load = aml_notorch_tokenizer_load,
         .destroy = aml_notorch_tokenizer_destroy,
@@ -71,5 +76,6 @@ void am_use_notorch(void) {
     };
     am_use_notorch_sampling();
     am_set_numerical_backend(&backend);
+    am_set_parliament_backend(&parliament);
     am_set_tokenizer_backend(&tokenizer);
 }

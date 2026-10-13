@@ -58,6 +58,7 @@
 // Async — pthreads for SPAWN/AWAIT
 #ifndef AM_ASYNC_DISABLED
 #include <pthread.h>
+#include <errno.h>
 #endif
 
 // Platform detection for Blood compiler
@@ -108,6 +109,7 @@ static _Thread_local char g_source_path[AML_MAX_SOURCE_PATH] = "";
 // the execution context, so workers never advance a shared global RNG state.
 static AM_SamplingBackend g_sampling_backend;
 static AM_NumericalBackend g_numerical_backend;
+static AM_ParliamentBackend g_parliament_backend;
 static AM_TokenizerBackend g_tokenizer_backend;
 
 struct AM_Tokenizer {
@@ -143,6 +145,11 @@ void am_set_numerical_backend(const AM_NumericalBackend* backend) {
     else memset(&g_numerical_backend, 0, sizeof(g_numerical_backend));
 }
 
+void am_set_parliament_backend(const AM_ParliamentBackend* backend) {
+    if (backend) g_parliament_backend = *backend;
+    else memset(&g_parliament_backend, 0, sizeof(g_parliament_backend));
+}
+
 // Blood compiler globals (used by Level 0 dispatch + Blood API)
 static AM_BloodModule g_blood_modules[AM_BLOOD_MAX_MODULES];
 static int g_blood_count = 0;
@@ -161,7 +168,12 @@ static char g_pipe_read_buf[AM_PIPE_BUF_SIZE] = {0};
 #ifndef AM_ASYNC_DISABLED
 static AM_SpawnSlot   g_spawns[AM_MAX_SPAWNS];
 static char           g_spawn_errors[AM_MAX_SPAWNS][256];
-static int            g_spawn_count = 0;
+static int            g_spawn_used[AM_MAX_SPAWNS]; // 0 free, 1 awaitable, 2 joining
+static uint64_t       g_spawn_owners[AM_MAX_SPAWNS];
+static AML_Var        g_spawn_values[AM_MAX_SPAWNS];
+static int            g_spawn_has_value[AM_MAX_SPAWNS];
+static uint64_t       g_spawn_next_owner = 1;
+static _Thread_local uint64_t g_spawn_host_owner;
 static pthread_t      g_spawn_threads[AM_MAX_SPAWNS];
 static pthread_mutex_t g_spawn_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -169,6 +181,7 @@ static AM_ChannelSlot g_channels[AM_MAX_CHANNELS];
 static int            g_channel_count = 0;
 static pthread_mutex_t g_channel_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_channel_cond = PTHREAD_COND_INITIALIZER;
+static uint64_t        g_channel_generation[AM_MAX_CHANNELS];
 #endif
 
 // Janus transformer integration (function pointers set by host)
@@ -593,6 +606,11 @@ void am_persistent_clear(void);
 
 void am_init(void) {
   g_am_initialized = 1;   // A-4: mark initialized so am_exec's auto-init won't re-fire
+#ifndef AM_ASYNC_DISABLED
+  // Workers finish before any process-wide field/tape storage is reset.
+  am_channel_close_all();
+  am_spawn_reset();
+#endif
   // Clean up tape from previous session
   am_tape_destroy();
 
@@ -757,8 +775,6 @@ void am_init(void) {
 
   // async — SPAWN/AWAIT/CHANNEL
 #ifndef AM_ASYNC_DISABLED
-  am_spawn_await_all();   // join any running threads first
-  am_spawn_reset();
   am_channel_reset();
 #endif
 }
@@ -2925,279 +2941,393 @@ static int tape_ensure_entry(AM_Array* arr) {
 
 #ifndef AM_ASYNC_DISABLED
 
-// Thread argument: holds the AML script to execute
+static int aml_preprocess(const char* script, AML_Line* lines, int max_lines);
+static void aml_register_builtins(AML_ExecCtx* ctx);
+static void aml_register_funcs(AML_ExecCtx* ctx);
+static int aml_exec_block(AML_ExecCtx* ctx, int start, int end);
+static void aml_value_clear(AML_Var* value);
+static void aml_clear_return(AML_ExecCtx* ctx);
+static int am_spawn_join_owner(uint64_t owner);
+
+// Code and mutable values outlive the launching frame. Source origins remain
+// attached to copied lines, including imported function bodies.
 typedef struct {
-    char* script;       // heap-allocated AML script text
-    int   slot_idx;     // index into g_spawns
-    char  base_dir[256]; // source origin travels with the worker
-    char  source_path[AML_MAX_SOURCE_PATH];
-    AML_Symtab globals; // launch-time snapshot; worker takes ownership
+    AML_ExecCtx* ctx;
+    int start, end, slot_idx;
+    char base_dir[256];
+    char source_path[AML_MAX_SOURCE_PATH];
 } AM_SpawnArg;
 
-// Thread entry point: runs an AML script in its own context
-static void* am_spawn_thread_fn(void* arg) {
-    AM_SpawnArg* sa = (AM_SpawnArg*)arg;
-
-    // Execute the script with the caller's source origin in this thread.
-    snprintf(g_base_dir, sizeof(g_base_dir), "%s", sa->base_dir);
-    snprintf(g_source_path, sizeof(g_source_path), "%s", sa->source_path);
-    g_persistent_globals = sa->globals;
-    memset(&sa->globals, 0, sizeof(sa->globals));
-    g_persistent_enabled = 1;
-    int rc = am_exec(sa->script);
-    am_persistent_mode(0);
-
-    // Mark slot as done
+static uint64_t am_spawn_new_owner(void) {
     pthread_mutex_lock(&g_spawn_mutex);
-    if (sa->slot_idx >= 0 && sa->slot_idx < AM_MAX_SPAWNS) {
-        g_spawns[sa->slot_idx].active = 0;
-        g_spawns[sa->slot_idx].result = rc;
-        snprintf(g_spawn_errors[sa->slot_idx], sizeof(g_spawn_errors[0]),
-                 "%s", g_error);
-    }
+    uint64_t id = g_spawn_next_owner++;
+    if (!id) id = g_spawn_next_owner++;
     pthread_mutex_unlock(&g_spawn_mutex);
+    return id;
+}
 
-    free(sa->script);
-    free(sa);
+static uint64_t am_spawn_c_owner(void) {
+    if (!g_spawn_host_owner) g_spawn_host_owner = am_spawn_new_owner();
+    return g_spawn_host_owner;
+}
+
+static void am_spawn_context_drain(AML_ExecCtx* ctx) {
+    if (ctx->spawn_owner && am_spawn_join_owner(ctx->spawn_owner) != 0 && !ctx->error[0])
+        set_error(ctx, g_error);
+}
+
+static int am_async_name_valid(const char* name) {
+    if (!name || !*name || strlen(name) >= AM_SPAWN_NAME_LEN) return 0;
+    for (const char* p = name; *p; p++)
+        if (isspace((unsigned char)*p) || *p == ':') return 0;
+    return 1;
+}
+
+static void am_spawn_arg_free(AM_SpawnArg* arg) {
+    if (!arg) return;
+    if (arg->ctx) {
+        symtab_clear_arrays(&arg->ctx->globals);
+        for (int i = 0; i < AML_MAX_CALL_DEPTH; i++)
+            symtab_clear_arrays(&arg->ctx->locals[i]);
+        aml_clear_return(arg->ctx);
+        free(arg->ctx->lines);
+        free(arg->ctx);
+    }
+    free(arg);
+}
+
+static void* am_spawn_thread_fn(void* data) {
+    AM_SpawnArg* arg = data;
+    AML_ExecCtx* ctx = arg->ctx;
+    snprintf(g_base_dir, sizeof(g_base_dir), "%s", arg->base_dir);
+    snprintf(g_source_path, sizeof(g_source_path), "%s", arg->source_path);
+    g_persistent_enabled = 1;
+    if (persistent_save(&ctx->globals))
+        set_error(ctx, "worker persistent snapshot allocation failed");
+    if (!ctx->error[0]) aml_exec_block(ctx, arg->start, arg->end);
+    am_spawn_context_drain(ctx);
+    // The return expression owns a reference. Transfer it before the context
+    // and its TLS persistent store are destroyed; no mutable parent is shared.
+    AML_Var result = {0};
+    int has_result = ctx->has_return && !ctx->error[0];
+    if (has_result) {
+        result.type = ctx->return_type;
+        result.value = ctx->return_value;
+        result.array = ctx->return_array; ctx->return_array = NULL;
+        result.string = ctx->return_string; ctx->return_string = NULL;
+        result.list = ctx->return_list; ctx->return_list = NULL;
+        result.map = ctx->return_map; ctx->return_map = NULL;
+        result.tokenizer = ctx->return_tokenizer; ctx->return_tokenizer = NULL;
+        result.record = ctx->return_record; ctx->return_record = NULL;
+    }
+    am_persistent_mode(0);
+    pthread_mutex_lock(&g_spawn_mutex);
+    int idx = arg->slot_idx;
+    g_spawns[idx].active = 0;
+    g_spawns[idx].result = ctx->error[0] ? 1 : 0;
+    snprintf(g_spawn_errors[idx], sizeof(g_spawn_errors[idx]), "%s", ctx->error);
+    g_spawn_values[idx] = result;
+    g_spawn_has_value[idx] = has_result;
+    pthread_mutex_unlock(&g_spawn_mutex);
+    am_spawn_arg_free(arg);
     return NULL;
 }
 
-// Launch a spawn: create thread running the given AML script
-static int am_spawn_launch_globals(const char* name, const char* script,
-                                   const AML_Symtab* globals) {
-    if (!name || !script) return -1;
-    if (!g_am_initialized) am_init();
-    AM_SpawnArg* arg = (AM_SpawnArg*)calloc(1, sizeof(AM_SpawnArg));
-    if (!arg) return -1;
-    arg->script = strdup(script);
-    if (!arg->script) { free(arg); return -1; }
-    if (globals && symtab_snapshot(&arg->globals, globals)) {
-        free(arg->script); free(arg); return -1;
+static int am_spawn_start(const char* name, uint64_t owner, AM_SpawnArg* arg) {
+    if (!am_async_name_valid(name)) {
+        set_error(NULL, "invalid worker name");
+        am_spawn_arg_free(arg); return -1;
     }
     snprintf(arg->base_dir, sizeof(arg->base_dir), "%s", g_base_dir);
     snprintf(arg->source_path, sizeof(arg->source_path), "%s", g_source_path);
-
     pthread_mutex_lock(&g_spawn_mutex);
-    if (g_spawn_count >= AM_MAX_SPAWNS) {
-        pthread_mutex_unlock(&g_spawn_mutex);
-        symtab_clear_arrays(&arg->globals);
-        free(arg->script); free(arg); return -1;
+    int idx = -1;
+    for (int i = 0; i < AM_MAX_SPAWNS; i++) {
+        if (!g_spawn_used[i] && idx < 0) idx = i;
+        if (g_spawn_used[i] && g_spawn_owners[i] == owner && !strcmp(g_spawns[i].name, name)) {
+            pthread_mutex_unlock(&g_spawn_mutex);
+            set_error(NULL, "worker name already pending");
+            am_spawn_arg_free(arg); return -1;
+        }
     }
-    int idx = g_spawn_count;
+    if (idx < 0) {
+        pthread_mutex_unlock(&g_spawn_mutex);
+        set_error(NULL, "worker limit exceeded (16 outstanding jobs)");
+        am_spawn_arg_free(arg); return -1;
+    }
     arg->slot_idx = idx;
+    g_spawn_used[idx] = 1;
+    g_spawn_owners[idx] = owner;
     snprintf(g_spawns[idx].name, AM_SPAWN_NAME_LEN, "%s", name);
     g_spawns[idx].active = 1;
     g_spawns[idx].joined = 0;
     g_spawns[idx].result = 0;
     g_spawn_errors[idx][0] = 0;
+    g_spawn_has_value[idx] = 0;
     int err = pthread_create(&g_spawn_threads[idx], NULL, am_spawn_thread_fn, arg);
-    if (err != 0) {
-        symtab_clear_arrays(&arg->globals);
-        free(arg->script);
-        free(arg);
+    if (err) {
+        g_spawn_used[idx] = 0;
         g_spawns[idx].active = 0;
         pthread_mutex_unlock(&g_spawn_mutex);
-        return -1;
+        snprintf(g_error, sizeof(g_error), "cannot launch worker: %s", strerror(err));
+        am_spawn_arg_free(arg); return -1;
     }
-
-    g_spawn_count++;
     pthread_mutex_unlock(&g_spawn_mutex);
     return idx;
 }
 
-int am_spawn_launch(const char* name, const char* script) {
-    return am_spawn_launch_globals(name, script,
-                                   g_persistent_enabled ? &g_persistent_globals : NULL);
-}
-// Join transfers the completed worker's diagnostic to the awaiting thread.
-static int am_spawn_join(int i) {
-    int err = pthread_join(g_spawn_threads[i], NULL);
-    if (err) {
-        snprintf(g_error, sizeof(g_error), "cannot await %s: %s",
-                 g_spawns[i].name, strerror(err));
-        return -1;
+static AM_SpawnArg* am_spawn_arg_new(void) {
+    AM_SpawnArg* arg = calloc(1, sizeof(*arg));
+    if (arg) arg->ctx = calloc(1, sizeof(*arg->ctx));
+    if (!arg || !arg->ctx) {
+        am_spawn_arg_free(arg);
+        set_error(NULL, "worker context allocation failed");
+        return NULL;
     }
-    g_spawns[i].joined = 1;
-    if (g_spawns[i].result != 0)
-        snprintf(g_error, sizeof(g_error), "%s",
-                 g_spawn_errors[i][0] ? g_spawn_errors[i] : "spawned program failed");
-    return g_spawns[i].result;
+    arg->ctx->spawn_owner = am_spawn_new_owner();
+    snprintf(arg->ctx->base_dir, sizeof(arg->ctx->base_dir), "%s", g_base_dir);
+    return arg;
 }
 
-// Await a specific spawn by name. Returns result code.
-int am_spawn_await(const char* name) {
-    for (int i = 0; i < g_spawn_count; i++) {
-        if (strcmp(g_spawns[i].name, name) == 0 && !g_spawns[i].joined) {
-            return am_spawn_join(i);
+static int am_spawn_launch_context(const char* name, AML_ExecCtx* parent, int start, int end) {
+    AM_SpawnArg* arg = am_spawn_arg_new();
+    if (!arg) return -1;
+    AML_ExecCtx* ctx = arg->ctx;
+    ctx->nlines = parent->nlines;
+    ctx->lines = malloc((size_t)ctx->nlines * sizeof(*ctx->lines));
+    if (!ctx->lines) goto failed;
+    memcpy(ctx->lines, parent->lines, (size_t)ctx->nlines * sizeof(*ctx->lines));
+    ctx->funcs = parent->funcs;
+    if (symtab_snapshot(&ctx->globals, &parent->globals)) goto failed;
+    // Keep the visible frame separate: a helper still resolves its own local
+    // parameters and original globals, while the worker block sees its capture.
+    // Earlier callers' frames are not visible in AML and are not captured.
+    if (parent->call_depth > 0) {
+        const AML_Symtab* locals = &parent->locals[parent->call_depth - 1];
+        if (symtab_snapshot(&ctx->locals[0], locals)) goto failed;
+        ctx->call_depth = 1;
+    }
+    arg->start = start; arg->end = end;
+    if (!parent->spawn_owner) parent->spawn_owner = am_spawn_new_owner();
+    return am_spawn_start(name, parent->spawn_owner, arg);
+failed:
+    am_spawn_arg_free(arg);
+    set_error(NULL, "worker snapshot allocation or variable limit failure");
+    return -1;
+}
+
+int am_spawn_launch(const char* name, const char* script) {
+    if (!script) { set_error(NULL, "worker script is null"); return -1; }
+    if (!g_am_initialized) am_init();
+    AM_SpawnArg* arg = am_spawn_arg_new();
+    if (!arg) return -1;
+    AML_ExecCtx* ctx = arg->ctx;
+    ctx->lines = malloc(AML_MAX_LINES * sizeof(*ctx->lines));
+    if (!ctx->lines) { set_error(NULL, "worker source allocation failed"); goto failed; }
+    ctx->nlines = aml_preprocess(script, ctx->lines, AML_MAX_LINES);
+    if (ctx->nlines < 0) goto failed;
+    aml_register_builtins(ctx);
+    aml_register_funcs(ctx);
+    if (ctx->error[0]) goto failed;
+    if (g_persistent_enabled && symtab_snapshot(&ctx->globals, &g_persistent_globals)) {
+        set_error(NULL, "worker snapshot allocation failed"); goto failed;
+    }
+    arg->end = ctx->nlines;
+    return am_spawn_start(name, am_spawn_c_owner(), arg);
+failed:
+    am_spawn_arg_free(arg); return -1;
+}
+
+// Caller claims a slot while holding g_spawn_mutex. Only that joiner may
+// consume its value; a slot is reusable after the thread is actually joined.
+static int am_spawn_join_claimed(int idx, AML_Var* out) {
+    int err = pthread_join(g_spawn_threads[idx], NULL);
+    pthread_mutex_lock(&g_spawn_mutex);
+    if (err) {
+        g_spawn_used[idx] = 1;
+        snprintf(g_error, sizeof(g_error), "cannot await %s: %s", g_spawns[idx].name, strerror(err));
+        pthread_mutex_unlock(&g_spawn_mutex);
+        return -1;
+    }
+    int rc = g_spawns[idx].result;
+    if (rc) snprintf(g_error, sizeof(g_error), "%s", g_spawn_errors[idx]);
+    else if (out && !g_spawn_has_value[idx]) {
+        snprintf(g_error, sizeof(g_error), "worker %s did not return a value", g_spawns[idx].name);
+        rc = -1;
+    }
+    if (!rc && out) {
+        aml_value_clear(out);
+        *out = g_spawn_values[idx];
+        memset(&g_spawn_values[idx], 0, sizeof(g_spawn_values[idx]));
+    }
+    aml_value_clear(&g_spawn_values[idx]);
+    g_spawn_has_value[idx] = 0;
+    g_spawns[idx].joined = 1;
+    g_spawn_used[idx] = 0;
+    pthread_mutex_unlock(&g_spawn_mutex);
+    return rc;
+}
+
+static int am_spawn_await_owner(uint64_t owner, const char* name, AML_Var* out) {
+    if (!am_async_name_valid(name)) { set_error(NULL, "invalid worker name"); return -1; }
+    pthread_mutex_lock(&g_spawn_mutex);
+    for (int i = 0; i < AM_MAX_SPAWNS; i++) {
+        if (g_spawn_used[i] == 1 && g_spawn_owners[i] == owner && !strcmp(g_spawns[i].name, name)) {
+            g_spawn_used[i] = 2;
+            pthread_mutex_unlock(&g_spawn_mutex);
+            return am_spawn_join_claimed(i, out);
         }
     }
+    pthread_mutex_unlock(&g_spawn_mutex);
     snprintf(g_error, sizeof(g_error), "no unjoined spawn: %s", name);
     return -1;
 }
 
-// Join every pending worker, preserving the first failure if several fail.
-static int am_spawn_join_all(void) {
+static int am_spawn_join_owner(uint64_t owner) {
     int rc = 0;
     char first_error[256] = {0};
-    for (int i = 0; i < g_spawn_count; i++) {
-        if (!g_spawns[i].joined) {
-            int result = am_spawn_join(i);
-            if (result != 0 && rc == 0) {
-                rc = result;
-                snprintf(first_error, sizeof(first_error), "%s", g_error);
+    for (;;) {
+        int idx = -1;
+        pthread_mutex_lock(&g_spawn_mutex);
+        for (int i = 0; i < AM_MAX_SPAWNS; i++) {
+            if (g_spawn_used[i] == 1 && (!owner || g_spawn_owners[i] == owner)) {
+                idx = i; g_spawn_used[i] = 2; break;
             }
         }
+        pthread_mutex_unlock(&g_spawn_mutex);
+        if (idx < 0) break;
+        int result = am_spawn_join_claimed(idx, NULL);
+        if (result && !rc) { rc = result; snprintf(first_error, sizeof(first_error), "%s", g_error); }
     }
-    if (rc != 0) snprintf(g_error, sizeof(g_error), "%s", first_error);
+    if (rc) snprintf(g_error, sizeof(g_error), "%s", first_error);
     return rc;
 }
 
-// Public void API retains its signature; failures remain in am_get_error().
-void am_spawn_await_all(void) { (void)am_spawn_join_all(); }
+int am_spawn_await(const char* name) { return am_spawn_await_owner(am_spawn_c_owner(), name, NULL); }
+int am_spawn_await_value(const char* name, AML_Var* out) {
+    if (!out) { set_error(NULL, "worker result destination is null"); return -1; }
+    return am_spawn_await_owner(am_spawn_c_owner(), name, out);
+}
+void am_value_clear(AML_Var* value) { if (value) aml_value_clear(value); }
+int am_spawn_drain(void) { return am_spawn_join_owner(am_spawn_c_owner()); }
+void am_spawn_await_all(void) { (void)am_spawn_drain(); }
 
 int am_spawn_count(void) {
     int n = 0;
-    for (int i = 0; i < g_spawn_count; i++)
-        if (g_spawns[i].active) n++;
+    pthread_mutex_lock(&g_spawn_mutex);
+    for (int i = 0; i < AM_MAX_SPAWNS; i++) n += g_spawns[i].active != 0;
+    pthread_mutex_unlock(&g_spawn_mutex);
     return n;
 }
 
-// Reset spawn state (called from am_init)
-static void am_spawn_reset(void) {
-    am_spawn_await_all();
-    g_spawn_count = 0;
-    memset(g_spawns, 0, sizeof(g_spawns));
-    memset(g_spawn_errors, 0, sizeof(g_spawn_errors));
-}
+static void am_spawn_reset(void) { (void)am_spawn_join_owner(0); }
 
-// --- CHANNEL ---
-
-// Find channel by name (-1 if not found)
+// --- CHANNEL: one synchronized registry; closed generations cannot be reused
+// by a reader/writer already waiting on the old queue. ---
 static int channel_find(const char* name) {
-    for (int i = 0; i < g_channel_count; i++)
-        if (g_channels[i].active && strcmp(g_channels[i].name, name) == 0)
-            return i;
+    if (!name) return -1;
+    for (int i = 0; i < AM_MAX_CHANNELS; i++)
+        if (g_channels[i].active && !strcmp(g_channels[i].name, name)) return i;
     return -1;
 }
 
-// Create a channel with given capacity
 int am_channel_create(const char* name, int capacity) {
-    if (g_channel_count >= AM_MAX_CHANNELS || capacity <= 0) return -1;
-    if (capacity > AM_CHANNEL_BUF) capacity = AM_CHANNEL_BUF;
-
-    int idx = g_channel_count;
-    memset(&g_channels[idx], 0, sizeof(AM_ChannelSlot));
-    snprintf(g_channels[idx].name, AM_SPAWN_NAME_LEN, "%s", name);
+    if (!am_async_name_valid(name) || capacity <= 0 || capacity > AM_CHANNEL_BUF) {
+        set_error(NULL, "invalid channel name or capacity"); return -1;
+    }
+    pthread_mutex_lock(&g_channel_mutex);
+    int idx = -1;
+    if (channel_find(name) >= 0) {
+        pthread_mutex_unlock(&g_channel_mutex);
+        set_error(NULL, "channel already exists"); return -1;
+    }
+    for (int i = 0; i < AM_MAX_CHANNELS; i++) if (!g_channels[i].active) { idx = i; break; }
+    if (idx < 0) {
+        pthread_mutex_unlock(&g_channel_mutex);
+        set_error(NULL, "channel limit exceeded"); return -1;
+    }
+    memset(&g_channels[idx], 0, sizeof(g_channels[idx]));
+    snprintf(g_channels[idx].name, sizeof(g_channels[idx].name), "%s", name);
     g_channels[idx].capacity = capacity;
     g_channels[idx].active = 1;
+    g_channel_generation[idx]++;
     g_channel_count++;
+    pthread_mutex_unlock(&g_channel_mutex);
     return idx;
 }
 
-// Write a float to a channel (blocking if full)
-int am_channel_write(const char* name, float value) {
+static int am_channel_transfer(const char* name, float* value, int write, int wait) {
+    if (!value) { set_error(NULL, "channel value pointer is null"); return -2; }
     pthread_mutex_lock(&g_channel_mutex);
     int idx = channel_find(name);
-    if (idx < 0) { pthread_mutex_unlock(&g_channel_mutex); return -1; }
-
-    // Wait until not full (with timeout to prevent deadlock)
-    int tries = 0;
-    while (g_channels[idx].count >= g_channels[idx].capacity && tries < 1000) {
+    if (idx < 0) {
         pthread_mutex_unlock(&g_channel_mutex);
-        struct timespec ts = {0, 1000000}; // 1ms
-        nanosleep(&ts, NULL);
-        pthread_mutex_lock(&g_channel_mutex);
-        tries++;
+        set_error(NULL, "channel missing or closed"); return -2;
     }
-    if (g_channels[idx].count >= g_channels[idx].capacity) {
-        pthread_mutex_unlock(&g_channel_mutex);
-        return -1; // channel full, timeout
+    uint64_t generation = g_channel_generation[idx];
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec++;
+    while (write ? g_channels[idx].count == g_channels[idx].capacity : g_channels[idx].count == 0) {
+        if (!wait) { pthread_mutex_unlock(&g_channel_mutex); return -1; }
+        int rc = pthread_cond_timedwait(&g_channel_cond, &g_channel_mutex, &deadline);
+        if (!g_channels[idx].active || generation != g_channel_generation[idx]) {
+            pthread_mutex_unlock(&g_channel_mutex);
+            set_error(NULL, "channel closed while waiting"); return -2;
+        }
+        if (rc) {
+            pthread_mutex_unlock(&g_channel_mutex);
+            set_error(NULL, rc == ETIMEDOUT ? "channel wait timed out" : "channel wait failed");
+            return -2;
+        }
     }
-
-    g_channels[idx].data[g_channels[idx].tail] = value;
-    g_channels[idx].tail = (g_channels[idx].tail + 1) % g_channels[idx].capacity;
-    g_channels[idx].count++;
+    if (write) {
+        g_channels[idx].data[g_channels[idx].tail] = *value;
+        g_channels[idx].tail = (g_channels[idx].tail + 1) % g_channels[idx].capacity;
+        g_channels[idx].count++;
+    } else {
+        *value = g_channels[idx].data[g_channels[idx].head];
+        g_channels[idx].head = (g_channels[idx].head + 1) % g_channels[idx].capacity;
+        g_channels[idx].count--;
+    }
     pthread_cond_broadcast(&g_channel_cond);
     pthread_mutex_unlock(&g_channel_mutex);
     return 0;
 }
 
-// How many values are queued. -1 if there is no such channel. A host that schedules needs to
-// be able to ask before it commits to a read.
+int am_channel_write(const char* name, float value) { return am_channel_transfer(name, &value, 1, 1); }
+int am_channel_read(const char* name, float* out) { return am_channel_transfer(name, out, 0, 1); }
+int am_channel_try_read(const char* name, float* out) { return am_channel_transfer(name, out, 0, 0); }
 int am_channel_depth(const char* name) {
     pthread_mutex_lock(&g_channel_mutex);
     int idx = channel_find(name);
-    int n = (idx < 0) ? -1 : g_channels[idx].count;
+    int count = idx < 0 ? -1 : g_channels[idx].count;
     pthread_mutex_unlock(&g_channel_mutex);
-    return n;
+    return count;
 }
-
-// Non-blocking read: takes one value if there is one, otherwise returns -1 at once. The polling
-// am_channel_read below waits up to a second, which is correct for a thread and ruinous for a
-// single-threaded host running the program in a scheduled quantum.
-int am_channel_try_read(const char* name, float* out) {
-    pthread_mutex_lock(&g_channel_mutex);
-    int idx = channel_find(name);
-    if (idx < 0 || g_channels[idx].count == 0) {
-        pthread_mutex_unlock(&g_channel_mutex);
-        return -1;
-    }
-    *out = g_channels[idx].data[g_channels[idx].head];
-    g_channels[idx].head = (g_channels[idx].head + 1) % g_channels[idx].capacity;
-    g_channels[idx].count--;
-    pthread_cond_broadcast(&g_channel_cond);
-    pthread_mutex_unlock(&g_channel_mutex);
-    return 0;
-}
-
-// Read a float from a channel. Blocking if empty: 1000 x 1ms sleeps plus mutex overhead,
-// which is ~2s of wall time in practice, not the ~1s the loop count suggests.
-int am_channel_read(const char* name, float* out) {
-    pthread_mutex_lock(&g_channel_mutex);
-    int idx = channel_find(name);
-    if (idx < 0) { pthread_mutex_unlock(&g_channel_mutex); return -1; }
-
-    // Wait until not empty (with timeout)
-    int tries = 0;
-    while (g_channels[idx].count == 0 && tries < 1000) {
-        pthread_mutex_unlock(&g_channel_mutex);
-        struct timespec ts = {0, 1000000}; // 1ms
-        nanosleep(&ts, NULL);
-        pthread_mutex_lock(&g_channel_mutex);
-        tries++;
-    }
-    if (g_channels[idx].count == 0) {
-        pthread_mutex_unlock(&g_channel_mutex);
-        return -1; // channel empty, timeout
-    }
-
-    *out = g_channels[idx].data[g_channels[idx].head];
-    g_channels[idx].head = (g_channels[idx].head + 1) % g_channels[idx].capacity;
-    g_channels[idx].count--;
-    pthread_cond_broadcast(&g_channel_cond);
-    pthread_mutex_unlock(&g_channel_mutex);
-    return 0;
-}
-
 int am_channel_count(void) {
-    int n = 0;
-    for (int i = 0; i < g_channel_count; i++)
-        if (g_channels[i].active) n++;
-    return n;
+    pthread_mutex_lock(&g_channel_mutex);
+    int count = g_channel_count;
+    pthread_mutex_unlock(&g_channel_mutex);
+    return count;
 }
-
+int am_channel_close(const char* name) {
+    pthread_mutex_lock(&g_channel_mutex);
+    int idx = channel_find(name);
+    if (idx >= 0) { g_channels[idx].active = 0; g_channel_count--; }
+    pthread_cond_broadcast(&g_channel_cond);
+    pthread_mutex_unlock(&g_channel_mutex);
+    if (idx < 0) { set_error(NULL, "channel missing or closed"); return -1; }
+    return 0;
+}
 void am_channel_close_all(void) {
     pthread_mutex_lock(&g_channel_mutex);
-    for (int i = 0; i < g_channel_count; i++)
-        g_channels[i].active = 0;
+    for (int i = 0; i < AM_MAX_CHANNELS; i++) g_channels[i].active = 0;
     g_channel_count = 0;
+    pthread_cond_broadcast(&g_channel_cond);
     pthread_mutex_unlock(&g_channel_mutex);
 }
-
-// Reset channels (called from am_init)
-static void am_channel_reset(void) {
-    am_channel_close_all();
-}
+static void am_channel_reset(void) { am_channel_close_all(); }
 
 #endif // AM_ASYNC_DISABLED
 
@@ -3570,7 +3700,8 @@ static int aml_sampling_function(const char* name) {
 
 static int aml_numerical_function(const char* name) {
     static const char* names[] = {"nt_linear", "nt_linear_vjp", "nt_tanh",
-        "nt_tanh_vjp", "nt_mse_grad", "nt_sgd", "rng_normal"};
+        "nt_tanh_vjp", "nt_mse_grad", "nt_sgd", "rng_normal",
+        "nt_parliament_elect", "nt_parliament_inject", "nt_oja"};
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (strcasecmp(name, names[i]) == 0) return 1;
     return 0;
@@ -4206,8 +4337,137 @@ static int aml_numerical_dimension(AML_ExecCtx* ctx, const AML_Var* value, int* 
     return 0;
 }
 
+// Owned parliament arithmetic. Geometry comes from checked array lengths;
+// the largest call fits AML's eight-argument surface. Policy remains in AML.
+static int aml_parliament_scalar(AML_ExecCtx* ctx, const AML_Var* value) {
+    if (value->type != AML_TYPE_FLOAT || !isfinite(value->value)) {
+        set_error(ctx, "parliament scalar must be finite"); return 1;
+    }
+    return 0;
+}
+
+static int aml_parliament_dispatch(AML_ExecCtx* ctx, const char* name,
+                                    AML_Var* args, int nargs, AML_Var* out) {
+    int election = !strcasecmp(name, "nt_parliament_elect");
+    int inject = !strcasecmp(name, "nt_parliament_inject");
+    int need = election ? 5 : inject ? 6 : 8;
+    if (nargs != need) {
+        set_error(ctx, "wrong number of parliament arguments"); return 1;
+    }
+    const AM_ParliamentBackend* backend = &g_parliament_backend;
+    if ((election && !backend->parliament_elect) ||
+        (inject && !backend->parliament_inject) ||
+        (!election && !inject && !backend->oja)) {
+        set_error(ctx, "parliament backend unavailable; use NoTorch-enabled AML"); return 1;
+    }
+    int arrays = election ? 3 : inject ? 4 : 5;
+    for (int i = 0; i < arrays; i++)
+        if (aml_numerical_array(ctx, &args[i])) return 1;
+    for (int i = arrays; i < nargs; i++)
+        if (aml_parliament_scalar(ctx, &args[i])) return 1;
+
+    int experts = 0, dim = 0, rank = 0, cursor = 0, window = 0, minimum = 0, active = 0, len;
+    if (election) {
+        experts = args[0].array->len;
+        if (experts > 16 || args[1].array->len != experts ||
+            args[2].array->len != experts ||
+            args[3].value < 1 || args[3].value > experts ||
+            truncf(args[3].value) != args[3].value ||
+            args[4].value < 0 || args[4].value > 1) {
+            set_error(ctx, "invalid parliament election geometry or consensus"); return 1;
+        }
+        minimum = (int)args[3].value;
+        for (int i = 0; i < experts; i++) {
+            float alive = args[2].array->data[i];
+            if (alive != 0 && alive != 1) {
+                set_error(ctx, "parliament alive mask must contain 0 or 1"); return 1;
+            }
+            active += alive == 1;
+        }
+        if (active < minimum) {
+            set_error(ctx, "parliament has fewer live experts than its minimum"); return 1;
+        }
+        len = experts + 2;
+    } else if (inject) {
+        experts = args[2].array->len;
+        dim = args[3].array->len;
+        if (aml_numerical_dimension(ctx, &args[4], &rank)) return 1;
+        if (experts > 16 || rank > 16 ||
+            dim > AM_MAX_ARRAY_SIZE / rank / experts ||
+            args[0].array->len != experts * dim * rank ||
+            args[1].array->len != experts * dim * rank) {
+            set_error(ctx, "invalid parliament injection geometry"); return 1;
+        }
+        for (int i = 0; i < experts; i++) {
+            if (args[2].array->data[i] < 0 || args[2].array->data[i] > 1) {
+                set_error(ctx, "parliament gates must lie in [0, 1]"); return 1;
+            }
+        }
+        len = dim;
+    } else {
+        dim = args[2].array->len;
+        if (args[0].array->len % dim || args[1].array->len != args[0].array->len ||
+            args[3].array->len != dim) {
+            set_error(ctx, "invalid Oja matrix geometry"); return 1;
+        }
+        rank = args[0].array->len / dim;
+        window = args[4].array->len;
+        if (rank < 1 || rank > 16 || window > rank ||
+            args[5].value < 0 || args[5].value >= rank ||
+            truncf(args[5].value) != args[5].value || args[6].value < 0 ||
+            args[0].array->len > (AM_MAX_ARRAY_SIZE - 1) / 2) {
+            set_error(ctx, "invalid Oja rank, cursor, window or learning rate"); return 1;
+        }
+        cursor = (int)args[5].value;
+        len = 2 * args[0].array->len + 1;
+    }
+    AM_Array* result = am_array_new(len);
+    if (!result) { set_error(ctx, "parliament output allocation failed"); return 1; }
+    int rc;
+    if (election)
+        rc = backend->parliament_elect(args[0].array->data, args[1].array->data,
+            args[2].array->data, experts, minimum, args[4].value, result->data);
+    else if (inject)
+        rc = backend->parliament_inject(args[0].array->data, args[1].array->data,
+            args[2].array->data, args[3].array->data, experts, dim, rank,
+            args[5].value, result->data);
+    else
+        rc = backend->oja(args[0].array->data, args[1].array->data,
+            args[2].array->data, args[3].array->data, args[4].array->data,
+            dim, rank, cursor, window, args[6].value, args[7].value, result->data);
+    if (!rc) for (int i = 0; i < len; i++) if (!isfinite(result->data[i])) { rc = -1; break; }
+    if (!rc && election) {
+        double mass = 0;
+        int positive = 0;
+        for (int i = 0; i < experts; i++) {
+            if (result->data[i] < 0 || result->data[i] > 1 ||
+                (args[2].array->data[i] == 0 && result->data[i] != 0)) rc = -1;
+            mass += result->data[i];
+            positive += result->data[i] > 0;
+        }
+        float consensus = result->data[experts], selected = result->data[experts + 1];
+        if (consensus < 0 || consensus > 1 || selected < minimum ||
+            selected > active || truncf(selected) != selected ||
+            positive > selected || fabs(mass - 1.0) > 2e-6) rc = -1;
+    }
+    if (!rc && !election && !inject) {
+        int next = fabsf(args[7].value) < 1e-8f ? cursor : (cursor + window) % rank;
+        if (result->data[len - 1] != (float)next) rc = -1;
+    }
+    if (rc) {
+        am_array_free(result);
+        set_error(ctx, "parliament backend rejected arguments or returned invalid output"); return 1;
+    }
+    out->array = result;
+    out->type = AML_TYPE_ARRAY;
+    return 0;
+}
+
 static int aml_numerical_dispatch(AML_ExecCtx* ctx, const char* name,
                                   AML_Var* args, int nargs, AML_Var* out) {
+    if (!strcasecmp(name, "nt_parliament_elect") ||
+        !strcasecmp(name, "nt_parliament_inject") || !strcasecmp(name, "nt_oja"))
+        return aml_parliament_dispatch(ctx, name, args, nargs, out);
     int is_linear = !strcasecmp(name, "nt_linear");
     int is_linear_vjp = !strcasecmp(name, "nt_linear_vjp");
     int is_tanh = !strcasecmp(name, "nt_tanh");
@@ -6133,22 +6393,48 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
 
 #ifndef AM_ASYNC_DISABLED
     else if (!strcmp(t, "AWAIT")) {
-      // AWAIT name1 name2 ... — wait for spawned threads
-      if (arg && *arg) {
-        char names[AML_MAX_LINE_LEN];
-        snprintf(names, sizeof(names), "%s", arg);
-        char* save = NULL;
-        char* tok = strtok_r(names, " \t", &save);
-        int failed = 0;
-        while (tok) {
-          if (am_spawn_await(tok) != 0 && !failed) {
-            set_error_at(ctx, lineno, g_error);
-            failed = 1;
-          }
-          tok = strtok_r(NULL, " \t", &save);
+      if (!ctx) { set_error(NULL, "AWAIT requires an execution context"); return; }
+      char names[AML_MAX_LINE_LEN];
+      snprintf(names, sizeof(names), "%s", arg ? arg : "");
+      names[aml_comment_start(names) - names] = 0;
+      char* tokens[AML_MAX_LINE_LEN / 2];
+      int count = 0, into = -1;
+      char* save = NULL;
+      for (char* word = strtok_r(names, " \t", &save); word; word = strtok_r(NULL, " \t", &save)) {
+        tokens[count] = word;
+        if (count == 1 && !strcasecmp(word, "INTO")) into = count;
+        count++;
+      }
+      if (into >= 0) {
+        if (count != 3 || into != 1) { set_error_at(ctx, lineno, "expected AWAIT name INTO variable"); return; }
+        const char* name = tokens[2];
+        int valid = isalpha((unsigned char)*name) || *name == '_';
+        for (const char* p = name; *p; p++) valid = valid && (isalnum((unsigned char)*p) || *p == '_');
+        if (!valid || strlen(name) >= AML_MAX_NAME) { set_error_at(ctx, lineno, "invalid worker result variable"); return; }
+        AML_Symtab* tab = ctx->call_depth > 0 ? &ctx->locals[ctx->call_depth - 1] : &ctx->globals;
+        if (!symtab_get_var(tab, name) && tab->count >= AML_MAX_VARS) {
+          set_error_at(ctx, lineno, "variable limit exceeded"); return;
         }
-      } else {
-        if (am_spawn_join_all() != 0) set_error_at(ctx, lineno, g_error);
+        AML_Var value = {0};
+        if (am_spawn_await_owner(ctx->spawn_owner, tokens[0], &value)) {
+          set_error_at(ctx, lineno, g_error); return;
+        }
+        if (value.type == AML_TYPE_ARRAY) symtab_set_array(tab, name, value.array);
+        else if (value.type == AML_TYPE_STRING) symtab_set_string(tab, name, value.string);
+        else if (value.type == AML_TYPE_LIST) symtab_set_list(tab, name, value.list);
+        else if (value.type == AML_TYPE_MAP) symtab_set_map(tab, name, value.map);
+        else if (value.type == AML_TYPE_TOKENIZER) symtab_set_tokenizer(tab, name, value.tokenizer);
+        else if (value.type == AML_TYPE_RECORD) symtab_set_record(tab, name, value.record);
+        else symtab_set(tab, name, value.value);
+      } else if (count) {
+        int failed = 0;
+        for (int i = 0; i < count; i++) {
+          if (am_spawn_await_owner(ctx->spawn_owner, tokens[i], NULL) && !failed) {
+            set_error_at(ctx, lineno, g_error); failed = 1;
+          }
+        }
+      } else if (ctx->spawn_owner && am_spawn_join_owner(ctx->spawn_owner)) {
+        set_error_at(ctx, lineno, g_error);
       }
     }
 
@@ -6157,90 +6443,53 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
       char rest[AML_MAX_LINE_LEN] = {0};
       if (arg) sscanf(arg, "%31s %[^\n]", subcmd, rest);
       upcase(subcmd);
-
-      if (!strcmp(subcmd, "CREATE")) {
-        // CHANNEL CREATE name capacity
-        char chname[AM_SPAWN_NAME_LEN] = {0};
-        int cap = AM_CHANNEL_BUF;
-        sscanf(rest, "%31s %d", chname, &cap);
-        if (cap <= 0) cap = AM_CHANNEL_BUF;
-        if (cap > AM_CHANNEL_BUF) cap = AM_CHANNEL_BUF;
-        if (chname[0]) am_channel_create(chname, cap);
-      }
-      else if (!strcmp(subcmd, "WRITE")) {
-        // CHANNEL WRITE name value_expr
-        char chname[AM_SPAWN_NAME_LEN] = {0};
-        char vexpr[AML_MAX_LINE_LEN] = {0};
-        sscanf(rest, "%31s %[^\n]", chname, vexpr);
-        if (chname[0] && vexpr[0] && ctx) {
-          float numeric_arg_56 = ctx_float(ctx, vexpr);
-          if (ctx && ctx->error[0]) return;
-          float val = numeric_arg_56;
-          am_channel_write(chname, val);
+      rest[aml_comment_start(rest) - rest] = 0;
+      char* save = NULL;
+      char* name = strtok_r(rest, " \t", &save);
+      if (!strcmp(subcmd, "WRITE")) {
+        const char* expression = save ? save : "";
+        while (isspace((unsigned char)*expression)) expression++;
+        if (!am_async_name_valid(name) || !*expression || !ctx) {
+          set_error_at(ctx, lineno, "expected CHANNEL WRITE name value"); return;
         }
-      }
-      else if (!strcmp(subcmd, "READ")) {
-        // CHANNEL READ name var_name
-        char chname[AM_SPAWN_NAME_LEN] = {0};
-        char vname[AML_MAX_NAME] = {0};
-        sscanf(rest, "%31s %31s", chname, vname);
-        if (chname[0] && vname[0] && ctx) {
-          float out = 0;
-          if (am_channel_read(chname, &out) == 0) {
-            /* same scope rule as assignment and PIPE READ: locals inside a function,
-             * globals at top level. Clamping the depth to 0 put a top-level read into
-             * locals[0], where nothing at top level ever looks for it — the value was
-             * delivered by the channel and then dropped on the floor. */
-            if (ctx->call_depth > 0)
-              symtab_set(&ctx->locals[ctx->call_depth - 1], vname, out);
-            else
-              symtab_set(&ctx->globals, vname, out);
+        float value = ctx_float(ctx, expression);
+        if (!ctx->error[0] && am_channel_write(name, value)) set_error_at(ctx, lineno, g_error);
+      } else {
+        char* second = strtok_r(NULL, " \t", &save);
+        char* third = strtok_r(NULL, " \t", &save);
+        if (!strcmp(subcmd, "CREATE")) {
+          long capacity = AM_CHANNEL_BUF;
+          char* end = NULL;
+          if (second) { errno = 0; capacity = strtol(second, &end, 10); }
+          if (!am_async_name_valid(name) || third || (second && (!end || *end || errno)) ||
+              capacity < 1 || capacity > AM_CHANNEL_BUF) {
+            set_error_at(ctx, lineno, "invalid channel name or capacity"); return;
           }
-        }
-      }
-      else if (!strcmp(subcmd, "TRY")) {
-        // CHANNEL TRY name var_name — non-blocking read; var is left untouched when empty
-        char chname[AM_SPAWN_NAME_LEN] = {0};
-        char vname[AML_MAX_NAME] = {0};
-        sscanf(rest, "%31s %31s", chname, vname);
-        if (chname[0] && vname[0] && ctx) {
-          float out = 0;
-          if (am_channel_try_read(chname, &out) == 0) {
-            if (ctx->call_depth > 0)
-              symtab_set(&ctx->locals[ctx->call_depth - 1], vname, out);
-            else
-              symtab_set(&ctx->globals, vname, out);
+          if (am_channel_create(name, (int)capacity) < 0) set_error_at(ctx, lineno, g_error);
+        } else if (!strcmp(subcmd, "CLOSE")) {
+          if (second || (name && !am_async_name_valid(name))) {
+            set_error_at(ctx, lineno, "expected CHANNEL CLOSE [name]"); return;
           }
-        }
-      }
-      else if (!strcmp(subcmd, "DEPTH")) {
-        // CHANNEL DEPTH name var_name — how many values are queued (-1 if no such channel)
-        char chname[AM_SPAWN_NAME_LEN] = {0};
-        char vname[AML_MAX_NAME] = {0};
-        sscanf(rest, "%31s %31s", chname, vname);
-        if (chname[0] && vname[0] && ctx) {
-          float d = (float)am_channel_depth(chname);
-          if (ctx->call_depth > 0)
-            symtab_set(&ctx->locals[ctx->call_depth - 1], vname, d);
-          else
-            symtab_set(&ctx->globals, vname, d);
-        }
-      }
-      else if (!strcmp(subcmd, "CLOSE")) {
-        // CHANNEL CLOSE name
-        char chname[AM_SPAWN_NAME_LEN] = {0};
-        sscanf(rest, "%31s", chname);
-        if (chname[0]) {
-          // close specific channel by zeroing it
-          for (int ci = 0; ci < g_channel_count; ci++) {
-            if (g_channels[ci].active && strcmp(g_channels[ci].name, chname) == 0) {
-              g_channels[ci].active = 0;
-              break;
-            }
+          if (!name) am_channel_close_all();
+          else if (am_channel_close(name)) set_error_at(ctx, lineno, g_error);
+        } else if (!strcmp(subcmd, "READ") || !strcmp(subcmd, "TRY") || !strcmp(subcmd, "DEPTH")) {
+          int valid = second && (isalpha((unsigned char)*second) || *second == '_');
+          if (second) for (const char* p = second; *p; p++) valid = valid && (isalnum((unsigned char)*p) || *p == '_');
+          if (!ctx || !am_async_name_valid(name) || !valid || third || strlen(second) >= AML_MAX_NAME) {
+            set_error_at(ctx, lineno, "expected CHANNEL READ/TRY/DEPTH name variable"); return;
           }
-        } else {
-          am_channel_close_all();
-        }
+          AML_Symtab* tab = ctx->call_depth > 0 ? &ctx->locals[ctx->call_depth - 1] : &ctx->globals;
+          if (!symtab_get_var(tab, second) && tab->count >= AML_MAX_VARS) {
+            set_error_at(ctx, lineno, "variable limit exceeded"); return;
+          }
+          float value = 0;
+          int rc = 0;
+          if (!strcmp(subcmd, "DEPTH")) value = (float)am_channel_depth(name);
+          else if (!strcmp(subcmd, "TRY")) rc = am_channel_try_read(name, &value);
+          else rc = am_channel_read(name, &value);
+          if (!rc) symtab_set(tab, second, value);
+          else if (rc != -1) set_error_at(ctx, lineno, g_error);
+        } else set_error_at(ctx, lineno, "unknown CHANNEL operation");
       }
     }
 #endif // AM_ASYNC_DISABLED
@@ -6456,6 +6705,7 @@ static int aml_reserved_function(const char* name) {
         "map_keys", "map_clone", "assert", "floor", "isfinite", "rng_new", "rng_uniform",
         "rng_index", "rng_categorical", "categorical_at", "nt_linear", "nt_linear_vjp",
         "nt_tanh", "nt_tanh_vjp", "nt_mse_grad", "nt_sgd", "rng_normal",
+        "nt_parliament_elect", "nt_parliament_inject", "nt_oja",
         "tokenizer_load", "tokenizer_pieces", "tokenizer_identity", "codepoint_isalnum", "read_line",
         "record_new", "record_set", "record_get", "record_has", "record_keys", "record_kind",
         "record_clone", "record_replace", "record_swap", "checkpoint_save", "checkpoint_load", "file_exists"
@@ -7977,49 +8227,31 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
         return body_end;
     }
 
-    // --- v4.0: SPAWN name: (async block) ---
+    // A worker owns its prepared source, visible bindings and child scope.
 #ifndef AM_ASYNC_DISABLED
     if (strncasecmp(text, "SPAWN ", 6) == 0) {
-        // Parse: SPAWN name:
-        char spawn_name[AM_SPAWN_NAME_LEN] = {0};
-        const char* sp = text + 6;
-        while (*sp == ' ') sp++;
-        int ni = 0;
-        while (*sp && *sp != ':' && *sp != ' ' && ni < AM_SPAWN_NAME_LEN - 1)
-            spawn_name[ni++] = *sp++;
-        spawn_name[ni] = 0;
-
-        int body_end = aml_find_block_end(ctx->lines, ctx->nlines, idx);
-
-        // Build script string from indented block
-        // Calculate total size needed
-        int total = 0;
-        int base_indent = idx + 1 < body_end ? ctx->lines[idx + 1].indent : 0;
-        for (int bi = idx + 1; bi < body_end; bi++)
-            total += (int)strlen(ctx->lines[bi].text) + 1
-                     + (ctx->lines[bi].indent > base_indent
-                        ? ctx->lines[bi].indent - base_indent : 0);
-        total += 1; // null terminator
-
-        char* script = (char*)malloc(total);
-        if (script) {
-            char* dst = script;
-            for (int bi = idx + 1; bi < body_end; bi++) {
-                int indent = ctx->lines[bi].indent - base_indent;
-                while (indent-- > 0) *dst++ = ' ';
-                size_t len = strlen(ctx->lines[bi].text);
-                memcpy(dst, ctx->lines[bi].text, len);
-                dst += len;
-                *dst++ = '\n';
-            }
-            *dst = 0;
-            if (am_spawn_launch_globals(spawn_name, script, &ctx->globals) < 0)
-                set_error_at(ctx, ctx->lines[idx].lineno, "cannot launch worker");
-            free(script);
-        } else {
-            set_error_at(ctx, ctx->lines[idx].lineno, "worker script allocation failed");
+        char name[AM_SPAWN_NAME_LEN] = {0};
+        const char* p = text + 6;
+        while (isspace((unsigned char)*p)) p++;
+        size_t n = 0;
+        while (*p && *p != ':' && !isspace((unsigned char)*p)) {
+            if (n < sizeof(name) - 1) name[n] = *p;
+            n++; p++;
         }
-
+        while (isspace((unsigned char)*p)) p++;
+        int body_end = aml_find_block_end(ctx->lines, ctx->nlines, idx);
+        if (!n || n >= sizeof(name) || *p != ':') {
+            set_error_at(ctx, ctx->lines[idx].lineno, "expected SPAWN name:");
+            return body_end;
+        }
+        p++;
+        while (isspace((unsigned char)*p)) p++;
+        if (*p && *p != '#') {
+            set_error_at(ctx, ctx->lines[idx].lineno, "unexpected text after SPAWN declaration");
+            return body_end;
+        }
+        if (am_spawn_launch_context(name, ctx, idx + 1, body_end) < 0)
+            set_error_at(ctx, ctx->lines[idx].lineno, g_error);
         return body_end;
     }
 #endif // AM_ASYNC_DISABLED
@@ -8379,6 +8611,9 @@ int am_exec(const char* script) {
     aml_exec_block(&ctx, 0, nlines);
 
     // v4.0: save globals to persistent storage, then clean up
+#ifndef AM_ASYNC_DISABLED
+    am_spawn_context_drain(&ctx);
+#endif
     if (persistent_save(&ctx.globals) && !ctx.error[0])
         set_error(&ctx, "persistent globals allocation failed");
     symtab_clear_arrays(&ctx.globals);
@@ -8463,6 +8698,9 @@ int am_program_close(void* handle) {
     if (!handle) return 0;
     AM_Program* p = (AM_Program*)handle;
 
+#ifndef AM_ASYNC_DISABLED
+    am_spawn_context_drain(&p->ctx);
+#endif
     if (persistent_save(&p->ctx.globals) && !p->ctx.error[0])
         set_error(&p->ctx, "persistent globals allocation failed");
     symtab_clear_arrays(&p->ctx.globals);
@@ -8966,6 +9204,9 @@ int am_exec_compiled(void* handle) {
         if (ctx.error[0]) break;
     }
 
+#ifndef AM_ASYNC_DISABLED
+    am_spawn_context_drain(&ctx);
+#endif
     if (persistent_save(&ctx.globals) && !ctx.error[0])
         set_error(&ctx, "persistent globals allocation failed");
     symtab_clear_arrays(&ctx.globals);

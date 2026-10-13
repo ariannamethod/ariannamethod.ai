@@ -54,6 +54,7 @@ static const char* valid =
     "CHANNEL WRITE expression_gate (3 + 4) # command name precedes expression\n"
     "CHANNEL READ expression_gate message\n"
     "assert(message == 7, 'channel expression')\n"
+    "CHANNEL CLOSE expression_gate\n"
     "counter = [0]\n"
     "total = bump(counter) + bump(counter)\n"
     "assert(total == 3 and counter[0] == 2, 'one evaluation per call')\n"
