@@ -39,7 +39,7 @@ Arithmetic, comparisons, and conditions use scalar expressions.
 
 ## Expression intrinsics
 
-Names are case-insensitive and reserved against user definitions. These nine
+Names are case-insensitive and reserved against user definitions. These ten
 intrinsics do not consume slots in the user/builtin function table.
 
 | Expression | Result |
@@ -53,6 +53,7 @@ intrinsics do not consume slots in the user/builtin function table.
 | `text_codepoint(s, index)` | Unicode scalar value at a codepoint index |
 | `text_from_codepoint(cp)` | One-codepoint string |
 | `text_lower(s)` | Unicode 15 default lowercase, including expansions and contextual sigma |
+| `text_fixed(value, digits)` | Finite float32 as fixed decimal text, 0–9 fractional digits, nearest/ties-even |
 
 Negative indices count from the end. Slice bounds clamp to `[0, text_len(s)]`;
 an end before the start gives empty text. `text_codepoint` fails for an
@@ -67,6 +68,10 @@ happens in these primitives. Haiku expresses its whitespace table in AML.
 `text_lower` applies default lowercase without normalization or locale tailoring.
 [TEXT_LOWER.md](TEXT_LOWER.md) records its context rules, table
 provenance, output expansion, and verification.
+`text_fixed` accepts a finite scalar and an integer precision from 0 through 9.
+It preserves a negative sign even when the result rounds to zero. Decimal
+spelling and rounding do not depend on locale or the process rounding mode.
+[TEXT_FIXED.md](TEXT_FIXED.md) defines exact binary32 rounding and the C API.
 
 ## Ownership and limits
 
@@ -97,7 +102,7 @@ loop. Allocation failures and exceeded string limits propagate as runtime errors
 
 `AM_String` exposes `data`, `byte_len`, `len`, and `refcount`. Callers treat
 `data` as immutable. `am_string_new`, `am_string_concat`, `am_string_slice`,
-`am_string_from_codepoint`, and `am_string_lower` return an owned reference or NULL on failure.
+`am_string_from_codepoint`, `am_string_lower`, and `am_string_fixed` return an owned reference or NULL on failure.
 `am_string_ref` retains it; `am_string_free` releases it. The query functions
 `am_string_find` and `am_string_codepoint` return codepoint indices/values.
 NULL release is valid.

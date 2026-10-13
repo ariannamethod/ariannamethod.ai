@@ -1,6 +1,6 @@
 # AML — Arianna Method Language
 
-**Version:** 5.9.0 (Stable lexical lists and complete expressions)
+**Version:** 5.10.0 (Exact fixed text and growing function tables)
 **Extension:** `.aml`
 **Status:** Living specification
 
@@ -99,9 +99,9 @@ Numeric maps print as JSON objects with the same escaped keys and finite
 numeric values, in insertion order.
 Tokenizer values print as `<tokenizer>`; records print as `<record>`.
 
-The nine expression intrinsics are `text_len`, `text_bytes`, `text_equal`,
+The ten text expression intrinsics are `text_len`, `text_bytes`, `text_equal`,
 `text_find`, `text_slice`, `text_concat`, `text_codepoint`, and
-`text_from_codepoint`, plus `text_lower`. Codepoint indices are distinct from bytes and grapheme
+`text_from_codepoint`, `text_lower`, and `text_fixed`. Codepoint indices are distinct from bytes and grapheme
 clusters; slicing has an exclusive end and clamps negative indices.
 [TEXT.md](../docs/TEXT.md) defines their signatures, errors, escapes, ownership,
 and C API. Numeric operators require scalar values; use the text intrinsics
@@ -113,6 +113,19 @@ context for Greek final sigma. Locale-specific casing and normalization are
 separate operations. Output must fit the same 1 MiB bound; a failed allocation
 or expansion leaves the input unchanged. [TEXT_LOWER.md](../docs/TEXT_LOWER.md)
 records the tables, provenance, and exact casing contract.
+
+`text_fixed(value, digits)` requires a finite scalar and an integer precision
+in `0..9`. It returns fresh immutable ASCII text with exactly that many
+fractional digits, a literal `.` when digits is nonzero, no exponent or
+grouping, and a minus sign for every negative input, including negative zero.
+It rounds the exact stored binary32 value to nearest, with ties to an even
+scaled integer. Conversion uses integer arithmetic and preserves the caller's
+locale, rounding mode and floating-point exception flags. Invalid arguments or
+allocation failure stop execution without replacing the destination value.
+[TEXT_FIXED.md](../docs/TEXT_FIXED.md) defines the bit-level contract and tests.
+The shared function table holds 256 slots: 17 registered builtins and 239 user
+definitions. Intrinsics do not consume slots. Excess definitions fail during
+preparation before any statement executes.
 
 `codepoint_isalnum(cp)` accepts one finite integer Unicode scalar, including
 zero, and returns one for Unicode 15 Letter/Number categories, zero otherwise.

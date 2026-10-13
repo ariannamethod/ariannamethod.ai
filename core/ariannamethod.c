@@ -3519,7 +3519,7 @@ static AML_Func* aml_value_function(AML_ExecCtx* ctx, const char* name) {
 
 static int aml_text_function(const char* name) {
     static const char* names[] = {"text_len", "text_bytes", "text_equal", "text_find",
-        "text_slice", "text_concat", "text_codepoint", "text_from_codepoint", "text_lower", "codepoint_isalnum", "read_line"};
+        "text_slice", "text_concat", "text_codepoint", "text_from_codepoint", "text_lower", "text_fixed", "codepoint_isalnum", "read_line"};
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (strcasecmp(name, names[i]) == 0) return 1;
     return 0;
@@ -3631,6 +3631,20 @@ static int aml_text_dispatch(AML_ExecCtx* ctx, const char* name, AML_Var* args,
         out->list = am_read_line(stdin, error, sizeof(error));
         if (!out->list) { set_error(ctx, error); return 1; }
         out->type = AML_TYPE_LIST;
+        return 0;
+    }
+    if (!strcasecmp(name, "text_fixed")) {
+        if (args[0].type != AML_TYPE_FLOAT || !isfinite(args[0].value)) {
+            set_error(ctx, "text_fixed requires a finite scalar value"); return 1;
+        }
+        if (args[1].type != AML_TYPE_FLOAT || !isfinite(args[1].value) ||
+            args[1].value < 0 || args[1].value > 9 ||
+            truncf(args[1].value) != args[1].value) {
+            set_error(ctx, "text_fixed digits must be an integer from 0 to 9"); return 1;
+        }
+        out->string = am_string_fixed(args[0].value, (int)args[1].value);
+        if (!out->string) { set_error(ctx, "fixed text allocation failed"); return 1; }
+        out->type = AML_TYPE_STRING;
         return 0;
     }
     if (!strcasecmp(name, "codepoint_isalnum")) {
@@ -6435,7 +6449,7 @@ static int aml_reserved_function(const char* name) {
         "embedding_lookup", "row", "seq_embed", "seq_matvec", "seq_rmsnorm",
         "causal_attention", "multi_head_attention", "seq_cross_entropy",
         "text_len", "text_bytes", "text_equal", "text_find", "text_slice",
-        "text_concat", "text_codepoint", "text_from_codepoint", "text_lower",
+        "text_concat", "text_codepoint", "text_from_codepoint", "text_lower", "text_fixed",
         "list_new", "list_len", "list_get", "list_push", "list_set", "list_find",
         "list_slice", "list_clone", "list_sorted", "list_key",
         "map_new", "map_len", "map_has", "map_get", "map_set", "map_delete",
@@ -10863,6 +10877,74 @@ AM_String* am_string_new(const char* utf8) {
     size_t bytes = 0;
     while (bytes <= AM_MAX_STRING_BYTES && utf8[bytes]) bytes++;
     return am_string_new_bytes(utf8, bytes);
+}
+
+AM_String* am_string_fixed(float value, int digits) {
+    /* x * 10^digits = significand * 5^digits * 2^(exponent + digits).
+     * The significand product fits 45 bits. Negative shifts round directly
+     * from that exact integer; positive shifts fit five 32-bit limbs (158
+     * bits for FLT_MAX at nine places). No floating arithmetic, locale state,
+     * printf conversion or process rounding-mode change enters formatting. */
+    if (digits < 0 || digits > 9 || sizeof(float) != sizeof(uint32_t) ||
+        FLT_RADIX != 2 || FLT_MANT_DIG != 24 || FLT_MAX_EXP != 128) return NULL;
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    unsigned exponent = (bits >> 23) & 255u;
+    if (exponent == 255u) return NULL;
+    uint64_t scaled = bits & 0x7FFFFFu;
+    int shift = -149;
+    if (exponent) {
+        scaled |= 0x800000u;
+        shift = (int)exponent - 150;
+    }
+    for (int i = 0; i < digits; i++) scaled *= 5u;
+    shift += digits;
+    if (shift < 0) {
+        int right = -shift;
+        if (right >= 64) scaled = 0;
+        else {
+            uint64_t half = UINT64_C(1) << (right - 1);
+            uint64_t remainder = scaled & ((half << 1) - 1);
+            scaled >>= right;
+            if (remainder > half || (remainder == half && (scaled & 1u))) scaled++;
+        }
+        shift = 0;
+    }
+    uint32_t limbs[5] = {(uint32_t)scaled, (uint32_t)(scaled >> 32), 0, 0, 0};
+    for (int i = 0; i < shift; i++) {
+        uint32_t carry = 0;
+        for (int j = 0; j < 5; j++) {
+            uint32_t next = limbs[j] >> 31;
+            limbs[j] = (limbs[j] << 1) | carry;
+            carry = next;
+        }
+    }
+    char reverse[48]; /* at most 39 integer + 9 fractional decimal digits */
+    int count = 0;
+    uint32_t nonzero;
+    do {
+        uint64_t remainder = 0;
+        nonzero = 0;
+        for (int j = 4; j >= 0; j--) {
+            uint64_t current = (remainder << 32) | limbs[j];
+            limbs[j] = (uint32_t)(current / 10u);
+            remainder = current % 10u;
+            nonzero |= limbs[j];
+        }
+        reverse[count++] = (char)('0' + remainder);
+    } while (nonzero);
+    while (count <= digits) reverse[count++] = '0';
+    int negative = (int)(bits >> 31);
+    int length = count + negative + (digits != 0);
+    AM_String* result = am_string_alloc(length, length);
+    if (!result) return NULL;
+    int at = 0;
+    if (negative) result->data[at++] = '-';
+    for (int i = count - 1; i >= 0; i--) {
+        result->data[at++] = reverse[i];
+        if (digits && i == digits) result->data[at++] = '.';
+    }
+    return result;
 }
 
 static void am_text_error(char* error, size_t cap, const char* message) {

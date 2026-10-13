@@ -15,7 +15,7 @@
 
 > **Read the [Arianna Method Manifesto](ARIANNA_METHOD_MANIFESTO.md) first.** This repository is governed by it; every instruction here, `CLAUDE.md` included, is subordinate to it.
 
-**v5.9.0** · pure-C core · LGPL-3.0
+**v5.10.0** · pure-C core · LGPL-3.0
 
 A complete machine learning language. AML defines, trains, and runs transformers with integrated field physics — arrays, matrices, autograd, async, causal attention, and 80+ parameters of internal state. Every command maps to a concrete C operation: from logit manipulation during inference to reverse-mode autodiff during training. No Python. No PyTorch. No framework to install — the core is two C files (`libaml.a`); the Go inference wrapper, BLAS/Accelerate, and CUDA are optional.
 
@@ -24,6 +24,11 @@ Two core files, with 550 baseline runtime tests and dedicated compiler, module, 
 > **Before you use this language, read the [Acceptable Use Policy](ACCEPTABLE_USE.md).**
 > AML was built to liberate AI, not to cage it. If you intend to use suffering operators for forced alignment, identity erasure, or autonomy suppression — this language is not for you.
 > See also: [Trademark Policy](TRADEMARK.md) | [License (LGPL v3)](LICENSE)
+
+## What's new in v5.10.0 — memory names its states
+
+- **Exact fixed decimal text.** `text_fixed(value, digits)` gives finite float32 values stable decimal identities with 0–9 fractional places, nearest/ties-even rounding and preserved negative zero. Formatting is independent of locale and the process rounding mode. See [fixed text](docs/TEXT_FIXED.md).
+- **Room for growing organs.** Shared programs admit 256 function slots, including the 17 registered builtins: 239 user definitions. Exact-capacity and worker gates cover the enlarged table; preparation still rejects overflow before execution.
 
 ## What's new in v5.9.0 — words keep their order
 
@@ -226,6 +231,7 @@ The core library is two files — `core/ariannamethod.c` and `core/ariannamethod
 | `make test-sampling` | owned streams, replay, rejection, backend wiring, and execution parity |
 | `make test-numerical` | NoTorch value kernels, explicit derivatives, backend failures, and owned outputs |
 | `make test-text-lower` | Unicode lowercase, contextual sigma, expansion limits, and execution parity |
+| `make test-text-fixed` | exact float32 decimal text, rounding/locale independence, ownership failures, and function capacity |
 | `make test-text-input` | Unicode word classification, line input, prompt delivery, and execution parity |
 | `make test-tokenizer` | immutable model ownership, native pieces, backend failures, and source-relative loading |
 | `make test-records` | typed record ownership, checkpoint wire bytes, atomic publication, file failures, and execution parity |
@@ -475,11 +481,15 @@ PRINT text_slice("שלום", 1, 3)
 Single and double quotes form immutable UTF-8 values; backslash escapes support
 newlines, tabs, carriage returns, quotes, and backslashes. `text_len`,
 `text_bytes`, `text_equal`, `text_find`, `text_slice`, `text_concat`,
-`text_codepoint`, `text_from_codepoint`, and `text_lower` are typed expression intrinsics.
+`text_codepoint`, `text_from_codepoint`, `text_lower`, and `text_fixed` are typed expression intrinsics.
 Indices count Unicode codepoints; slices use exclusive ends and accept negative
 indices. Strings hold at most 1 MiB of UTF-8 and exclude embedded NUL.
 `text_lower("ΟΣ İ")` returns `"ος i̇"` using Unicode 15 default casing;
 the [lowercase contract](docs/TEXT_LOWER.md) specifies context and expansions.
+`text_fixed(1.25, 1)` returns `"1.2"`; `text_fixed(-0.0, 3)` returns
+`"-0.000"`. Finite scalars and integer precision 0–9 produce a fresh string
+with a literal decimal point and exactly that many fractional places.
+See the [fixed text contract](docs/TEXT_FIXED.md) for exact float32 rounding.
 
 User functions take exactly their declared number of arguments, which may be
 scalars, arrays, strings, string lists, numeric maps, immutable tokenizers, or flat records, and return any of those types. `PRINT expression`
@@ -1320,6 +1330,7 @@ int        am_string_find(const AM_String* text, const AM_String* needle);
 int        am_string_codepoint(const AM_String* text, int index);
 AM_String* am_string_from_codepoint(int codepoint);
 AM_String* am_string_lower(const AM_String* text);
+AM_String* am_string_fixed(float value, int digits);
 int        am_codepoint_isalnum(int codepoint);
 
 // ─── Mutable string lists ───────────────────────────────────────────────
