@@ -42,6 +42,54 @@ static void fail(int mode, const char* source, const char* diagnostic) {
     CHECK(strstr(am_get_error(), diagnostic));
     CHECK(am_spawn_count() == 0);
 }
+static const char* malformed_await[] = {
+    "AWAIT first second INTO kept",
+    "AWAIT first second into kept",
+    "AWAIT INTO first kept",
+    "AWAIT first INTO INTO",
+    "AWAIT INTO INTO kept",
+    "AWAIT first INTO kept INTO extra",
+    "AWAIT first second INTO kept INTO kept",
+    "AWAIT first second third INTO kept",
+};
+static void test_await_syntax(void) {
+    for (size_t i = 0; i < sizeof(malformed_await) / sizeof(*malformed_await); i++) {
+        am_init(); am_persistent_mode(1);
+        CHECK(am_set_var_text("kept", "unchanged") == 0);
+        CHECK(am_set_var_text("INTO", "keyword-value") == 0);
+        // Finished but unjoined C jobs hold all slots except the program's two.
+        for (int j = 0; j < AM_MAX_SPAWNS - 2; j++) {
+            char name[32]; snprintf(name, sizeof(name), "held%d", j);
+            CHECK(am_spawn_launch(name, "return 0\n") >= 0);
+        }
+        char source[512];
+        snprintf(source, sizeof(source),
+            "SPAWN first:\n    return 'first-result'\n"
+            "SPAWN second:\n    return 'second-result'\n%s\n", malformed_await[i]);
+        void* program = am_program_open(source); CHECK(program);
+        CHECK(am_program_step(program, 2) == 0);
+        CHECK(am_spawn_launch("before_syntax", "return 0\n") < 0);
+        CHECK(am_program_step(program, 1) == 1);
+        char diagnostic[256]; snprintf(diagnostic, sizeof(diagnostic), "%s", am_get_error());
+        // Observe before close: syntax rejection must neither join nor consume
+        // either result. Slot exhaustion is independent of worker scheduling.
+        CHECK(am_spawn_launch("after_syntax", "return 0\n") < 0);
+        CHECK(strstr(diagnostic, "expected AWAIT name INTO variable"));
+        CHECK(am_program_close(program) != 0);
+        CHECK(strstr(am_get_error(), "expected AWAIT name INTO variable"));
+        CHECK(!strcmp(am_get_var_text("kept"), "unchanged"));
+        CHECK(!strcmp(am_get_var_text("INTO"), "keyword-value"));
+        // Error teardown now drains the program's children, leaving C owners
+        // intact and making the consumed program slots reusable.
+        AML_Var result = {0};
+        CHECK(am_spawn_launch("after_close", "return 7\n") >= 0);
+        CHECK(am_spawn_await_value("after_close", &result) == 0 && result.value == 7);
+        CHECK(am_spawn_await_value("held0", &result) == 0 && result.value == 0);
+        am_value_clear(&result);
+        CHECK(am_spawn_drain() == 0 && am_spawn_count() == 0);
+        am_persistent_mode(0);
+    }
+}
 static void test_errors(int mode) {
     am_init(); am_persistent_mode(1);
     CHECK(run(mode, "kept = 'unchanged'\n") == 0);
@@ -59,6 +107,16 @@ static void test_errors(int mode) {
     fail(mode, "SPAWN broken\n    return 1\n", "expected SPAWN");
     fail(mode, "SPAWN broken: trailing\n    return 1\n", "unexpected text");
     fail(mode, "SPAWN test:\n    return 1\nAWAIT test INTO\n", "expected AWAIT");
+    for (size_t i = 0; i < sizeof(malformed_await) / sizeof(*malformed_await); i++) {
+        char source[512];
+        snprintf(source, sizeof(source),
+            "kept = 'unchanged'\nINTO = 'keyword-value'\n"
+            "SPAWN first:\n    return 'first-result'\n"
+            "SPAWN second:\n    return 'second-result'\n%s\n", malformed_await[i]);
+        fail(mode, source, "expected AWAIT name INTO variable");
+        CHECK(!strcmp(am_get_var_text("kept"), "unchanged"));
+        CHECK(!strcmp(am_get_var_text("INTO"), "keyword-value"));
+    }
     fail(mode, "CHANNEL WRITE absent 1\n", "channel missing");
     fail(mode, "CHANNEL READ absent kept\n", "channel missing");
     fail(mode, "CHANNEL TRY absent kept\n", "channel missing");
@@ -232,6 +290,7 @@ int main(int argc, char** argv) {
         free(source); return rc;
     }
     CHECK(argc == 1);
+    test_await_syntax();
     for (int mode = 0; mode < 3; mode++) test_errors(mode);
     test_hosts(); test_tokenizer(); test_concurrent_hosts(); test_channel_close(); test_launch_failures();
     printf("AML_WORKER_RUNTIME_OK %d checks\n", checks); return 0;

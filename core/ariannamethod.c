@@ -6398,15 +6398,17 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
       snprintf(names, sizeof(names), "%s", arg ? arg : "");
       names[aml_comment_start(names) - names] = 0;
       char* tokens[AML_MAX_LINE_LEN / 2];
-      int count = 0, into = -1;
+      int count = 0, into = -1, into_count = 0;
       char* save = NULL;
       for (char* word = strtok_r(names, " \t", &save); word; word = strtok_r(NULL, " \t", &save)) {
         tokens[count] = word;
-        if (count == 1 && !strcasecmp(word, "INTO")) into = count;
+        if (!strcasecmp(word, "INTO")) { into = count; into_count++; }
         count++;
       }
       if (into >= 0) {
-        if (count != 3 || into != 1) { set_error_at(ctx, lineno, "expected AWAIT name INTO variable"); return; }
+        if (count != 3 || into != 1 || into_count != 1) {
+          set_error_at(ctx, lineno, "expected AWAIT name INTO variable"); return;
+        }
         const char* name = tokens[2];
         int valid = isalpha((unsigned char)*name) || *name == '_';
         for (const char* p = name; *p; p++) valid = valid && (isalnum((unsigned char)*p) || *p == '_');

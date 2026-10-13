@@ -82,6 +82,28 @@ the same worker ownership and registered NoTorch operations into compiled
 programs. See [workers](docs/WORKERS.md) and
 [parliament values](docs/PARLIAMENT_VALUES.md) for the executable contracts.
 
+### PR #36 follow-up — validate the whole AWAIT before joining
+
+The review found that `AWAIT first second INTO kept` treated its tokens as a
+plain worker list and consumed the first two results before reporting an error.
+The parser now recognizes every case-insensitive `INTO` token and requires
+exactly `name INTO variable`, with one `INTO`, before attempting any join.
+Misplaced or repeated markers preserve pending results and the destination.
+The program's later error teardown still drains its owned children.
+
+The regression first failed on the old parser: after the malformed statement,
+a new launch unexpectedly succeeded because earlier results had been consumed.
+Eight malformed forms now keep all 16 outstanding slots occupied until explicit
+program close, without timing assumptions. Closing then frees the program's
+slots while C-owned jobs remain retrievable. Interpreter, resumable and bytecode
+hosts also reject all eight forms with the syntax diagnostic and unchanged
+destinations, including a variable named `INTO`.
+
+`make test-workers` passes **1,679** runtime/C-host checks and **1,699** with
+allocation/thread-creation failure injection, plus the existing worker fixtures
+through all five execution paths. `git diff --check` passes. This follow-up
+changes only AWAIT syntax validation and its targeted regression coverage.
+
 ## 2026-10-13 — memory names its states (v5.10.0)
 
 Haiku's Phase4 transition memory names climate states with fixed decimal
