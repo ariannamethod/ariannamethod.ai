@@ -106,6 +106,142 @@ static void test_swap(void) {
     am_persistent_clear(); am_persistent_mode(0); CHECK(tracked_count == 0);
 #endif
 }
+static int equal_without_allocation(const AM_Record* left, const AM_Record* right) {
+#ifdef AML_RECORD_ALLOC_WRAP
+    CHECK(tracked_count == 0); allocation_budget = 1;
+#endif
+    int equal = am_record_equal(left, right);
+#ifdef AML_RECORD_ALLOC_WRAP
+    CHECK(allocation_budget == 1 && tracked_count == 0); allocation_budget = -1;
+#endif
+    return equal;
+}
+static void test_equal(void) {
+    AM_Record* empty = am_record_new(); CHECK(empty);
+    AM_Record* record = make_sample();
+    AM_Record* independent = make_sample();
+    CHECK(equal_without_allocation(NULL, NULL) == -1);
+    CHECK(equal_without_allocation(record, NULL) == -1);
+    CHECK(equal_without_allocation(NULL, record) == -1);
+    CHECK(equal_without_allocation(empty, empty) == 1);
+    CHECK(equal_without_allocation(record, empty) == 0);
+    CHECK(equal_without_allocation(record, record) == 1);
+    CHECK(equal_without_allocation(record, independent) == 1);
+    check_sample(record); check_sample(independent);
+    // Refcounts and container reserve capacity are not part of the value.
+    am_record_ref(independent);
+    AM_Map* map = leaf(independent, "map")->map;
+    for (int i = 0; i < 20; i++) {
+        char name[32]; snprintf(name, sizeof(name), "extra%d", i);
+        AM_String* key = am_string_new(name); CHECK(key);
+        CHECK(am_map_set(map, key, (float)i) == 0); am_string_free(key);
+    }
+    for (int i = 0; i < 20; i++) {
+        char name[32]; snprintf(name, sizeof(name), "extra%d", i);
+        AM_String* key = am_string_new(name); CHECK(key);
+        CHECK(am_map_delete(map, key) == 1); am_string_free(key);
+    }
+    CHECK(map->capacity != leaf(record, "map")->map->capacity);
+    CHECK(equal_without_allocation(record, independent) == 1);
+    am_record_free(independent); am_record_free(independent);
+
+    for (int change = 0; change < 12; change++) {
+        AM_Record* other = am_record_clone(record); CHECK(other);
+        AML_Var value = {.type = AML_TYPE_STRING};
+        if (change == 0 || change == 1 || change == 2) {
+            value.string = am_string_new(change == 0 ? "" : "rain\nשלומ"); CHECK(value.string);
+            CHECK(put(other, change == 2 ? "scalar" : "string", &value) == 0);
+            release_leaf(&value);
+        } else if (change == 3 || change == 4) {
+            AM_Array* array = leaf(other, "array")->array;
+            array->rows = change == 3 ? 3 : 0; array->cols = change == 3 ? 2 : 0;
+        } else if (change == 5) {
+            value.type = AML_TYPE_ARRAY; value.array = am_array_new(5); CHECK(value.array);
+            CHECK(put(other, "array", &value) == 0); release_leaf(&value);
+        } else if (change == 6 || change == 7 || change == 8) {
+            AM_List* list = leaf(other, "list")->list;
+            AM_String* text = am_string_new(change == 6 ? "é" : ""); CHECK(text);
+            if (change == 6) CHECK(am_list_set(list, 1, text) == 0);
+            else if (change == 7) CHECK(am_list_push(list, text) == 4);
+            else {
+                CHECK(am_list_set(list, 0, list->items[1]) == 0);
+                CHECK(am_list_set(list, 1, text) == 0);
+            }
+            am_string_free(text);
+        } else if (change == 9 || change == 10) {
+            map = leaf(other, "map")->map;
+            AM_String* key = am_string_new("first"); CHECK(key);
+            CHECK(am_map_delete(map, key) == 1);
+            if (change == 9) CHECK(am_map_set(map, key, 1) == 0);
+            am_string_free(key);
+        } else {
+            value.type = AML_TYPE_FLOAT; value.value = 0;
+            CHECK(put(other, "extra", &value) == 0);
+        }
+        CHECK(equal_without_allocation(record, other) == 0);
+        CHECK(equal_without_allocation(other, record) == 0);
+        check_sample(record); am_record_free(other);
+    }
+    const char* fields[] = {"scalar", "string", "array", "list", "map"};
+    for (int reordered = 0; reordered < 2; reordered++) {
+        AM_Record* other = am_record_new(); CHECK(other);
+        for (int i = 0; i < 5; i++) {
+            const char* field = fields[reordered ? 4 - i : i];
+            CHECK(put(other, !reordered && i == 0 ? "Scalar" : field, leaf(record, field)) == 0);
+        }
+        CHECK(equal_without_allocation(record, other) == 0); am_record_free(other);
+    }
+    am_record_free(empty); am_record_free(record);
+
+    // Distinct float32 representations must stay distinct in all numeric leaves.
+    const uint32_t bits[] = {0, 0x80000000, 0x3f800000, 0x3f800001, 1, 0x80000001,
+                             0x7f800000, 0xff800000, 0x7fc12345, 0x7fc12346, 0xffc12345,
+                             0x7f812345, 0xff812345};
+    for (int kind = 0; kind < 3; kind++) {
+        AM_Record* left = am_record_new(); AM_Record* right = am_record_new(); CHECK(left && right);
+        AML_Var value = {.type = AML_TYPE_FLOAT};
+        AM_String* key = am_string_new("v"); CHECK(key);
+        if (kind == 1) { value.type = AML_TYPE_ARRAY; value.array = am_array_new(1); CHECK(value.array); }
+        if (kind == 2) {
+            value.type = AML_TYPE_MAP; value.map = am_map_new(); CHECK(value.map);
+            CHECK(am_map_set(value.map, key, 0) == 0);
+        }
+        CHECK(am_record_set(left, key, &value) == 0 && am_record_set(right, key, &value) == 0);
+        release_leaf(&value);
+        int count = kind == 2 ? 6 : (int)(sizeof(bits) / sizeof(*bits));
+        for (int i = 0; i < count; i++) {
+            for (int j = 0; j < count; j++) {
+                if (kind == 0) {
+                    value.type = AML_TYPE_FLOAT; memcpy(&value.value, &bits[i], sizeof(float));
+                    CHECK(am_record_set(left, key, &value) == 0);
+                    memcpy(&value.value, &bits[j], sizeof(float));
+                    CHECK(am_record_set(right, key, &value) == 0);
+                } else {
+                    const AML_Var* a = am_record_get(left, key); const AML_Var* b = am_record_get(right, key);
+                    float* av = kind == 1 ? a->array->data : &a->map->entries[0].value;
+                    float* bv = kind == 1 ? b->array->data : &b->map->entries[0].value;
+                    memcpy(av, &bits[i], sizeof(float)); memcpy(bv, &bits[j], sizeof(float));
+                }
+                CHECK(equal_without_allocation(left, right) == (i == j));
+            }
+        }
+        am_string_free(key); am_record_free(left); am_record_free(right);
+    }
+#ifdef AML_RECORD_ALLOC_WRAP
+    am_init(); am_persistent_mode(1);
+    CHECK(am_exec("left = record_new()\nrecord_set(left, 'v', 1)\nright = record_clone(left)\nanswer = 0\n") == 0);
+    void* program = am_program_open("answer = record_equal(left, right)\nsentinel = 1\n"); CHECK(program);
+    allocation_budget = 1;
+    int finished = am_program_step(program, 1);
+    CHECK(allocation_budget == 1 && tracked_count == 0); allocation_budget = -1;
+    CHECK(finished == 0);
+    while (!am_program_step(program, 1)) {}
+    CHECK(am_program_close(program) == 0 && am_get_var_float("answer") == 1);
+    CHECK(leaf(am_get_var_record("left"), "v")->value == 1);
+    CHECK(leaf(am_get_var_record("right"), "v")->value == 1);
+    am_persistent_clear(); am_persistent_mode(0); CHECK(tracked_count == 0);
+#endif
+}
 static void test_persistent(void) {
     am_init(); am_persistent_mode(1);
     AM_Record* record = make_sample(); CHECK(am_set_var_record("saved", record) == 0);
@@ -153,6 +289,6 @@ static void test_allocations(void) {
 #endif
 }
 int main(void) {
-    am_init(); test_ownership(); test_types_and_limits(); test_swap(); test_persistent(); test_allocations();
+    am_init(); test_ownership(); test_types_and_limits(); test_swap(); test_equal(); test_persistent(); test_allocations();
     printf("AML_RECORD_API_OK %d checks\n", checks); return 0;
 }

@@ -208,6 +208,16 @@ r. `record_get(r, key)` retains the typed leaf; `record_has` returns 0/1;
 worker snapshots also copy records, while function parameters retain shared
 owners. Existing leaf assignment semantics remain unchanged.
 
+`record_equal(left, right)` returns 1 exactly when both flat records have the
+same ordered key bytes, leaf types and contents; otherwise it returns 0.
+Array length and shape, list item order and map insertion order are part of
+the value. Text compares exact UTF-8 bytes without normalization. All numbers
+compare by float32 representation: signed zeros differ, identical NaN bit
+patterns compare equal, and different payloads differ. Allocation capacity,
+reference counts and pointer identity are ignored. The comparison allocates
+nothing and changes no logical values; CUDA array reads synchronize CPU mirrors.
+Wrong types or arity are errors and leave a failed assignment unchanged.
+
 `record_replace(live, checked)` stages an independent complete copy, then
 replaces live contents and returns live. Failed staging leaves all old fields
 intact. `record_swap(a, b)` exchanges only contents, allocates nothing, returns

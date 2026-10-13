@@ -43,7 +43,7 @@ static void test_failures(int mode) {
                         "assert(list_len(record_keys(state)) == 1, 'bad call added a field')\n") == 0);
     }
     const char* reserved[] = {"record_new", "record_set", "record_get", "record_has", "record_keys",
-                              "record_kind", "record_clone", "record_replace", "record_swap", "checkpoint_save",
+                              "record_kind", "record_clone", "record_equal", "record_replace", "record_swap", "checkpoint_save",
                               "checkpoint_load", "file_exists", "tokenizer_identity"};
     for (size_t i = 0; i < sizeof(reserved) / sizeof(reserved[0]); i++) {
         char source[256]; snprintf(source, sizeof(source), "def %s():\n    return 0\n", reserved[i]);

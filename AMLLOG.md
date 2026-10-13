@@ -104,6 +104,38 @@ allocation/thread-creation failure injection, plus the existing worker fixtures
 through all five execution paths. `git diff --check` passes. This follow-up
 changes only AWAIT syntax validation and its targeted regression coverage.
 
+### Completion identity — exact flat-record equality
+
+`record_equal(left, right)` and C `am_record_equal` compare the complete ordered
+record value without allocation: field names, leaf types, text bytes, array
+lengths and shapes, list order, ordered map keys and numeric contents. Every
+float compares by its binary32 bits. Signed zeros, one-ULP differences and NaN
+payloads stay distinct; identical NaN representations compare equal. Capacity,
+reference counts and pointer identity do not affect equality. The comparison
+preserves logical values and synchronizes CUDA CPU mirrors when needed.
+
+Haiku can use this generic boundary to bind a worker completion to its full
+prepared experience. It requires neither a rounded decimal digest nor writing
+a checkpoint to compare values. Schema and publication remain application code.
+C returns 1/0 and rejects NULL with -1; AML rejects wrong types and arity before
+replacing a destination. The intrinsic is case-insensitive and reserved.
+
+The old runner rejected the first equality fixture before this primitive was
+added. `make test-records` now passes **2,358** C API checks, **4,267** with
+allocation tracking, and **953** runtime checks. Numeric negative controls
+compare all pairs of 13 scalar/array patterns (including positive/negative zero,
+subnormals, infinities and quiet/signaling NaN payloads), plus six finite map
+patterns. Further controls cover field/type/key changes, shapes, all container
+orders, UTF-8 bytes and different reserve capacities. C calls and an AML call
+with bound arguments leave the allocation budget untouched.
+
+The expanded source fixture passes through interpreter, resumable, bytecode,
+CLI and compiled scalar paths. All **62** invalid record calls, including nine
+new equality argument failures, stop before later AML/C effects in all five
+paths and preserve failed-assignment destinations in the persistent hosts.
+Existing checkpoint ownership, wire, allocation and I/O gates in this targeted
+suite also pass. `git diff --check` passes; no whole-language rerun was needed.
+
 ## 2026-10-13 — memory names its states (v5.10.0)
 
 Haiku's Phase4 transition memory names climate states with fixed decimal
