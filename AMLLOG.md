@@ -12,6 +12,60 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-10-13 — memory names its states (v5.10.0)
+
+Haiku's Phase4 transition memory names climate states with fixed decimal
+coordinates. `text_fixed(value, digits)` and C `am_string_fixed(float, int)`
+format a finite float32 at precision 0–9. The sign survives negative zero and
+rounding to zero. Digits use nearest rounding with ties to even, a literal
+decimal point, fixed fractional width and no exponent notation.
+
+The formatter decodes binary32 and scales its significand with exact integer
+arithmetic. A 45-bit product handles every rounding decision; five 32-bit
+limbs hold the largest scaled magnitude. Locale and floating-point rounding
+mode never enter the conversion, and exception flags remain unchanged. Two
+checked allocations publish one immutable text owner. Invalid arguments and
+allocation refusal preserve a failed assignment's previous value.
+
+The growing organism also crossed the old 111-user-function capacity. An
+actual 112-helper program failed during preparation at the 112th definition,
+before its leading PRINT. The shared table now has 256 slots, including the
+17 builtins: all 239 user helpers remain callable. On Linux x86_64 this adds
+38,912 bytes per function table; `AML_ExecCtx` occupies 461,544 bytes. Prepared
+programs retain heap contexts and ordinary/bytecode calls retain stack contexts.
+The measured integrated Haiku program fits the unchanged 4,096-line budget.
+
+Proof on Linux x86_64 / GCC 13.3:
+
+- `make test-text-fixed`: **44,717** direct API checks, **54,960** checks with
+  allocation refusal, **1,391** runtime checks. The **620** frozen Python
+  fixtures cover subnormal/normal boundaries, signed zeros, neighbouring
+  decimal thresholds, half ties, integer carry and both finite extrema.
+- All four standard floating-point rounding modes preserve their mode and
+  preexisting exception flags. A privately generated German comma-decimal
+  locale still produces the same dot-decimal output.
+- Interpreter, prepared stepping, bytecode, runner and compiled scalar paths
+  agree on every fixture byte. **26** invalid programs fail before later AML
+  effects or C main, preserving previous destinations and aliases.
+- Direct refusal of either string allocation leaks no owner. Persistent
+  execution sweeps refuse **6/7/8** budgets in interpreter/prepared/bytecode
+  paths before complete success, with zero tracked survivors after cleanup.
+- All five execution paths call every helper in **112**- and **239**-definition
+  programs; **240** definitions fail before effects. A 239-helper worker and
+  immutable text snapshots pass.
+- `tools/verify_text_fixed.py` compares **107,970** values directly with Python
+  formatting of exactly promoted binary32 numbers: every finite exponent,
+  both signs, all ten precisions and deterministic random bits. Frozen fixture
+  regeneration is byte-identical.
+- API and runtime gates pass ASan/UBSan, including the enlarged worker
+  context. Leak detection is disabled on this host; allocation-wrapped gates
+  independently prove zero tracked survivors. Existing **550/550** baseline,
+  **1,017** import checks, text ownership/worker gates and compiler suites pass.
+
+See [fixed decimal text](docs/TEXT_FIXED.md) for the complete contract and
+oracle commands. The primitive is standalone core code; no dependency is
+added to the language or to Haiku.
+
 ## 2026-10-08 — words keep their order (v5.9.0)
 
 Haiku's word-cloud rings need lexical traversal independent of insertion order.

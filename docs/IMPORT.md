@@ -65,11 +65,18 @@ The bytecode path uses the prepared function table once and advances past alread
 | Nested import edges from root | 16 (`AML_MAX_IMPORT_DEPTH`) |
 | Expanded executable/source-boundary lines | 4096 (`AML_MAX_LINES`) |
 | Nonblank, noncomment line content after indentation | 255 bytes plus NUL (`AML_MAX_LINE_LEN`) |
-| Function table | 128 entries, including 17 current registered builtins: 111 user definitions |
+| Function table | 256 entries, including 17 current registered builtins: 239 user definitions |
 | Function name and parameter name | 31 bytes plus NUL |
 | Parameters per function | 8 |
 
 Whole-line comments and blank lines do not consume expanded line slots. Import boundaries do consume slots. The root `amlc` frontend accepts 4096 directives; imported runtime sources share the expanded 4096-line budget. These budgets fail explicitly instead of dropping trailing lines or definitions. The expanded budgets accommodate Haiku's combined memory, English form, and generator modules.
+
+Rebuild C hosts together with the updated runtime: `AML_Functab` and
+`AML_ExecCtx` contain the enlarged function table. On Linux x86_64, the extra
+128 slots add 38,912 bytes per table; an execution context occupies 461,544
+bytes. Resumable programs own their context on the heap; ordinary and bytecode
+execution retain their existing stack context. A 239-function worker is part
+of the fixed-text capacity gate.
 
 ## Verification
 

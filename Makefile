@@ -21,7 +21,7 @@ ifdef BLAS
   endif
 endif
 
-.PHONY: all test test-amlc test-expressions test-imports test-text test-text-lower test-text-input test-tokenizer test-records test-lists test-maps test-sampling test-numerical test-janus janus clean test-all test-blas amlc runner install notorch install-notorch
+.PHONY: all test test-amlc test-expressions test-imports test-text test-text-lower test-text-fixed test-text-input test-tokenizer test-records test-lists test-maps test-sampling test-numerical test-janus janus clean test-all test-blas amlc runner install notorch install-notorch
 
 # ═══ Core AML ═══
 all: libaml.a runner amlc
@@ -124,6 +124,9 @@ test-text: all
 
 test-text-lower: all
 	bash tests/test_aml_text_lower.sh
+
+test-text-fixed: all
+	bash tests/test_aml_text_fixed.sh
 
 test-text-input: all
 	bash tests/test_aml_text_input.sh

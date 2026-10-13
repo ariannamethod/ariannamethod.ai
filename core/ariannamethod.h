@@ -292,7 +292,7 @@ typedef struct {
 #define AML_MAX_LINE_LEN    256
 #define AML_MAX_VARS        256
 #define AML_MAX_NAME        32
-#define AML_MAX_FUNCS       128   // total slots, including registered builtins
+#define AML_MAX_FUNCS       256   // total slots, including registered builtins
 #define AML_MAX_PARAMS      8
 #define AML_MAX_CALL_DEPTH  16
 #define AML_MAX_INCLUDE     8
@@ -343,6 +343,10 @@ AM_String* am_string_from_codepoint(int codepoint);
 // Unicode 15.0 default lowercase, including expansions and contextual sigma.
 // Returns a fresh owned string, or NULL on invalid input, limit, or allocation.
 AM_String* am_string_lower(const AM_String* text);
+// Finite binary32 -> fixed decimal text, 0..9 fractional digits, nearest with
+// ties to even. Preserves negative zero; independent of locale/rounding mode.
+// Returns a fresh owner or NULL for invalid input or allocation failure.
+AM_String* am_string_fixed(float value, int digits);
 // Unicode 15 Letter/Number membership. Returns -1 for a non-scalar codepoint.
 // U+0000 is a scalar and returns zero; strings retain their no-NUL domain.
 int am_codepoint_isalnum(int codepoint);
