@@ -486,7 +486,25 @@ typedef struct {
 } AM_NumericalBackend;
 
 void am_set_numerical_backend(const AM_NumericalBackend* backend);
-// Optional NoTorch bridge: register sampling, numerical values, and tokenizers.
+
+// Separate optional parliament table preserves the original numerical table's
+// C ABI. Each callback is checked only when invoked. Registration copies the
+// table; configure before execution and keep callback code loaded, as above.
+typedef struct {
+    int (*parliament_elect)(const float* votes, const float* resonance,
+                            const float* alive, int experts, int minimum,
+                            float consensus, float* out);
+    int (*parliament_inject)(const float* a, const float* b, const float* gates,
+                             const float* x, int experts, int dim, int rank,
+                             float alpha, float* out);
+    int (*oja)(const float* a, const float* b, const float* x, const float* dy,
+               const float* noise, int dim, int rank, int cursor, int window,
+               float lr, float signal, float* out);
+} AM_ParliamentBackend;
+
+void am_set_parliament_backend(const AM_ParliamentBackend* backend);
+// Optional NoTorch bridge: register sampling, numerical values, tokenizers,
+// and the separately registered parliament table.
 void am_use_notorch(void);
 
 typedef struct {
@@ -595,6 +613,7 @@ typedef struct {
     AM_Tokenizer* return_tokenizer;  // owned immutable tokenizer return value
     AM_Record*   return_record;     // owned flat record return value
     int          return_type;       // AML_TYPE_* value tag
+    uint64_t     spawn_owner;       // children belong to this execution context
 } AML_ExecCtx;
 
 // AM_State field map entry (for reading state in expressions)
@@ -1085,7 +1104,8 @@ int  am_is_training(void);
 // ═══════════════════════════════════════════════════════════════════════════════
 // ASYNC (v4.0 Phase 4) — SPAWN/AWAIT/CHANNEL
 // pthreads-based parallel execution. Each SPAWN gets its own AML_ExecCtx
-// with a snapshot of globals. Channels provide thread-safe communication.
+// with owned globals, visible locals, source and function definitions. The
+// process field and tape stay shared; records/arrays carry worker-owned state.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #ifndef AM_ASYNC_DISABLED
@@ -1118,16 +1138,24 @@ typedef struct {
 int  am_spawn_launch(const char* name, const char* script);
 // Failed joins transfer the worker's diagnostic to this thread's am_get_error().
 int  am_spawn_await(const char* name);
+// Transfer a returned value exactly once. `out` must be zero-initialized or own
+// a valid AML value. On failure it is unchanged; success replaces it. A worker
+// without an explicit return fails this call. Release with am_value_clear().
+int  am_spawn_await_value(const char* name, AML_Var* out);
+void am_value_clear(AML_Var* value);
+// Drain this C thread's directly launched workers, preserving the first error.
+int  am_spawn_drain(void);
 void am_spawn_await_all(void);
 int  am_spawn_count(void);
 
 // Channel API
 int  am_channel_create(const char* name, int capacity);
 int  am_channel_write(const char* name, float value);
-int  am_channel_read(const char* name, float* out);      // polls 1000 x 1ms if empty: ~2s wall in practice
-int  am_channel_try_read(const char* name, float* out);  // non-blocking: -1 at once if empty
+int  am_channel_read(const char* name, float* out);      // bounded condition wait, at most 1 second
+int  am_channel_try_read(const char* name, float* out);  // -1 empty; -2 missing/closed
 int  am_channel_depth(const char* name);                 // queued values; -1 if no such channel
 int  am_channel_count(void);
+int  am_channel_close(const char* name);                // wakes readers/writers
 void am_channel_close_all(void);
 
 #endif // AM_ASYNC_DISABLED

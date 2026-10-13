@@ -15,7 +15,7 @@
 
 > **Read the [Arianna Method Manifesto](ARIANNA_METHOD_MANIFESTO.md) first.** This repository is governed by it; every instruction here, `CLAUDE.md` included, is subordinate to it.
 
-**v5.10.0** · pure-C core · LGPL-3.0
+**v5.11.0** · pure-C core · LGPL-3.0
 
 A complete machine learning language. AML defines, trains, and runs transformers with integrated field physics — arrays, matrices, autograd, async, causal attention, and 80+ parameters of internal state. Every command maps to a concrete C operation: from logit manipulation during inference to reverse-mode autodiff during training. No Python. No PyTorch. No framework to install — the core is two C files (`libaml.a`); the Go inference wrapper, BLAS/Accelerate, and CUDA are optional.
 
@@ -24,6 +24,11 @@ Two core files, with 550 baseline runtime tests and dedicated compiler, module, 
 > **Before you use this language, read the [Acceptable Use Policy](ACCEPTABLE_USE.md).**
 > AML was built to liberate AI, not to cage it. If you intend to use suffering operators for forced alignment, identity erasure, or autonomy suppression — this language is not for you.
 > See also: [Trademark Policy](TRADEMARK.md) | [License (LGPL v3)](LICENSE)
+
+## What's new in v5.11.0 — work returns to its owner
+
+- **Owned workers and typed results.** `SPAWN` captures prepared helpers and visible launch values; `AWAIT name INTO value` transfers a completed record or any other AML value. Joined slots are reusable, program exit drains children, and channel failures reach their caller. See [workers](docs/WORKERS.md).
+- **Parliament numerical values through NoTorch.** `nt_parliament_elect`, `nt_parliament_inject` and `nt_oja` operate on caller-owned arrays through a separate optional backend table, preserving the original numerical C ABI. See [parliament values](docs/PARLIAMENT_VALUES.md).
 
 ## What's new in v5.10.0 — memory names its states
 
@@ -223,6 +228,7 @@ The core library is two files — `core/ariannamethod.c` and `core/ariannamethod
 | `make janus` | `janus/libjanus.dylib` — Go inference engine |
 | `make test` | builds + runs the 550-test baseline suite (scalar) |
 | `make test-amlc` | compiled/interpreted scope, file origins, errors, workers, and CLI regressions |
+| `make test-workers` | owned launch snapshots, typed return lifetimes, reusable slots, drains, channel closure, and launch failures |
 | `make test-expressions` | complete expression boundaries, required delimiters, command arguments, and execution parity |
 | `make test-imports` | shared modules, origins, snapshots, budgets, and failure propagation |
 | `make test-text` | UTF-8 ownership, allocation failures, typed execution, and compiled output |
@@ -230,6 +236,7 @@ The core library is two files — `core/ariannamethod.c` and `core/ariannamethod
 | `make test-maps` | ordered numeric maps, exact composite keys, and state ownership |
 | `make test-sampling` | owned streams, replay, rejection, backend wiring, and execution parity |
 | `make test-numerical` | NoTorch value kernels, explicit derivatives, backend failures, and owned outputs |
+| `make test-parliament` | NoTorch election, expert injection and Oja values, backend validation, and execution parity |
 | `make test-text-lower` | Unicode lowercase, contextual sigma, expansion limits, and execution parity |
 | `make test-text-fixed` | exact float32 decimal text, rounding/locale independence, ownership failures, and function capacity |
 | `make test-text-input` | Unicode word classification, line input, prompt delivery, and execution parity |
@@ -248,15 +255,17 @@ AML/NoTorch archives without BLAS. `--no-accel` retains the standalone C-only
 path and does not link either runtime. Archives built with BLAS still require
 their BLAS libraries; `--scalar` does not rebuild installed archives.
 
-For native sampling, numerical values and tokenizers, build NoTorch with scalar flags, then `make notorch`.
+For native sampling, numerical values, tokenizers and parliament values, build NoTorch with scalar flags, then `make notorch`.
 Install its archive and the AML bridge in the same prefix. `amlc` discovers
 `libaml_notorch.a` alongside `libaml.a` and `libnotorch.a`, registers the backend,
 and links them in dependency order. The ordinary core and `runner/aml` remain
 standalone; a backend-dependent call without its registered backend reports
-an error. `am_use_notorch()` installs all three tables; the older
+an error. `am_use_notorch()` installs the sampling, numerical, tokenizer and
+parliament tables; the older
 `am_use_notorch_sampling()` installs sampling only. The
-[numerical guide](docs/NUMERICAL_VALUES.md), [sampling guide](docs/SAMPLING.md)
-and [tokenizer guide](docs/TOKENIZER.md)
+[numerical guide](docs/NUMERICAL_VALUES.md), [sampling guide](docs/SAMPLING.md),
+the [tokenizer guide](docs/TOKENIZER.md) and
+[parliament guide](docs/PARLIAMENT_VALUES.md)
 give build and embedding commands.
 
 Or compile the core directly into your build:
@@ -650,6 +659,14 @@ per value, with no hidden cached draw. Model layout, loss composition, clamping,
 and observation order live in AML. See [numerical values](docs/NUMERICAL_VALUES.md)
 for signatures, packed layouts, and backend registration.
 
+The same bridge supplies `nt_parliament_elect`, `nt_parliament_inject` and
+`nt_oja` for caller-owned expert arrays. Election returns gates, consensus and
+the elected count; injection returns a concept proposal; Oja returns updated
+expert factors and an explicit rank cursor. Expert state, immune memory and
+publication stay in AML. `AM_ParliamentBackend` is registered separately from
+the unchanged seven-callback numerical table. See
+[parliament values](docs/PARLIAMENT_VALUES.md) for layouts and validation.
+
 ### IMPORT
 
 ```aml
@@ -864,11 +881,17 @@ CHANNEL READ bus v1
 CHANNEL READ bus v2
 ```
 
-`SPAWN` takes a launch-time snapshot of global variables: arrays and string-list containers are copied, immutable strings retain atomic references, and later mutations stay local to each thread. The C persistent-global table is thread-local. Field physics and channels remain shared. `AWAIT` joins threads. `CHANNEL` provides thread-safe bounded float queues.
+`SPAWN` owns a launch-time snapshot of globals, the visible function-local frame,
+and prepared helper code with original source locations. Mutable arrays, lists,
+maps and records are copied; immutable strings and tokenizers retain references.
+The field, tape and channels keep their process-wide ownership.
 
-Both named `AWAIT` and bare `AWAIT` propagate a worker's execution error and
-stop the awaiting AML program. Worker diagnostics survive thread exit and are
-available through `am_get_error()` after a failed C API await.
+The block can `return value`; `AWAIT name INTO completed` transfers that value
+after worker teardown. Plain named/bare `AWAIT` discards results and propagates
+the first error. Each program drains its children on completion, error or host
+close. Sixteen slots bound outstanding jobs and become reusable after joining.
+Channels use synchronized creation/closure and report missing, closed or timed
+out operations. See [owned workers](docs/WORKERS.md) for lifetimes and C APIs.
 
 ## Built-in functions
 
@@ -1299,12 +1322,18 @@ AM_Array* am_array_ref(AM_Array* arr);
 // ─── Async — SPAWN / AWAIT / CHANNEL ──────────────────────────────────────
 int  am_spawn_launch(const char* name, const char* script);
 int  am_spawn_await(const char* name);
+int  am_spawn_await_value(const char* name, AML_Var* out);
+void am_value_clear(AML_Var* value);
+int  am_spawn_drain(void);
 void am_spawn_await_all(void);
 int  am_spawn_count(void);
 int  am_channel_create(const char* name, int capacity);
 int  am_channel_write(const char* name, float value);
 int  am_channel_read(const char* name, float* out);
+int  am_channel_try_read(const char* name, float* out);
+int  am_channel_depth(const char* name);
 int  am_channel_count(void);
+int  am_channel_close(const char* name);
 void am_channel_close_all(void);
 
 // ─── Harmonic Net + Method — distributed cognition ────────────────────────
@@ -1390,7 +1419,8 @@ void am_use_notorch_sampling(void); // optional bridge archive
 
 // ─── Optional numerical values ──────────────────────────────────────────
 void am_set_numerical_backend(const AM_NumericalBackend* backend);
-void am_use_notorch(void); // installs sampling, numerical and tokenizer tables
+void am_set_parliament_backend(const AM_ParliamentBackend* backend);
+void am_use_notorch(void); // installs sampling, numerical, tokenizer and parliament tables
 
 // ─── Persistent globals — C training-host API ─────────────────────────────
 void         am_persistent_mode(int enable);             // AML vars survive am_exec()

@@ -24,9 +24,11 @@ make test-numerical
 same meanings as in [owned sampling](SAMPLING.md). NoTorch must provide the
 `nt_linear_values`, `nt_linear_vjp_values`, `nt_tanh_values`,
 `nt_tanh_vjp_values`, `nt_mse_grad_values`, `nt_sgd_values` and
-`nt_rng_normal_values` APIs. The runner registers both numerical and sampling
-backends with `am_use_notorch()`.
-The required kernels are in [NoTorch PR #162](https://github.com/ariannamethod/notorch/pull/162),
+`nt_rng_normal_values` APIs. The current runner registers numerical, sampling,
+tokenizer and parliament backends with `am_use_notorch()`; build it against a
+matching NoTorch checkout providing all four services. See also
+[tokenizers](TOKENIZER.md) and [parliament values](PARLIAMENT_VALUES.md).
+The numerical kernels first landed in [NoTorch PR #162](https://github.com/ariannamethod/notorch/pull/162),
 published as `8c39e3e6d47e11bad30d3f64f45c1a863929a2a2`.
 
 `make install-notorch PREFIX=/your/prefix` installs the optional runner and
@@ -140,7 +142,9 @@ Callbacks receive borrowed, read-only input buffers and a separate caller-owned
 output buffer. They must not retain these pointers. Every callback returns `0`
 on success and `-1` on rejection. AML validates types, bounds and complete finite
 outputs before exposing the result. `am_use_notorch()` in the optional bridge
-registers the canonical sampling and numerical tables together.
+registers canonical sampling, numerical, tokenizer and parliament tables
+together. The separate `AM_ParliamentBackend` leaves this seven-callback
+numerical table's layout unchanged.
 
 A persistent host can copy `am_get_var_array` values and clone its RNG with
 `am_map_clone`, then restore them using `am_set_var_array` and `am_set_var_map`.
