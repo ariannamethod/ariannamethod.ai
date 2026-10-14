@@ -3806,7 +3806,7 @@ static int aml_record_function(const char* name) {
 
 static int aml_scalar_intrinsic_function(const char* name) {
     return strcasecmp(name, "assert") == 0 || strcasecmp(name, "floor") == 0 ||
-           strcasecmp(name, "isfinite") == 0;
+           strcasecmp(name, "isfinite") == 0 || strcasecmp(name, "utc_day") == 0;
 }
 
 static int aml_sampling_function(const char* name) {
@@ -4328,6 +4328,21 @@ static int aml_map_dispatch(AML_ExecCtx* ctx, const char* name, AML_Var* args,
 
 static int aml_scalar_intrinsic_dispatch(AML_ExecCtx* ctx, const char* name,
                                          AML_Var* args, int nargs, AML_Var* out) {
+    if (!strcasecmp(name, "utc_day")) {
+        if (nargs != 0) { set_error(ctx, "utc_day requires no arguments"); return 1; }
+        time_t now = time(NULL);
+        if (now == (time_t)-1) {
+            set_error(ctx, "utc_day could not read the system clock"); return 1;
+        }
+        // Keep epoch seconds out of float32: round only the final UTC ordinal.
+        // Every integral day in this bounded range is exactly representable.
+        double day = floor((double)now / 86400.0);
+        if (!isfinite(day) || day < -16777216.0 || day > 16777216.0) {
+            set_error(ctx, "utc_day exceeds the exact scalar day range"); return 1;
+        }
+        out->value = (float)day;
+        return 0;
+    }
     if (!strcasecmp(name, "isfinite")) {
         if (nargs != 1) { set_error(ctx, "isfinite requires exactly one argument"); return 1; }
         if (args[0].type != AML_TYPE_FLOAT) {
@@ -6901,7 +6916,7 @@ static int aml_reserved_function(const char* name) {
         "list_new", "list_len", "list_get", "list_push", "list_set", "list_find",
         "list_slice", "list_clone", "list_sorted", "list_key",
         "map_new", "map_len", "map_has", "map_get", "map_set", "map_delete",
-        "map_keys", "map_clone", "assert", "floor", "isfinite", "rng_new", "rng_uniform",
+        "map_keys", "map_clone", "assert", "floor", "isfinite", "utc_day", "rng_new", "rng_uniform",
         "rng_index", "rng_categorical", "categorical_at", "nt_linear", "nt_linear_vjp",
         "nt_tanh", "nt_tanh_vjp", "nt_mse_grad", "nt_sgd", "rng_normal",
         "nt_parliament_elect", "nt_parliament_inject", "nt_oja",

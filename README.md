@@ -15,7 +15,7 @@
 
 > **Read the [Arianna Method Manifesto](ARIANNA_METHOD_MANIFESTO.md) first.** This repository is governed by it; every instruction here, `CLAUDE.md` included, is subordinate to it.
 
-**v5.12.0** · pure-C core · LGPL-3.0
+**v5.13.0** · pure-C core · LGPL-3.0
 
 A complete machine learning language. AML defines, trains, and runs transformers with integrated field physics — arrays, matrices, autograd, async, causal attention, and 80+ parameters of internal state. Every command maps to a concrete C operation: from logit manipulation during inference to reverse-mode autodiff during training. No Python. No PyTorch. No framework to install — the core is two C files (`libaml.a`); the Go inference wrapper, BLAS/Accelerate, and CUDA are optional.
 
@@ -24,6 +24,10 @@ Two core files, with 550 baseline runtime tests and dedicated compiler, module, 
 > **Before you use this language, read the [Acceptable Use Policy](ACCEPTABLE_USE.md).**
 > AML was built to liberate AI, not to cage it. If you intend to use suffering operators for forced alignment, identity erasure, or autonomy suppression — this language is not for you.
 > See also: [Trademark Policy](TRADEMARK.md) | [License (LGPL v3)](LICENSE)
+
+## What's new in v5.13.0 — a day belongs to its experience
+
+- **Explicit UTC civil days.** `utc_day()` samples the system clock once and returns an exact day ordinal from 1970-01-01. An organism can capture that value in a request and carry it into workers and checkpoints. UTC midnight defines the boundary; the global field stays unchanged. See [UTC day values](docs/UTC_DAY.md).
 
 ## What's new in v5.12.0 — immutable bodies enter the language
 
@@ -236,6 +240,7 @@ The core library is two files — `core/ariannamethod.c` and `core/ariannamethod
 | `make test-amlc` | compiled/interpreted scope, file origins, errors, workers, and CLI regressions |
 | `make test-workers` | owned launch snapshots, typed return lifetimes, reusable slots, drains, channel closure, and launch failures |
 | `make test-expressions` | complete expression boundaries, required delimiters, command arguments, and execution parity |
+| `make test-utc-day` | UTC midnight, leap days, signed day bounds, clock failures, captured workers, and execution parity |
 | `make test-imports` | shared modules, origins, snapshots, budgets, and failure propagation |
 | `make test-text` | UTF-8 ownership, allocation failures, typed execution, and compiled output |
 | `make test-lists` | string-list ownership, mutation, worker snapshots, allocation failures, and execution parity |
@@ -450,6 +455,14 @@ parentheses/brackets. Unsupported operators, trailing tokens, and incomplete
 expressions stop execution. `#` comments outside quoted strings and the final
 `:` in `if`/`while` remain statement boundaries. For a remainder, use
 `x - floor(x / divisor) * divisor`; `%` is unsupported.
+
+`utc_day()` returns the current UTC civil day as `floor(POSIX_seconds / 86400)`:
+1970-01-01 is day zero. It reads the clock once, keeps seconds at double precision,
+and returns an exact float32 integer in `[-16777216, 16777216]`. Clock failure,
+an exceeded range, or arguments stop execution explicitly. Capture the value
+once when preparing an experience and pass it to workers as ordinary data.
+The operation leaves `AM_State` and the global calendar controls unchanged;
+it consumes no user function slot. See [UTC day values](docs/UTC_DAY.md).
 
 ### Functions
 

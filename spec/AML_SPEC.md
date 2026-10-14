@@ -1,6 +1,6 @@
 # AML — Arianna Method Language
 
-**Version:** 5.12.0 (Immutable inference models and complete experience capacity)
+**Version:** 5.13.0 (Explicit UTC civil day values)
 **Extension:** `.aml`
 **Status:** Living specification
 
@@ -285,6 +285,24 @@ integer value as a scalar; wrong types and nonfinite inputs fail explicitly.
 `isfinite(x)` accepts exactly one scalar and returns zero for NaN or either
 infinity, one for every finite value. Other types and arities fail.
 
+`utc_day()` takes no arguments and returns `floor(POSIX_seconds / 86400)` as an
+exact float32 integer in `[-16777216, 16777216]`. Day zero is 1970-01-01; days
+change at midnight UTC independently of the host timezone or daylight saving.
+Each call samples `time(NULL)` exactly once. Seconds remain double precision
+through division and floor; only the bounded day is converted to float32.
+The host's `(time_t)-1` failure sentinel and out-of-range days cause explicit
+runtime errors. Signed pre-epoch seconds are supported where the host represents
+them; second `-1` is reserved by the clock failure contract. A failed call leaves
+its assignment destination unchanged. Ordinary eager argument evaluation and
+earlier statements retain their effects.
+
+The expression leaves `AM_State`, global calendar controls and all owner values
+unchanged. It is evaluated at execution time, including for prepared/compiled
+programs; preparation captures no day. Callers choose when to capture a day
+and may carry it through records, workers or checkpoints. The name is reserved
+case-insensitively and consumes no registered function slot: 239 user definitions
+remain available. [UTC_DAY.md](../docs/UTC_DAY.md) documents the epoch and examples.
+
 Owned sampling uses an optional registered NoTorch backend. `rng_new(seed)`
 accepts an integer seed in `[0, 16777215]` and returns a numeric map with
 `algorithm=1` and four little-endian 16-bit limbs, `state0` through `state3`.
@@ -378,12 +396,12 @@ and retain their block structure. Runtime failure prints `am_get_error()` and
 terminates before `main()`.
 
 `BLOOD COMPILE`, `BLOOD MAIN`, `BLOOD INCLUDE`, and `BLOOD LINK` retain their C
-compilation roles. Runtime source is bounded to 512 nonblank, noncomment lines
+compilation roles. Runtime source is bounded to 8,192 nonblank, noncomment lines
 of at most 511 bytes each in `amlc`; the interpreter's own line limits also
 apply. The call supplies the absolute input path captured by `amlc` and
 resolves runtime `INCLUDE` from that directory, regardless of launch directory.
 The main source file is embedded; imported and included files are read at runtime.
-The runtime accepts at most 255 bytes per executable line and 1024 expanded
+The runtime accepts at most 255 bytes per executable line and 8,192 expanded
 lines, including import boundaries; exceeded budgets fail explicitly.
 
 `--scalar` links available AML/NoTorch archives without BLAS flags or libraries;
