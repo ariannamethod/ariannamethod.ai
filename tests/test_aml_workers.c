@@ -42,15 +42,21 @@ static void fail(int mode, const char* source, const char* diagnostic) {
     CHECK(strstr(am_get_error(), diagnostic));
     CHECK(am_spawn_count() == 0);
 }
-static const char* malformed_await[] = {
-    "AWAIT first second INTO kept",
-    "AWAIT first second into kept",
-    "AWAIT INTO first kept",
-    "AWAIT first INTO INTO",
-    "AWAIT INTO INTO kept",
-    "AWAIT first INTO kept INTO extra",
-    "AWAIT first second INTO kept INTO kept",
-    "AWAIT first second third INTO kept",
+static const struct { const char* source; const char* diagnostic; } malformed_await[] = {
+    {"AWAIT first second INTO kept", "no unjoined spawn: INTO"},
+    {"AWAIT first second into kept", "no unjoined spawn: into"},
+    {"AWAIT INTO first kept", "no unjoined spawn: INTO"},
+    {"AWAIT first INTO kept INTO extra", "no unjoined spawn: INTO"},
+    {"AWAIT first second INTO kept INTO kept", "no unjoined spawn: INTO"},
+    {"AWAIT first second third INTO kept", "no unjoined spawn: third"},
+    {"AWAIT first second absent", "no unjoined spawn: absent"},
+    {"AWAIT first first", "duplicate AWAIT worker name"},
+    {"AWAIT first second held0", "no unjoined spawn: held0"},
+    {"AWAIT first second bad:name", "invalid worker name"},
+    {"AWAIT first second abcdefghijklmnopqrstuvwxyz012345", "invalid worker name"},
+    {"AWAIT first INTO bad-name", "invalid worker result variable"},
+    {"AWAIT first INTO abcdefghijklmnopqrstuvwxyz012345", "invalid worker result variable"},
+    {"AWAIT first second a b c d e f g h i j k l m n o", "too many AWAIT worker names"},
 };
 static void test_await_syntax(void) {
     for (size_t i = 0; i < sizeof(malformed_await) / sizeof(*malformed_await); i++) {
@@ -65,7 +71,7 @@ static void test_await_syntax(void) {
         char source[512];
         snprintf(source, sizeof(source),
             "SPAWN first:\n    return 'first-result'\n"
-            "SPAWN second:\n    return 'second-result'\n%s\n", malformed_await[i]);
+            "SPAWN second:\n    return 'second-result'\n%s\n", malformed_await[i].source);
         void* program = am_program_open(source); CHECK(program);
         CHECK(am_program_step(program, 2) == 0);
         CHECK(am_spawn_launch("before_syntax", "return 0\n") < 0);
@@ -74,9 +80,9 @@ static void test_await_syntax(void) {
         // Observe before close: syntax rejection must neither join nor consume
         // either result. Slot exhaustion is independent of worker scheduling.
         CHECK(am_spawn_launch("after_syntax", "return 0\n") < 0);
-        CHECK(strstr(diagnostic, "expected AWAIT name INTO variable"));
+        CHECK(strstr(diagnostic, malformed_await[i].diagnostic));
         CHECK(am_program_close(program) != 0);
-        CHECK(strstr(am_get_error(), "expected AWAIT name INTO variable"));
+        CHECK(strstr(am_get_error(), malformed_await[i].diagnostic));
         CHECK(!strcmp(am_get_var_text("kept"), "unchanged"));
         CHECK(!strcmp(am_get_var_text("INTO"), "keyword-value"));
         // Error teardown now drains the program's children, leaving C owners
@@ -89,6 +95,31 @@ static void test_await_syntax(void) {
         CHECK(am_spawn_drain() == 0 && am_spawn_count() == 0);
         am_persistent_mode(0);
     }
+}
+static void test_await_list_failure(void) {
+    am_init(); am_persistent_mode(1);
+    void* program = am_program_open(
+        "SPAWN first:\n    assert(0, 'first list failure')\n"
+        "SPAWN INTO:\n    assert(0, 'later list failure')\n"
+        "AWAIT first INTO\n");
+    CHECK(program && am_program_step(program, 2) == 0);
+    CHECK(am_program_step(program, 1) == 1);
+    CHECK(strstr(am_get_error(), "first list failure"));
+    // Observe before program teardown: an execution failure must release every
+    // claimed slot, rather than leaving later jobs reserved and unjoinable.
+    for (int i = 0; i < AM_MAX_SPAWNS; i++) {
+        char name[32]; snprintf(name, sizeof(name), "held%d", i);
+        CHECK(am_spawn_launch(name, "return 7\n") >= 0);
+    }
+    CHECK(am_program_close(program) != 0);
+    CHECK(strstr(am_get_error(), "first list failure"));
+    AML_Var result = {0};
+    for (int i = 0; i < AM_MAX_SPAWNS; i++) {
+        char name[32]; snprintf(name, sizeof(name), "held%d", i);
+        CHECK(am_spawn_await_value(name, &result) == 0 && result.value == 7);
+    }
+    am_value_clear(&result);
+    am_persistent_mode(0);
 }
 static void test_errors(int mode) {
     am_init(); am_persistent_mode(1);
@@ -106,17 +137,32 @@ static void test_errors(int mode) {
     fail(mode, "SPAWN repeat:\n    return 1\nSPAWN repeat:\n    return 2\n", "already pending");
     fail(mode, "SPAWN broken\n    return 1\n", "expected SPAWN");
     fail(mode, "SPAWN broken: trailing\n    return 1\n", "unexpected text");
-    fail(mode, "SPAWN test:\n    return 1\nAWAIT test INTO\n", "expected AWAIT");
+    fail(mode, "SPAWN test:\n    return 1\nAWAIT test INTO\n", "no unjoined spawn: INTO");
     for (size_t i = 0; i < sizeof(malformed_await) / sizeof(*malformed_await); i++) {
         char source[512];
         snprintf(source, sizeof(source),
             "kept = 'unchanged'\nINTO = 'keyword-value'\n"
             "SPAWN first:\n    return 'first-result'\n"
-            "SPAWN second:\n    return 'second-result'\n%s\n", malformed_await[i]);
-        fail(mode, source, "expected AWAIT name INTO variable");
+            "SPAWN second:\n    return 'second-result'\n%s\n", malformed_await[i].source);
+        fail(mode, source, malformed_await[i].diagnostic);
         CHECK(!strcmp(am_get_var_text("kept"), "unchanged"));
         CHECK(!strcmp(am_get_var_text("INTO"), "keyword-value"));
     }
+    fail(mode, "SPAWN first:\n    assert(0, 'first list failure')\n"
+         "SPAWN second:\n    assert(0, 'later list failure')\n"
+         "AWAIT first second\n", "first list failure");
+    // The complete 16-name list fits the fixed slot bound and releases names.
+    char all_names[1024] = {0};
+    size_t used = 0;
+    for (int i = 0; i < AM_MAX_SPAWNS; i++)
+        used += (size_t)snprintf(all_names + used, sizeof(all_names) - used,
+                               "SPAWN job%d:\n    return %d\n", i, i);
+    used += (size_t)snprintf(all_names + used, sizeof(all_names) - used, "AWAIT");
+    for (int i = 0; i < AM_MAX_SPAWNS; i++)
+        used += (size_t)snprintf(all_names + used, sizeof(all_names) - used, " job%d", i);
+    snprintf(all_names + used, sizeof(all_names) - used,
+             "\nSPAWN job0:\n    return 17\nAWAIT job0 INTO count\nassert(count == 17, 'slot reused')\n");
+    CHECK(run(mode, all_names) == 0);
     fail(mode, "CHANNEL WRITE absent 1\n", "channel missing");
     fail(mode, "CHANNEL READ absent kept\n", "channel missing");
     fail(mode, "CHANNEL TRY absent kept\n", "channel missing");
@@ -290,7 +336,7 @@ int main(int argc, char** argv) {
         free(source); return rc;
     }
     CHECK(argc == 1);
-    test_await_syntax();
+    test_await_syntax(); test_await_list_failure();
     for (int mode = 0; mode < 3; mode++) test_errors(mode);
     test_hosts(); test_tokenizer(); test_concurrent_hosts(); test_channel_close(); test_launch_failures();
     printf("AML_WORKER_RUNTIME_OK %d checks\n", checks); return 0;

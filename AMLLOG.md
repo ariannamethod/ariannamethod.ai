@@ -12,6 +12,35 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-10-14 — INTO remains a worker name (v5.11.0)
+
+PR #37 review found that the previous whole-statement `INTO` scan rejected
+legal worker names. AWAIT now has explicit positional precedence: exactly
+three arguments with case-insensitive `INTO` in the middle transfer one result;
+the worker or destination may also be called `INTO`. Every other nonempty form
+is a discard list. A list's names must be valid, distinct and pending under
+the awaiting owner. The runtime validates the entire list under its mutex,
+then reserves all its slots together before joining. A failed preflight leaves
+every result untouched. After successful validation, all reserved jobs are
+joined even when one fails, preserving the first execution diagnostic.
+
+The unchanged parser failed the new fixture on `AWAIT INTO`. With this fix,
+the focused `make test-workers` gate passes **1,998** runtime/C-host checks and
+**2,018** with allocation/thread-creation failure injection. The source fixture
+passes interpreter, resumable host, bytecode, CLI and compiled scalar paths.
+It covers mixed-case worker names and markers, result variables named `INTO`,
+discard-list positions and explicit three-token capture precedence.
+
+Fourteen rejected statements preserve all 16 pending slots and both destination
+values before program close, including the original misplaced-marker case,
+missing and foreign names, duplicates, invalid names/destinations and an
+oversized list. A separate execution-failure gate confirms that every reserved
+slot is reusable before error teardown and that closing the failed program
+preserves all 16 subsequently launched C-owned jobs. A complete 16-name discard
+list also succeeds through all three host modes. The tests were built in a
+separate staging directory; shared libraries and runners used by Haiku were
+left unchanged. `git diff --check` passes; main was checked at `70217ff`.
+
 ## 2026-10-14 — work returns to its owner (v5.11.0)
 
 Haiku's completed experience can now travel across an owned worker boundary.

@@ -1413,9 +1413,10 @@ AWAIT tail INTO completed
 | `CHANNEL DEPTH` | `CHANNEL DEPTH name variable` | Queue size, or `-1` for a missing queue |
 | `CHANNEL CLOSE` | `CHANNEL CLOSE [name]` | Close one or all queues and wake blocked readers/writers |
 
-Worker names are 1–31 non-whitespace characters excluding `:`. Pending names
-are unique within their owning execution context. The process admits 16
-outstanding jobs. A completed job retains its result slot until joined; a
+Worker names are 1–31 non-whitespace characters excluding `:`, are case-sensitive
+and may be `INTO`. Pending names are unique within their owning execution
+context. The process admits 16 outstanding jobs. A completed job retains its
+result slot until joined; a
 successful or failed join frees that slot for subsequent jobs.
 
 A worker block can return a float, array/matrix, UTF-8 string, string list,
@@ -1425,6 +1426,17 @@ once. Missing jobs, duplicate awaits, missing explicit returns and worker
 execution errors leave the destination unchanged and stop the awaiting
 program. `AWAIT` validates syntax and destination capacity before consuming a
 result. An application validates and publishes a completed owner separately.
+
+Exactly three arguments with a case-insensitive `INTO` in the middle select
+the result-transfer form, even if the first or third argument is itself `INTO`.
+This form takes precedence over interpreting the three arguments as worker
+names. All other nonempty forms are discard lists, including `AWAIT INTO` and
+`AWAIT first INTO`. The complete list must contain distinct, valid, pending
+names belonging to the awaiting owner; validation occurs under the worker
+mutex before any slot is reserved or joined. Failure preserves every pending
+result. After validation, all requested slots are reserved together and joined,
+preserving the first execution failure. To discard three workers with middle
+name `INTO`, use two statements, such as `AWAIT first` and `AWAIT INTO last`.
 
 Normal completion, error completion and `am_program_close` drain the program's
 children before freeing parent storage. A worker drains its children before
