@@ -288,11 +288,11 @@ typedef struct {
 // AML LEVEL 2 — flow control, variables, expressions
 // ═══════════════════════════════════════════════════════════════════════════════
 
-#define AML_MAX_LINES       8192
+#define AML_MAX_LINES       16384
 #define AML_MAX_LINE_LEN    256
 #define AML_MAX_VARS        256
 #define AML_MAX_NAME        32
-#define AML_MAX_FUNCS       256   // total slots, including registered builtins
+#define AML_MAX_FUNCS       512   // total slots, including registered builtins
 #define AML_MAX_PARAMS      16
 #define AML_MAX_CALL_DEPTH  16
 #define AML_MAX_INCLUDE     8
@@ -318,7 +318,7 @@ typedef struct {
 #define AM_MAX_STRING_BYTES 1048576
 #define AM_MAX_LIST_ITEMS 65536
 #define AM_MAX_MAP_ITEMS 65536
-#define AM_MAX_RECORD_FIELDS 512
+#define AM_MAX_RECORD_FIELDS 1024
 #define AM_MAX_CHECKPOINT_BYTES 67108864
 #define AM_MAX_CHECKPOINT_ITEMS 1048576
 

@@ -42,7 +42,7 @@
 #define MAX_NAME      128
 #define MAX_LINE      8192
 #define MAX_ARG_LEN   512
-#define MAX_DIRECTIVES 8192  /* matches the runtime source-line budget. Parsed
+#define MAX_DIRECTIVES 16384 /* matches the runtime source-line budget. Parsed
                               * lives in static storage: its bounded source table
                               * no longer consumes the process's stack budget. */
 

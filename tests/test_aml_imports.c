@@ -185,6 +185,68 @@ static void test_snapshot_and_control_flow(void) {
     puts("PASS imports: prepared snapshot survives removal; bytecode def/if/while parity");
 }
 
+static void test_function_capacity(void) {
+    /* Two modules fill the table. The final helper launches a worker that
+     * calls a high-index inherited helper and retains its launch-time local. */
+    char low[16384], high[16384];
+    size_t low_used = 0, high_used = 0;
+    CHECK(AML_MAX_FUNCS == 512);
+    for (int i = 0; i < 494; i++) {
+        char* module = i < 247 ? low : high;
+        size_t* used = i < 247 ? &low_used : &high_used;
+        append_source(module, sizeof(low), used,
+                      "def table_%d():\n    return %d\n", i, i);
+    }
+    append_source(high, sizeof(high), &high_used,
+        "def table_tail(value):\n"
+        "    SPAWN captured_table:\n"
+        "        return table_493() + table_0() + value\n"
+        "    value = 900\n"
+        "    AWAIT captured_table INTO result\n"
+        "    return result\n");
+    put_file("tree/capacity-low.aml", low);
+    put_file("tree/capacity-high.aml", high);
+    const char* script =
+        "IMPORT \"tree/capacity-low.aml\"\n"
+        "IMPORT \"tree/capacity-high.aml\"\n"
+        "echo_fractal(3)\n"
+        "assert(prophecy == 6, 'registered builtin at full capacity')\n"
+        "assert(text_equal(text_fixed(1.25, 1), '1.2'), 'intrinsic at full capacity')\n"
+        "assert(table_tail(3) == 496, 'high-index worker table and local snapshot')\n"
+        "TENSION 0.75\n";
+    run_paths(script, 0.75f);
+    put_file("function-capacity.aml", script);
+
+    void* program = am_program_open(script);
+    void* compiled = am_compile(script);
+    CHECK(program && compiled);
+    put_file("tree/capacity-low.aml", "TENSION 0.99\n");
+    CHECK(unlink("tree/capacity-high.aml") == 0);
+    CHECK(chdir(elsewhere) == 0);
+    am_init();
+    CHECK(am_program_step(program, 0) == 1);
+    CHECK(am_program_close(program) == 0);
+    tension_is(0.75f);
+    for (int repetition = 0; repetition < 2; repetition++) {
+        am_init();
+        CHECK(am_exec_compiled(compiled) == 0);
+        tension_is(0.75f);
+    }
+    am_free_compiled(compiled);
+    CHECK(chdir(root) == 0);
+    put_file("tree/capacity-low.aml", low);
+    put_file("tree/capacity-high.aml", high);
+
+    put_file("tree/capacity-overflow.aml", "def table_overflow():\n    return 496\n");
+    reject_paths(
+        "TENSION 0.875\n"
+        "IMPORT \"tree/capacity-low.aml\"\n"
+        "IMPORT \"tree/capacity-high.aml\"\n"
+        "IMPORT \"tree/capacity-overflow.aml\"\n",
+        "tree/capacity-overflow.aml:1: function limit exceeded");
+    puts("PASS function slots: 495 imported helpers, inherited worker table, removed-source snapshots; 496 rejected at its origin");
+}
+
 static void test_rejections(void) {
     reject_paths("TENSION 0.875\nIMPORT \"missing.aml\"\n", "cannot resolve source");
     reject_paths("TENSION 0.875\nIMPORT missing.aml\n", "quoted path");
@@ -220,26 +282,39 @@ static void test_rejections(void) {
     puts("PASS imports: malformed paths/declarations, missing files, NUL, cycles and collisions reject before effects");
 }
 
+static void test_line_capacity(void) {
+    char script[AML_MAX_LINES * 32];
+    size_t used = 0;
+    for (int i = 0; i < AML_MAX_LINES - 4; i++)
+        append_source(script, sizeof(script), &used, "TENSION 0.875\n");
+    /* The prefix alone must not satisfy the final worker's witness. */
+    put_file("truncated-lines.aml", script);
+    am_init();
+    CHECK(am_exec_source(script, source_path) == 0);
+    tension_is(0.875f);
+    append_source(script, sizeof(script), &used,
+                  "SPAWN last_line:\n    return 0.625\n"
+                  "AWAIT last_line INTO carried\nTENSION carried\n");
+    put_file("exact-lines.aml", script);
+    run_paths(script, 0.625f);
+    am_init();
+    CHECK(am_exec_file("exact-lines.aml") == 0);
+    CHECK(am_get_state()->tension == 0.625f);
+    used = 0;
+    for (int i = 0; i <= AML_MAX_LINES; i++)
+        append_source(script, sizeof(script), &used, "TENSION 0.875\n");
+    reject_paths(script, "expanded AML line limit exceeded");
+    put_file("tree/too-many-lines.aml", script);
+    reject_paths("TENSION 0.875\nIMPORT \"tree/too-many-lines.aml\"\n", "line limit");
+}
+
 static void test_budgets(void) {
     char script[AML_MAX_LINES * 32];
     strcpy(script, "TENSION 0.875\n");
     memset(script + strlen(script), 'x', AML_MAX_LINE_LEN);
     script[strlen("TENSION 0.875\n") + AML_MAX_LINE_LEN] = 0;
     reject_paths(script, "source line exceeds");
-
-    size_t used = 0;
-    for (int i = 0; i < AML_MAX_LINES; i++)
-        append_source(script, sizeof(script), &used, "TENSION 0.875\n");
-    put_file("exact-lines.aml", script);
-    run_paths(script, 0.875f);
-    am_init();
-    CHECK(am_exec_file("exact-lines.aml") == 0);
-    CHECK(am_get_state()->tension == 0.875f);
-    used = 0;
-    for (int i = 0; i <= AML_MAX_LINES; i++)
-        append_source(script, sizeof(script), &used, "TENSION 0.875\n");
-    put_file("tree/too-many-lines.aml", script);
-    reject_paths("TENSION 0.875\nIMPORT \"tree/too-many-lines.aml\"\n", "line limit");
+    test_line_capacity();
 
     FILE* large = fopen("tree/too-large.aml", "wb");
     CHECK(large != NULL);
@@ -248,7 +323,7 @@ static void test_budgets(void) {
     CHECK(fclose(large) == 0);
     reject_paths("TENSION 0.875\nIMPORT \"tree/too-large.aml\"\n", "source exceeds 1 MiB");
 
-    used = 0;
+    size_t used = 0;
     append_source(script, sizeof(script), &used, "TENSION 0.875\n");
     for (int i = 0; i < AML_MAX_FUNCS; i++)
         append_source(script, sizeof(script), &used,
@@ -345,16 +420,23 @@ static void test_bytecode_types(void) {
 }
 
 int main(int argc, char** argv) {
-    CHECK(argc == 2);
+    CHECK(argc == 2 || (argc == 3 && !strcmp(argv[2], "--line-capacity")));
     CHECK(strlen(argv[1]) + 20 < sizeof(root));
     strcpy(root, argv[1]);
     snprintf(elsewhere, sizeof(elsewhere), "%s/elsewhere", root);
     snprintf(source_path, sizeof(source_path), "%s/main.aml", root);
     CHECK(chdir(root) == 0);
     CHECK(mkdir(elsewhere, 0700) == 0);
+    if (argc == 3) {
+        CHECK(mkdir("tree", 0700) == 0);
+        test_line_capacity();
+        printf("PASS IMPORT line capacity: %d checks\n", checks);
+        return 0;
+    }
     test_shared_graph();
     test_origins();
     test_snapshot_and_control_flow();
+    test_function_capacity();
     test_rejections();
     test_budgets();
     test_bytecode_types();

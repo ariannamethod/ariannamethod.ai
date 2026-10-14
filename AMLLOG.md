@@ -12,6 +12,77 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-10-14 — complete graphs keep their named state
+
+Haiku's recursive-symbol work needs its helper graph, explicit per-owner leaves
+and complete publication receipt to travel together. Three shared bounds now
+admit that graph: **512 function slots** (17 registered builtins and 495 user
+definitions), **1,024 flat record fields**, and **16,384 expanded source lines**.
+The `amlc` root-directive budget matches the runtime. Names, argument counts,
+call/import depths, per-file limits and individual value bounds retain their
+existing contracts. Overflow still fails explicitly; preparation errors precede
+all statements and compiled C `main()` effects.
+
+The function audit found one `AML_Functab` used by imported definitions, typed
+lookup, saved bytecode and worker snapshots. All indices/counts are `int`;
+scalar generated executables prepare through the same runtime. The separate
+256 `BLOOD COMPILE` block budget counts C blocks. A compile-time assertion also
+keeps the registered native table within the shared capacity.
+
+Measured on Linux x86_64: `AML_Func` remains 560 bytes; `AML_Functab` grows from
+143,364 to 286,724 bytes and `AML_ExecCtx` from 561,912 to 705,272 bytes. Rebuild
+C hosts with the updated public header. Resumable/worker contexts live on the
+heap; ordinary and bytecode execution/preparation retain their stack context.
+The 16-worker table increase totals 2,293,760 bytes. Source reservation grows
+from 4,259,840 to 8,519,680 heap bytes; inherited workers copy their actual line
+count. Bytecode uses 4,140 bytes per actual line, at most 67,829,760 bytes. The
+compiler's directive table grows from 4 to 8 MiB in static storage.
+
+`AM_Record` remains opaque with the same layout. Its entries grow on demand;
+raising the bound adds no storage to existing records of at most 512 fields.
+An entry is 104 bytes, so a 512-to-1,024 reservation adds 53,248 bytes plus the
+owned leaf payloads. Clone/replace/snapshot still copy mutable leaves. The
+version-1 checkpoint header already carries a 32-bit count: wire encoding,
+checksums, 64 MiB file bound and aggregate item limit remain unchanged. Older
+runtimes retain their own admitted field counts.
+
+Proof on Linux x86_64 / GCC 13.3, scalar runtime and compiler:
+
+- `test_aml_imports.sh --line-capacity`: **16,439** focused C checks against
+  the existing build. The final worker changes the prefix's `0.875` to `0.625`;
+  scalar C `main()` checks that field before its success marker. A control with
+  the final four lines removed must fail that check. Exact 16,384-line programs
+  execute through all five paths; runtime and frontend reject line 16,385.
+  The full import graph and **208** opened-file checks also passed. Imported helper
+  495 remains callable through a captured local and worker, including after
+  source removal from prepared and repeated bytecode programs. Definition 496
+  reports its imported source and runs no preceding AML or C-main effect.
+- `test_aml_text_fixed.sh`: **2,893** runtime checks. Every helper is called in
+  112/239/240/495-definition programs; all five paths refuse definition 496.
+  Direct C-owned workers admit 495 and refuse 496 before effects. The existing
+  fixed-text value, allocation and 26-invalid-program gates also pass.
+- `test_aml_records.sh`: **3,900** API checks (**5,809** with allocation
+  injection), **967** runtime checks and 62 rejected calls through five paths.
+  Exact 1,024-field clones and worker returns retain independent mutable leaves
+  and publish through `record_swap`; field 1,025 preserves the complete owner.
+  Checkpoints pass **11,082** checks (**13,386** allocation and **11,270** I/O).
+  Independent encoders verify complete 512- and 1,024-field bytes, and a
+  recomputed-checksum 1,025-field header is refused.
+- A 512-field file written by the previous runtime and the rebuilt runtime
+  is byte-identical: SHA-256
+  `37a6211cebe44f2fc7981564d399b49440af06098a7655f126e1fc2d58f09d02`.
+- `test_aml_utc_day.sh`: **2,141** real-clock and **4,259** wrapped-clock
+  checks, retaining all 495 user slots. `make test`: **550/550**. The existing
+  include-depth/cycle gate passes with the larger stack context.
+
+The language spec and focused module/record guides state the bounds and ABI
+costs; the README receives only its current record-limit correction. Main was
+refreshed at `b05e845` before implementation. No new engine operation is added.
+
+Quote: “Keep the whole graph, and keep its edge visible.”
+Method: measure the owned storage, exercise the last admitted item, refuse the
+next item before publication, and compare the existing bytes.
+
 ## 2026-10-14 — an imported source keeps its opened identity
 
 The three open CodeQL findings on `main@f434a8a` were inspected directly:

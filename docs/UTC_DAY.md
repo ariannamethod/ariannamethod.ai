@@ -48,7 +48,7 @@ checkpoint can retain the scalar using the existing record encoding. Programs
 choose their own capture, replay and publication policy.
 
 The name is reserved case-insensitively. The intrinsic uses expression dispatch,
-preserving all 239 user function slots, 8,192 expanded lines and 512 record fields.
+preserving all 495 user function slots, 16,384 expanded lines and 1,024 record fields.
 Preparing or compiling a program reads no clock; its execution evaluates the
 call. The core archive supplies it directly, with no optional backend or new
 public C API.

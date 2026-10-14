@@ -643,7 +643,7 @@ status = checkpoint_save(pending, "haiku.state")
 record_swap(state, pending)
 ```
 
-Records own at most 512 named float, array/matrix, string, string-list or
+Records own at most 1,024 named float, array/matrix, string, string-list or
 numeric-map fields. `record_set`, assignment and snapshots copy mutable leaves;
 function parameters share the record. `record_get` retains a typed child for
 direct organ calls. `record_has`, `record_keys` and `record_kind` let AML inspect

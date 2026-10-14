@@ -155,10 +155,10 @@ static void test_preparation(void) {
 #endif
 
 static void test_functions(int mode) {
-    /* utc_day does not consume any of the 239 available user definitions. */
+    /* utc_day does not consume any of the 495 available user definitions. */
     char source[32768];
     size_t used = 0;
-    for (int i = 0; i < 239; i++) {
+    for (int i = 0; i < 495; i++) {
         int n = snprintf(source + used, sizeof(source) - used,
                          "def user_%d():\n    return %d\n", i, i);
         CHECK(n > 0 && (size_t)n < sizeof(source) - used);
@@ -166,9 +166,9 @@ static void test_functions(int mode) {
     }
     snprintf(source + used, sizeof(source) - used,
              "captured = utc_day()\n"
-             "SPAWN day_receipt:\n    return captured + user_238()\n"
+             "SPAWN day_receipt:\n    return captured + user_494()\n"
              "AWAIT day_receipt INTO result\n"
-             "assert(result == captured + 238, 'full function table')\n");
+             "assert(result == captured + 494, 'full function table')\n");
     prepare();
 #ifdef AML_UTC_WRAP
     set_clock(1709164800);

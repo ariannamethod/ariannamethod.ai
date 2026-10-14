@@ -69,11 +69,15 @@ static void test_types_and_limits(void) {
         char name[32]; snprintf(name, sizeof(name), "field_%03d", i); value.value = (float)i;
         CHECK(put(record, name, &value) == 0);
     }
+    AM_Record* before = am_record_clone(record); CHECK(before);
     CHECK(put(record, "one-too-many", &value) < 0);
+    CHECK(am_record_equal(record, before) == 1);
     AM_List* keys = am_record_keys(record); CHECK(keys && keys->len == AM_MAX_RECORD_FIELDS); am_list_free(keys);
     value.value = 99; CHECK(put(record, "field_000", &value) == 0);
     CHECK(leaf(record, "field_000")->value == 99);
-    am_record_free(record);
+    CHECK(leaf(before, "field_000")->value == 0);
+    CHECK(am_record_replace(before, record) == 0 && am_record_equal(before, record) == 1);
+    am_record_free(before); am_record_free(record);
 }
 static void test_swap(void) {
     AM_Record* live = make_sample(); AM_Record* pending = am_record_new(); CHECK(pending);
