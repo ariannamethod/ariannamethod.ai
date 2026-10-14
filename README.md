@@ -28,6 +28,7 @@ Two core files, with 550 baseline runtime tests and dedicated compiler, module, 
 ## What's new in v5.11.0 — work returns to its owner
 
 - **Owned workers and typed results.** `SPAWN` captures prepared helpers and visible launch values; `AWAIT name INTO value` transfers a completed record or any other AML value. Joined slots are reusable, program exit drains children, and channel failures reach their caller. See [workers](docs/WORKERS.md).
+- **Exact record comparison.** `record_equal(left, right)` checks complete ordered contents, types, matrix shapes, text bytes and float32 bits without allocating. An organism can bind a completed job to its complete prepared experience. See [records](docs/RECORDS.md).
 - **Parliament numerical values through NoTorch.** `nt_parliament_elect`, `nt_parliament_inject` and `nt_oja` operate on caller-owned arrays through a separate optional backend table, preserving the original numerical C ABI. See [parliament values](docs/PARLIAMENT_VALUES.md).
 
 ## What's new in v5.10.0 — memory names its states
@@ -607,6 +608,10 @@ function parameters share the record. `record_get` retains a typed child for
 direct organ calls. `record_has`, `record_keys` and `record_kind` let AML inspect
 its own schema. `record_replace` stages a full copy before replacing contents;
 `record_swap` exchanges already owned contents without allocation.
+`record_equal(left, right)` compares complete ordered contents without allocating:
+field names and types, matrix shapes, text bytes and exact float32 bits. Signed
+zeros differ; identical NaN bit patterns compare equal. Capacity and owner
+identity do not affect equality.
 
 `checkpoint_load(path)` returns detached owners for application validation.
 `checkpoint_save(record, path)` preserves exact float32 bits, matrix shapes and
@@ -1402,6 +1407,7 @@ AM_Record* am_record_new(void);
 void am_record_ref(AM_Record* record);
 void am_record_free(AM_Record* record);
 AM_Record* am_record_clone(const AM_Record* record);
+int am_record_equal(const AM_Record* left, const AM_Record* right);
 int am_record_set(AM_Record* record, AM_String* key, const AML_Var* value);
 const AML_Var* am_record_get(const AM_Record* record, const AM_String* key);
 int am_record_has(const AM_Record* record, const AM_String* key);

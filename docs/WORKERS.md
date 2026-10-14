@@ -43,9 +43,9 @@ or release its own values immediately after launch.
 
 Source, value-copy, function-preparation and thread-creation failures report an
 error without publishing a worker slot. Names contain 1–31 non-whitespace
-characters, excluding `:`. One owner cannot reuse a name until its pending job
-has been joined. Different program owners and nested workers can use the same
-name independently.
+characters, excluding `:`; they are case-sensitive and may be called `INTO`.
+One owner cannot reuse a name until its pending job has been joined. Different
+program owners and nested workers can use the same name independently.
 
 The runtime holds at most **16 outstanding jobs** at once. Completed jobs still
 occupy their slots until joined; a successful or failed join releases the slot.
@@ -70,9 +70,23 @@ return leaves the destination unchanged and stops the AML program. A slot is
 consumed after a completed join, including an execution error or missing return.
 Syntax and destination-capacity validation happen before that join.
 
-`AWAIT name1 name2` joins the named jobs and discards their results. Bare `AWAIT`
-drains this program's pending jobs. Both preserve the first failure while
-joining every requested child. A program's normal completion, error completion
+With exactly three arguments and a case-insensitive `INTO` in the middle,
+`AWAIT` always transfers one result. The worker and destination may themselves
+be named `INTO`: `AWAIT INTO INTO completed` and `AWAIT tail INTO INTO` are
+valid. This form takes precedence even if workers named `INTO` and `completed`
+are also pending.
+
+Every other nonempty form is a discard list: `AWAIT name1 name2`, `AWAIT INTO`,
+`AWAIT first INTO` and `AWAIT first second INTO` join the named jobs and discard
+their results. All names must be valid, distinct and pending under this owner.
+The runtime checks the entire list before reserving any slot, then reserves
+every named job together. An invalid, absent, foreign or repeated name leaves
+all pending results untouched. To discard a three-name list whose middle name
+is `INTO`, split it into `AWAIT first` and `AWAIT INTO second`.
+
+Bare `AWAIT` drains this program's pending jobs. A validated discard list and
+a bare drain both preserve the first execution failure while joining every
+requested child. A program's normal completion, error completion
 and `am_program_close` also drain that program's children before releasing
 parent storage. A worker drains its own children before publishing its result.
 A parent error keeps precedence over a later drain error.

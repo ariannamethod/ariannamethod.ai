@@ -92,4 +92,64 @@ SPAWN scalar:
     return -0.0
 AWAIT scalar INTO zero
 assert(text_equal(text_fixed(zero, 1), '-0.0'), 'scalar preserves bits')
+# INTO is a worker name in discard forms, and may also name a destination.
+SPAWN INTO:
+    return 'single-discard'
+AWAIT INTO
+SPAWN INTO:
+    return 'named-INTO'
+AWAIT INTO INTO keyword_worker
+assert(text_equal(keyword_worker, 'named-INTO'), 'INTO worker return')
+SPAWN destination:
+    return 'stored-INTO'
+AWAIT destination into INTO
+assert(text_equal(INTO, 'stored-INTO'), 'INTO result variable')
+
+SPAWN into:
+    return 1
+SPAWN InTo:
+    return 2
+AWAIT into InTo
+SPAWN first:
+    return 1
+SPAWN INTO:
+    return 2
+AWAIT first INTO
+
+SPAWN first:
+    return 1
+SPAWN second:
+    return 2
+SPAWN INTO:
+    return 3
+AWAIT INTO first second
+SPAWN first:
+    return 1
+SPAWN second:
+    return 2
+SPAWN INTO:
+    return 3
+AWAIT first second INTO
+SPAWN first:
+    return 1
+SPAWN second:
+    return 2
+SPAWN third:
+    return 3
+SPAWN INTO:
+    return 4
+AWAIT first INTO second third
+
+# Exactly three arguments with middle INTO always capture one return value.
+# The other two pending workers remain available to the subsequent list.
+SPAWN first:
+    return 'capture-wins'
+SPAWN INTO:
+    return 2
+SPAWN kept:
+    return 3
+AWAIT first INTO kept
+assert(text_equal(kept, 'capture-wins'), 'three-token capture precedence')
+AWAIT INTO kept
+
 PRINT 'AML_WORKERS_OK'

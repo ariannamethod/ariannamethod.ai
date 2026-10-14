@@ -12,6 +12,35 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-10-14 — INTO remains a worker name (v5.11.0)
+
+PR #37 review found that the previous whole-statement `INTO` scan rejected
+legal worker names. AWAIT now has explicit positional precedence: exactly
+three arguments with case-insensitive `INTO` in the middle transfer one result;
+the worker or destination may also be called `INTO`. Every other nonempty form
+is a discard list. A list's names must be valid, distinct and pending under
+the awaiting owner. The runtime validates the entire list under its mutex,
+then reserves all its slots together before joining. A failed preflight leaves
+every result untouched. After successful validation, all reserved jobs are
+joined even when one fails, preserving the first execution diagnostic.
+
+The unchanged parser failed the new fixture on `AWAIT INTO`. With this fix,
+the focused `make test-workers` gate passes **1,998** runtime/C-host checks and
+**2,018** with allocation/thread-creation failure injection. The source fixture
+passes interpreter, resumable host, bytecode, CLI and compiled scalar paths.
+It covers mixed-case worker names and markers, result variables named `INTO`,
+discard-list positions and explicit three-token capture precedence.
+
+Fourteen rejected statements preserve all 16 pending slots and both destination
+values before program close, including the original misplaced-marker case,
+missing and foreign names, duplicates, invalid names/destinations and an
+oversized list. A separate execution-failure gate confirms that every reserved
+slot is reusable before error teardown and that closing the failed program
+preserves all 16 subsequently launched C-owned jobs. A complete 16-name discard
+list also succeeds through all three host modes. The tests were built in a
+separate staging directory; shared libraries and runners used by Haiku were
+left unchanged. `git diff --check` passes; main was checked at `70217ff`.
+
 ## 2026-10-14 — work returns to its owner (v5.11.0)
 
 Haiku's completed experience can now travel across an owned worker boundary.
@@ -81,6 +110,60 @@ The transpiler and runners use their existing shared execution path, carrying
 the same worker ownership and registered NoTorch operations into compiled
 programs. See [workers](docs/WORKERS.md) and
 [parliament values](docs/PARLIAMENT_VALUES.md) for the executable contracts.
+
+### PR #36 follow-up — validate the whole AWAIT before joining
+
+The review found that `AWAIT first second INTO kept` treated its tokens as a
+plain worker list and consumed the first two results before reporting an error.
+The parser now recognizes every case-insensitive `INTO` token and requires
+exactly `name INTO variable`, with one `INTO`, before attempting any join.
+Misplaced or repeated markers preserve pending results and the destination.
+The program's later error teardown still drains its owned children.
+
+The regression first failed on the old parser: after the malformed statement,
+a new launch unexpectedly succeeded because earlier results had been consumed.
+Eight malformed forms now keep all 16 outstanding slots occupied until explicit
+program close, without timing assumptions. Closing then frees the program's
+slots while C-owned jobs remain retrievable. Interpreter, resumable and bytecode
+hosts also reject all eight forms with the syntax diagnostic and unchanged
+destinations, including a variable named `INTO`.
+
+`make test-workers` passes **1,679** runtime/C-host checks and **1,699** with
+allocation/thread-creation failure injection, plus the existing worker fixtures
+through all five execution paths. `git diff --check` passes. This follow-up
+changes only AWAIT syntax validation and its targeted regression coverage.
+
+### Completion identity — exact flat-record equality
+
+`record_equal(left, right)` and C `am_record_equal` compare the complete ordered
+record value without allocation: field names, leaf types, text bytes, array
+lengths and shapes, list order, ordered map keys and numeric contents. Every
+float compares by its binary32 bits. Signed zeros, one-ULP differences and NaN
+payloads stay distinct; identical NaN representations compare equal. Capacity,
+reference counts and pointer identity do not affect equality. The comparison
+preserves logical values and synchronizes CUDA CPU mirrors when needed.
+
+Haiku can use this generic boundary to bind a worker completion to its full
+prepared experience. It requires neither a rounded decimal digest nor writing
+a checkpoint to compare values. Schema and publication remain application code.
+C returns 1/0 and rejects NULL with -1; AML rejects wrong types and arity before
+replacing a destination. The intrinsic is case-insensitive and reserved.
+
+The old runner rejected the first equality fixture before this primitive was
+added. `make test-records` now passes **2,358** C API checks, **4,267** with
+allocation tracking, and **953** runtime checks. Numeric negative controls
+compare all pairs of 13 scalar/array patterns (including positive/negative zero,
+subnormals, infinities and quiet/signaling NaN payloads), plus six finite map
+patterns. Further controls cover field/type/key changes, shapes, all container
+orders, UTF-8 bytes and different reserve capacities. C calls and an AML call
+with bound arguments leave the allocation budget untouched.
+
+The expanded source fixture passes through interpreter, resumable, bytecode,
+CLI and compiled scalar paths. All **62** invalid record calls, including nine
+new equality argument failures, stop before later AML/C effects in all five
+paths and preserve failed-assignment destinations in the persistent hosts.
+Existing checkpoint ownership, wire, allocation and I/O gates in this targeted
+suite also pass. `git diff --check` passes; no whole-language rerun was needed.
 
 ## 2026-10-13 — memory names its states (v5.10.0)
 

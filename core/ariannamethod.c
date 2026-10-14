@@ -3183,6 +3183,51 @@ static int am_spawn_await_owner(uint64_t owner, const char* name, AML_Var* out) 
     return -1;
 }
 
+// Validate the complete discard list before claiming any result. In particular,
+// a misplaced INTO may be a real worker name, but cannot consume earlier jobs
+// if it (or any later name) is absent from this owner's pending set.
+static int am_spawn_await_names_owner(uint64_t owner, char* const* names, int count) {
+    if (count > AM_MAX_SPAWNS) {
+        set_error(NULL, "too many AWAIT worker names"); return -1;
+    }
+    int slots[AM_MAX_SPAWNS];
+    unsigned seen = 0;
+    pthread_mutex_lock(&g_spawn_mutex);
+    for (int n = 0; n < count; n++) {
+        if (!am_async_name_valid(names[n])) {
+            set_error(NULL, "invalid worker name"); goto invalid;
+        }
+        int slot = -1;
+        for (int i = 0; i < AM_MAX_SPAWNS; i++) {
+            if (g_spawn_used[i] == 1 && g_spawn_owners[i] == owner &&
+                !strcmp(g_spawns[i].name, names[n])) { slot = i; break; }
+        }
+        if (slot < 0) {
+            snprintf(g_error, sizeof(g_error), "no unjoined spawn: %s", names[n]);
+            goto invalid;
+        }
+        if (seen & (1u << slot)) {
+            set_error(NULL, "duplicate AWAIT worker name"); goto invalid;
+        }
+        seen |= 1u << slot;
+        slots[n] = slot;
+    }
+    for (int n = 0; n < count; n++) g_spawn_used[slots[n]] = 2;
+    pthread_mutex_unlock(&g_spawn_mutex);
+    int rc = 0;
+    char first_error[256] = {0};
+    for (int n = 0; n < count; n++) {
+        int result = am_spawn_join_claimed(slots[n], NULL);
+        if (result && !rc) { rc = result; snprintf(first_error, sizeof(first_error), "%s", g_error); }
+    }
+    if (rc) snprintf(g_error, sizeof(g_error), "%s", first_error);
+    return rc;
+invalid:
+    // Nothing has been reserved yet; every pending value remains retrievable.
+    pthread_mutex_unlock(&g_spawn_mutex);
+    return -1;
+}
+
 static int am_spawn_join_owner(uint64_t owner) {
     int rc = 0;
     char first_error[256] = {0};
@@ -3678,7 +3723,7 @@ static int aml_map_function(const char* name) {
 
 static int aml_record_function(const char* name) {
     static const char* names[] = {"record_new", "record_set", "record_get", "record_has",
-        "record_keys", "record_kind", "record_clone", "record_replace", "record_swap",
+        "record_keys", "record_kind", "record_clone", "record_equal", "record_replace", "record_swap",
         "checkpoint_save", "checkpoint_load", "file_exists"};
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (!strcasecmp(name, names[i])) return 1;
@@ -3934,6 +3979,14 @@ static int aml_record_dispatch(AML_ExecCtx* ctx, const char* name,
             out->list = am_record_keys(record);
             if (!out->list) { set_error(ctx, "record keys allocation failed"); return 1; }
             out->type = AML_TYPE_LIST;
+            return 0;
+        } else if (!strcasecmp(name, "record_equal")) {
+            if (args[1].type != AML_TYPE_RECORD || !args[1].record) {
+                set_error(ctx, "record_equal requires two records"); return 1;
+            }
+            int equal = am_record_equal(record, args[1].record);
+            if (equal < 0) { set_error(ctx, "record_equal requires valid records"); return 1; }
+            out->value = (float)equal;
             return 0;
         } else if (!strcasecmp(name, "record_swap")) {
             if (args[1].type != AML_TYPE_RECORD || !args[1].record ||
@@ -6398,15 +6451,14 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
       snprintf(names, sizeof(names), "%s", arg ? arg : "");
       names[aml_comment_start(names) - names] = 0;
       char* tokens[AML_MAX_LINE_LEN / 2];
-      int count = 0, into = -1;
+      int count = 0;
       char* save = NULL;
       for (char* word = strtok_r(names, " \t", &save); word; word = strtok_r(NULL, " \t", &save)) {
-        tokens[count] = word;
-        if (count == 1 && !strcasecmp(word, "INTO")) into = count;
-        count++;
+        tokens[count++] = word;
       }
-      if (into >= 0) {
-        if (count != 3 || into != 1) { set_error_at(ctx, lineno, "expected AWAIT name INTO variable"); return; }
+      // Only this exact positional form reserves INTO as a marker. A worker
+      // or result variable may itself be called INTO; other forms are lists.
+      if (count == 3 && !strcasecmp(tokens[1], "INTO")) {
         const char* name = tokens[2];
         int valid = isalpha((unsigned char)*name) || *name == '_';
         for (const char* p = name; *p; p++) valid = valid && (isalnum((unsigned char)*p) || *p == '_');
@@ -6427,12 +6479,8 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
         else if (value.type == AML_TYPE_RECORD) symtab_set_record(tab, name, value.record);
         else symtab_set(tab, name, value.value);
       } else if (count) {
-        int failed = 0;
-        for (int i = 0; i < count; i++) {
-          if (am_spawn_await_owner(ctx->spawn_owner, tokens[i], NULL) && !failed) {
-            set_error_at(ctx, lineno, g_error); failed = 1;
-          }
-        }
+        if (am_spawn_await_names_owner(ctx->spawn_owner, tokens, count))
+          set_error_at(ctx, lineno, g_error);
       } else if (ctx->spawn_owner && am_spawn_join_owner(ctx->spawn_owner)) {
         set_error_at(ctx, lineno, g_error);
       }
@@ -6708,7 +6756,7 @@ static int aml_reserved_function(const char* name) {
         "nt_parliament_elect", "nt_parliament_inject", "nt_oja",
         "tokenizer_load", "tokenizer_pieces", "tokenizer_identity", "codepoint_isalnum", "read_line",
         "record_new", "record_set", "record_get", "record_has", "record_keys", "record_kind",
-        "record_clone", "record_replace", "record_swap", "checkpoint_save", "checkpoint_load", "file_exists"
+        "record_clone", "record_equal", "record_replace", "record_swap", "checkpoint_save", "checkpoint_load", "file_exists"
     };
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (strcasecmp(name, names[i]) == 0) return 1;
@@ -12502,6 +12550,56 @@ AM_Record* am_record_clone(const AM_Record* record) {
         copy->len++;
     }
     return copy;
+}
+
+static int am_record_text_equal(const AM_String* left, const AM_String* right) {
+    return left->byte_len == right->byte_len &&
+        !memcmp(left->data, right->data, (size_t)left->byte_len);
+}
+
+int am_record_equal(const AM_Record* left, const AM_Record* right) {
+    if (!left || !right) return -1;
+    if (left->len != right->len) return 0;
+    for (int i = 0; i < left->len; i++) {
+        const AM_RecordEntry* a = &left->entries[i];
+        const AM_RecordEntry* b = &right->entries[i];
+        if (!am_record_text_equal(a->key, b->key) || a->value.type != b->value.type) return 0;
+        const AML_Var* av = &a->value;
+        const AML_Var* bv = &b->value;
+        switch (av->type) {
+        case AML_TYPE_FLOAT:
+            if (memcmp(&av->value, &bv->value, sizeof(float))) return 0;
+            break;
+        case AML_TYPE_ARRAY:
+            if (av->array->len != bv->array->len || av->array->rows != bv->array->rows ||
+                av->array->cols != bv->array->cols) return 0;
+#ifdef USE_CUDA
+            ensure_cpu(av->array); ensure_cpu(bv->array);
+#endif
+            if (memcmp(av->array->data, bv->array->data, (size_t)av->array->len * sizeof(float))) return 0;
+            break;
+        case AML_TYPE_STRING:
+            if (!am_record_text_equal(av->string, bv->string)) return 0;
+            break;
+        case AML_TYPE_LIST:
+            if (av->list->len != bv->list->len) return 0;
+            for (int j = 0; j < av->list->len; j++)
+                if (!am_record_text_equal(av->list->items[j], bv->list->items[j])) return 0;
+            break;
+        case AML_TYPE_MAP:
+            if (av->map->len != bv->map->len) return 0;
+            for (int j = 0; j < av->map->len; j++) {
+                const AM_MapEntry* ae = &av->map->entries[j];
+                const AM_MapEntry* be = &bv->map->entries[j];
+                if (!am_record_text_equal(ae->key, be->key) ||
+                    memcmp(&ae->value, &be->value, sizeof(float))) return 0;
+            }
+            break;
+        default:
+            return -1;
+        }
+    }
+    return 1;
 }
 
 int am_record_swap(AM_Record* a, AM_Record* b) {

@@ -550,6 +550,9 @@ AM_Record* am_record_new(void);
 void am_record_ref(AM_Record* record);
 void am_record_free(AM_Record* record);
 AM_Record* am_record_clone(const AM_Record* record);
+// Allocation-free exact ordered contents: float bits, text bytes and shapes.
+// Valid records only; 1 equal, 0 different, -1 for a NULL input.
+int am_record_equal(const AM_Record* left, const AM_Record* right);
 int am_record_set(AM_Record* record, AM_String* key, const AML_Var* value); // 0/-1
 // Borrowed value until any record mutation; never free it.
 const AML_Var* am_record_get(const AM_Record* record, const AM_String* key);

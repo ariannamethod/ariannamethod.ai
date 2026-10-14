@@ -44,6 +44,7 @@ its application metadata and checked with `tokenizer_identity` before restore.
 | `record_keys(record)` | New ordered string list |
 | `record_kind(record, key)` | `"float"`, `"array"`, `"string"`, `"list"` or `"map"`; matrices are arrays |
 | `record_clone(record)` | Complete independent mutable contents |
+| `record_equal(left, right)` | Scalar 1 for exact ordered contents, otherwise 0; no allocation |
 | `record_replace(live, checked)` | Live record after staging a complete independent copy and replacing its contents |
 | `record_swap(a, b)` | Scalar 1 after allocation-free exchange of the two records' contents |
 | `checkpoint_save(record, path)` | Scalar 1 or 2 after commit; an error before commit |
@@ -77,6 +78,21 @@ fails, all old fields remain intact. Previously retained child references keep
 those old children alive after replacement. Swapping exchanges contents while
 keeping both wrapper identities and reference counts; retained child references
 remain valid, and swapping a record with itself succeeds without work.
+
+`record_equal(left, right)` compares all fields in insertion order. Key bytes,
+leaf types, array lengths and shapes, list item order, ordered map keys and all
+contents must match. Scalar, array and map numbers compare by their exact
+float32 bits: `+0` and `-0` differ, and identical NaN bit patterns compare equal.
+Text compares UTF-8 bytes without normalization. Reference counts, reserve
+capacities, map buckets and pointer identity are not part of the value.
+
+The comparison allocates nothing and preserves both logical values. With CUDA,
+array reads synchronize existing CPU mirrors before inspecting bytes. Already
+bound AML record arguments require no allocation for the call; argument
+expressions retain their ordinary evaluation effects. Wrong argument types or
+arity stop execution and preserve an assignment's old destination. An organism
+can compare a returned job envelope with the complete prepared experience
+before publication, without a rounded decimal digest or checkpoint I/O.
 
 Record reference counts are atomic. Mutable access, replacement and swap belong
 to one execution context or a synchronized embedding host. Workers receive
@@ -181,6 +197,7 @@ AM_Record* am_record_new(void);
 void am_record_ref(AM_Record* record);
 void am_record_free(AM_Record* record);
 AM_Record* am_record_clone(const AM_Record* record);
+int am_record_equal(const AM_Record* left, const AM_Record* right);
 int am_record_set(AM_Record* record, AM_String* key, const AML_Var* value);
 const AML_Var* am_record_get(const AM_Record* record, const AM_String* key);
 int am_record_has(const AM_Record* record, const AM_String* key);
@@ -201,8 +218,12 @@ before later mutation. Keys returns an owned list. The host persistent setter
 copies its record and returns 0 on success; its getter borrows the stored owner.
 Checkpoint errors use an optional bounded NUL-terminated diagnostic buffer.
 All unpublished allocations are released on failure.
+`am_record_equal` requires valid records held against concurrent mutation and
+returns 1 for equality, 0 for a difference, or -1 for a NULL input. It neither
+retains nor releases either owner.
 
-`make test-records` exercises ownership, allocation refusal, exact portable
+`make test-records` exercises ownership, allocation refusal, exact comparison
+(including ULP changes, signed zeros, NaN payloads, types, shapes and order), portable
 bytes, recomputed-checksum structural corruptions, every truncation of a golden
 file, I/O faults, worker/persistent copies and
 all five execution paths. `make test-tokenizer` includes immutable content
