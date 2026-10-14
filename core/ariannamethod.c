@@ -6808,13 +6808,21 @@ static int aml_expand_import(AML_Preparation* prep, const char* text,
         return aml_source_error(origin, lineno, "IMPORT depth limit exceeded");
     if (prep->source_count >= AML_MAX_IMPORTS)
         return aml_source_error(origin, lineno, "IMPORT source limit exceeded");
+    // Validate the opened object; replacing its path cannot change our reader.
+    // Nonblocking open also lets us reject a substituted FIFO without waiting.
+    int fd = open(canonical, O_RDONLY | O_NONBLOCK);
+    if (fd < 0) return aml_source_error(origin, lineno, "cannot open IMPORT source");
     struct stat st;
-    if (stat(canonical, &st) != 0 || !S_ISREG(st.st_mode))
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        close(fd);
         return aml_source_error(origin, lineno, "IMPORT source is not a regular file");
-    if (st.st_size < 0 || st.st_size > 1024 * 1024)
+    }
+    if (st.st_size < 0 || st.st_size > 1024 * 1024) {
+        close(fd);
         return aml_source_error(origin, lineno, "IMPORT source exceeds 1 MiB");
-    FILE* f = fopen(canonical, "rb");
-    if (!f) return aml_source_error(origin, lineno, "cannot open IMPORT source");
+    }
+    FILE* f = fdopen(fd, "rb");
+    if (!f) { close(fd); return aml_source_error(origin, lineno, "cannot open IMPORT source"); }
     size_t size = (size_t)st.st_size;
     char* imported = (char*)malloc(size + 2);
     if (!imported) { fclose(f); return aml_source_error(origin, lineno, "IMPORT allocation failed"); }

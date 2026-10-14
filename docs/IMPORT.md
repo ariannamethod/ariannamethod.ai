@@ -28,6 +28,12 @@ Every preparation error happens before any AML statement in that prepared progra
 
 `IMPORT` accepts a nonempty double-quoted path and an optional trailing `#` comment. It is case-insensitive and must occur at indentation zero. Path text is literal: no expression evaluation or escape expansion. Import files must be regular files without embedded NUL bytes. An empty module is valid. Each directive retains a no-op source boundary, including repeated imports, so adjacent source blocks do not merge through an empty expansion.
 
+The loader opens a source once, checks its regular-file type and size through
+that descriptor, then reads through the same descriptor. A path replacement
+after opening cannot substitute the checked source. Nonblocking opening lets
+preparation reject a FIFO without waiting for a writer. A size change while
+reading still fails the exact-length check before AML effects.
+
 The existing bare pack directives `IMPORT CODES_RIC`, `IMPORT CODES/RIC`, `IMPORT DARKMATTER`, and `IMPORT NOTORCH` remain runtime aliases for `MODE`, including inside conditional blocks. Quoted imports select source modules.
 
 There is one shared namespace for functions and one shared global variable scope. A later top-level assignment to an existing variable updates it in execution order. User function names are case-sensitive; builtin and intrinsic collision checks follow their case-insensitive dispatch. The string intrinsics (`text_len`, `text_bytes`, `text_equal`, `text_find`, `text_slice`, `text_concat`, `text_codepoint`, `text_from_codepoint`) are reserved without consuming function table slots.

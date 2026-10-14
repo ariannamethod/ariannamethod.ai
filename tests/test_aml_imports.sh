@@ -14,6 +14,16 @@ export AML_PREFIX="$WORK/prefix"
     -o "$WORK/import-api"
 "$WORK/import-api" "$WORK/sources"
 
+if [ "$(uname -s)" = Linux ]; then
+    mkdir "$WORK/file-races"
+    "${CC:-cc}" -Wall -Wextra -O2 -I"$ROOT/core" \
+        "$ROOT/tests/test_aml_import_file.c" "$ROOT/libaml.a" -lm -lpthread \
+        -Wl,--wrap=stat,--wrap=fstat -o "$WORK/import-file"
+    timeout 20 "$WORK/import-file" "$WORK/file-races"
+else
+    echo 'SKIP: deterministic IMPORT path replacement requires linker --wrap'
+fi
+
 # Exact root capacity also survives amlc lowering before a C main effect.
 cat >> "$WORK/sources/exact-lines.aml" <<'EOF'
 BLOOD MAIN {

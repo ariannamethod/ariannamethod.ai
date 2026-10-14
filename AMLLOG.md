@@ -12,6 +12,41 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-10-14 — an imported source keeps its opened identity
+
+The three open CodeQL findings on `main@f434a8a` were inspected directly:
+[#20](https://github.com/ariannamethod/ariannamethod.ai/security/code-scanning/20)
+reported the IMPORT `stat`/`fopen` race;
+[#22](https://github.com/ariannamethod/ariannamethod.ai/security/code-scanning/22)
+and [#23](https://github.com/ariannamethod/ariannamethod.ai/security/code-scanning/23)
+reported unchecked `snprintf` cursor advancement in the worker test fixture.
+
+IMPORT now opens once with `O_NONBLOCK`, validates regular-file type and the
+1 MiB bound through `fstat`, and reads through `fdopen` on that same descriptor.
+A pathname replacement after the check cannot replace the reader. FIFO sources
+are refused without waiting, and every refusal releases the descriptor.
+Canonical deduplication, module origins and the exact-length/NUL checks remain.
+The worker fixture checks capacity before pointer arithmetic and checks both
+negative and truncated formatting results before advancing its cursor.
+
+Proof on Linux x86_64 / GCC 13.3:
+
+- A deterministic equal-size path replacement makes the old IMPORT execute
+  the replacement's value. The fixed loader retains the opened value. The new
+  **208-check** gate covers regular/FIFO replacement, FIFO/directory/oversize/
+  metadata refusals and descriptor release across three C execution paths.
+- `make test-imports`: **9,230** existing checks plus the **208** new checks;
+  exact 8,192-line capacity and interpreter/compiled source-origin gates pass.
+- `bash tests/test_aml_workers.sh`: **1,998** normal and **2,018** allocation
+  checks, five execution paths and 80 repeated typed jobs pass.
+- A 64-byte worker-fixture control reproduces the original stack overflow
+  under AddressSanitizer. The fixed helper refuses truncation with no ASan or
+  UBSan finding. Independent review reproduced the 208-check gate with
+  `-Werror`; `git diff --check` is clean.
+
+Quote: “The source stays with the reader.”
+Method: validate the object being used, and advance only by bytes actually held.
+
 ## 2026-10-14 — a day belongs to its experience (v5.13.0)
 
 `utc_day()` gives an organism an explicit UTC civil ordinal to capture with a
