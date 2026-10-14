@@ -207,7 +207,7 @@ static void test_rejections(void) {
     reject_paths("TENSION 0.875\ndef GALVANIZE():\n    return 1\n", "duplicate function");
     reject_paths("TENSION 0.875\ndef bad(a, a):\n    return 1\n", "duplicate function parameter");
     reject_paths("TENSION 0.875\ndef bad(a b):\n    return 1\n", "parameter list");
-    reject_paths("TENSION 0.875\ndef bad(a,b,c,d,e,f,g,h,i):\n    return 1\n", "parameter limit");
+    reject_paths("TENSION 0.875\ndef bad(a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q):\n    return 1\n", "parameter limit");
     reject_paths("TENSION 0.875\ndef bad()\n    return 1\n", "needs ':'");
     reject_paths("TENSION 0.875\ndef bad\n", "invalid function declaration");
     reject_paths("TENSION 0.875\ndef function_name_exceeding_31_bytes_x():\n    return 1\n", "overlong function name");
@@ -221,13 +221,21 @@ static void test_rejections(void) {
 }
 
 static void test_budgets(void) {
-    char script[65536];
+    char script[AML_MAX_LINES * 32];
     strcpy(script, "TENSION 0.875\n");
     memset(script + strlen(script), 'x', AML_MAX_LINE_LEN);
     script[strlen("TENSION 0.875\n") + AML_MAX_LINE_LEN] = 0;
     reject_paths(script, "source line exceeds");
 
     size_t used = 0;
+    for (int i = 0; i < AML_MAX_LINES; i++)
+        append_source(script, sizeof(script), &used, "TENSION 0.875\n");
+    put_file("exact-lines.aml", script);
+    run_paths(script, 0.875f);
+    am_init();
+    CHECK(am_exec_file("exact-lines.aml") == 0);
+    CHECK(am_get_state()->tension == 0.875f);
+    used = 0;
     for (int i = 0; i <= AML_MAX_LINES; i++)
         append_source(script, sizeof(script), &used, "TENSION 0.875\n");
     put_file("tree/too-many-lines.aml", script);

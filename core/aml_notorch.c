@@ -4,7 +4,59 @@
 #include "ariannamethod.h"
 #include "notorch.h"
 #include "sentencepiece.h"
+#include "pen7.h"
 #include <stdio.h>
+#include <string.h>
+
+static void* aml_notorch_model_load(const char* path, char* error, size_t cap) {
+    nt_pen7_model* model = NULL;
+    int rc = nt_pen7_load(path, &model);
+    if (rc && error && cap) snprintf(error, cap, "%s", nt_pen7_error_string(rc));
+    return rc ? NULL : model;
+}
+
+static void aml_notorch_model_destroy(void* model) { nt_pen7_release(model); }
+
+static int aml_notorch_model_info(const void* model, AM_ModelInfo* out) {
+    const nt_pen7_info* info = nt_pen7_get_info(model);
+    if (!info || !out) return -1;
+    out->vocab = info->vocab; out->width = info->width;
+    out->context = info->context; out->layers = info->layers;
+    out->ffn = info->ffn; out->heads = info->heads;
+    memcpy(out->identity, info->identity, sizeof(out->identity));
+    memcpy(out->tokenizer_identity, info->tokenizer_identity, sizeof(out->tokenizer_identity));
+    return 0;
+}
+
+static int aml_notorch_model_encode(const void* model, const char* text, size_t bytes,
+                                    int* ids, size_t capacity, size_t* count,
+                                    char* error, size_t cap) {
+    int rc = nt_pen7_encode(model, text, bytes, ids, capacity, count);
+    if (rc && error && cap) snprintf(error, cap, "%s", nt_pen7_error_string(rc));
+    return rc;
+}
+
+static const unsigned char* aml_notorch_model_piece(const void* model, int id, size_t* bytes) {
+    return nt_pen7_token_piece(model, id, bytes);
+}
+
+static int aml_notorch_model_forward(const void* left, const void* right, float alpha,
+                                     const int* ids, size_t count,
+                                     float* logits, size_t logits_count,
+                                     float* hidden, size_t hidden_count,
+                                     char* error, size_t cap) {
+    nt_pen7_workspace* workspace = NULL;
+    int rc = nt_pen7_workspace_new((nt_pen7_model*)left, count, &workspace);
+    if (!rc) {
+        rc = right ? nt_pen7_mix_forward(left, right, alpha, workspace, ids, count,
+                                         logits, logits_count, hidden, hidden_count)
+                   : nt_pen7_forward(left, workspace, ids, count,
+                                      logits, logits_count, hidden, hidden_count);
+    }
+    nt_pen7_workspace_free(workspace);
+    if (rc && error && cap) snprintf(error, cap, "%s", nt_pen7_error_string(rc));
+    return rc;
+}
 
 static void* aml_notorch_tokenizer_load(const char* path, char* error, size_t cap) {
     return nt_spm_load(path, error, cap);
@@ -74,8 +126,14 @@ void am_use_notorch(void) {
         .pieces = aml_notorch_tokenizer_pieces,
         .identity = aml_notorch_tokenizer_identity,
     };
+    const AM_ModelBackend model = {
+        .load = aml_notorch_model_load, .destroy = aml_notorch_model_destroy,
+        .info = aml_notorch_model_info, .encode = aml_notorch_model_encode,
+        .forward = aml_notorch_model_forward, .piece = aml_notorch_model_piece,
+    };
     am_use_notorch_sampling();
     am_set_numerical_backend(&backend);
     am_set_parliament_backend(&parliament);
     am_set_tokenizer_backend(&tokenizer);
+    am_set_model_backend(&model);
 }

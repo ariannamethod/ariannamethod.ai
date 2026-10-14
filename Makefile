@@ -21,7 +21,7 @@ ifdef BLAS
   endif
 endif
 
-.PHONY: all test test-amlc test-expressions test-imports test-text test-text-lower test-text-fixed test-text-input test-tokenizer test-records test-lists test-maps test-sampling test-numerical test-janus janus clean test-all test-blas amlc runner install notorch install-notorch
+.PHONY: all test test-amlc test-expressions test-imports test-text test-text-lower test-text-fixed test-text-input test-tokenizer test-model test-records test-lists test-maps test-sampling test-numerical test-janus janus clean test-all test-blas amlc runner install notorch install-notorch
 
 # ═══ Core AML ═══
 all: libaml.a runner amlc
@@ -44,7 +44,7 @@ runner: runner/aml
 runner/aml: runner/am.c libaml.a
 	$(CC) $(CFLAGS) -Icore runner/am.c libaml.a -o $@ $(LDFLAGS)
 
-# Canonical NoTorch sampling, numerical values, and tokenizers use an optional binding. The core archive
+# Canonical NoTorch numerical values, tokenizers and models use an optional binding. The core archive
 # stays usable on its own; build NoTorch's archive before invoking this target.
 NOTORCH_ROOT ?= ../notorch
 NOTORCH_INCLUDE ?= $(NOTORCH_ROOT)
@@ -56,7 +56,7 @@ notorch: all libaml_notorch.a runner/aml-notorch
 libaml_notorch.a: core/aml_notorch.o
 	ar rcs $@ $^
 
-core/aml_notorch.o: core/aml_notorch.c core/ariannamethod.h $(NOTORCH_INCLUDE)/notorch.h $(NOTORCH_INCLUDE)/sentencepiece.h
+core/aml_notorch.o: core/aml_notorch.c core/ariannamethod.h $(NOTORCH_INCLUDE)/notorch.h $(NOTORCH_INCLUDE)/sentencepiece.h $(NOTORCH_INCLUDE)/pen7.h
 	$(CC) $(CFLAGS) -Icore -I$(NOTORCH_INCLUDE) -c $< -o $@
 
 runner/aml-notorch: runner/am.c libaml_notorch.a libaml.a $(NOTORCH_LIB)
@@ -134,6 +134,9 @@ test-text-fixed: all
 
 test-text-input: all
 	bash tests/test_aml_text_input.sh
+
+test-model: notorch
+	NOTORCH_ROOT="$(abspath $(NOTORCH_ROOT))" NOTORCH_LIB="$(abspath $(NOTORCH_LIB))" NOTORCH_INCLUDE="$(abspath $(NOTORCH_INCLUDE))" NOTORCH_LDFLAGS="$(NOTORCH_LDFLAGS)" bash tests/test_aml_model.sh
 
 test-tokenizer: notorch
 	NOTORCH_LIB="$(abspath $(NOTORCH_LIB))" NOTORCH_INCLUDE="$(abspath $(NOTORCH_INCLUDE))" NOTORCH_LDFLAGS="$(NOTORCH_LDFLAGS)" bash tests/test_aml_tokenizer.sh

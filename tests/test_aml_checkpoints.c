@@ -101,7 +101,7 @@ static void test_corruption(const char* path) {
             case 1: u32_at(changed.bytes + 8, 2); break;
             case 2: u32_at(changed.bytes + 12, 1); break;
             case 3: u64_at(changed.bytes + 16, UINT64_MAX); break;
-            case 4: u32_at(changed.bytes + 24, 256 + 1); break;
+            case 4: u32_at(changed.bytes + 24, AM_MAX_RECORD_FIELDS + 1); break;
             case 5: u32_at(changed.bytes + 24, 4); break;
             case 6: changed.bytes[fields[0] + 4] = 99; break;
             case 7: changed.bytes[fields[0] + 5] = 1; break;
@@ -245,6 +245,20 @@ static void test_allocations(const char* directory, const char* path) {
     (void)directory; (void)path;
 #endif
 }
+static void test_capacity(const char* path) {
+    AM_Record* record = am_record_new(); CHECK(record);
+    AML_Var value = {.type = AML_TYPE_FLOAT};
+    for (int i = 0; i < AM_MAX_RECORD_FIELDS; i++) {
+        char name[32]; snprintf(name, sizeof(name), "field_%03d", i);
+        value.value = (float)i; CHECK(put(record, name, &value) == 0);
+    }
+    CHECK(put(record, "overflow", &value) < 0);
+    char error[256]; CHECK(am_checkpoint_save(record, path, error, sizeof(error)) == 1);
+    AM_Record* loaded = am_checkpoint_load(path, error, sizeof(error));
+    CHECK(loaded && am_record_equal(record, loaded) == 1);
+    AM_List* keys = am_record_keys(loaded); CHECK(keys && keys->len == AM_MAX_RECORD_FIELDS);
+    am_list_free(keys); am_record_free(loaded); am_record_free(record);
+}
 int main(void) {
     char directory[] = "/tmp/aml-record-checkpoint-XXXXXX"; CHECK(mkdtemp(directory));
     char path[512]; snprintf(path, sizeof(path), "%s/state.amlcp", directory);
@@ -252,6 +266,7 @@ int main(void) {
 #ifdef AML_CHECKPOINT_IO_WRAP
     test_io_failures(directory, path);
 #endif
+    test_capacity(path);
     CHECK(unlink(path) == 0 && rmdir(directory) == 0);
     printf("AML_CHECKPOINT_OK %d checks\n", checks); return 0;
 }

@@ -1,6 +1,6 @@
 # AML — Arianna Method Language
 
-**Version:** 5.11.0 (Owned workers and parliament numerical values)
+**Version:** 5.12.0 (Immutable inference models and complete experience capacity)
 **Extension:** `.aml`
 **Status:** Living specification
 
@@ -91,13 +91,13 @@ limits, and compiled-program file requirements.
 
 Strings are immutable validated UTF-8, with at most 1 MiB of content and no
 embedded NUL. Variables, arguments, and returns carry their actual scalar,
-array, string, string-list, numeric-map, immutable-tokenizer, or flat-record type. User functions require exactly their declared arity.
+array, string, string-list, numeric-map, immutable-tokenizer, immutable-model, or flat-record type. User functions require exactly their declared arity, up to sixteen parameters.
 `PRINT value` writes UTF-8 strings, numeric scalars, or bracketed numeric arrays,
 then a newline. String lists print as JSON arrays of UTF-8 strings with escaped
 quotes, backslashes, and control bytes. `ECHO` keeps its literal command semantics.
 Numeric maps print as JSON objects with the same escaped keys and finite
 numeric values, in insertion order.
-Tokenizer values print as `<tokenizer>`; records print as `<record>`.
+Tokenizer values print as `<tokenizer>`; inference models as `<model>`; records as `<record>`.
 
 The ten text expression intrinsics are `text_len`, `text_bytes`, `text_equal`,
 `text_find`, `text_slice`, `text_concat`, `text_codepoint`, and
@@ -159,6 +159,30 @@ callback. Missing identity support, invalid callback output, wrong arguments
 and allocation failure are explicit errors. [TOKENIZER.md](../docs/TOKENIZER.md)
 defines backend ownership and model support.
 
+`model_try_load(path)` returns an immutable inference owner with quiet readiness,
+diagnostic and copied model metadata, including an unavailable result for empty,
+missing or corrupt paths and absent backends. Nonempty relative paths keep their
+source origin. `model_ready`, `model_error`, `model_info`, `model_identity` and
+`model_tokenizer_identity` expose the immutable outcome. The two identities are
+validated lowercase SHA-256 strings from the exact loaded bytes and canonical
+BPE data. Empty paths do not call the backend.
+
+`model_encode(model, text, max_tokens)` returns a fresh numeric token vector;
+nonempty valid UTF-8 text must fit the backend bound and integer capacity
+`1..context`, without truncation. `model_piece(model, id)` returns an exact UTF-8
+surface, or empty text for byte pieces containing NUL or partial UTF-8.
+`model_forward(model, ids)` and `model_mix_forward(left, right, alpha, ids)`
+return fresh flat `{ok, error, logits, hidden}` records. Failed forwards return
+`{ok: 0, error: diagnostic}`, omitting both arrays. IDs are integral in
+`0..vocab-1`; alpha is finite in `[0,1]`. Mixtures require compatible geometry,
+tokenizer identity and backend; endpoints use the exact source body. The
+NoTorch PEN7 bridge starts each pass at learned position zero with a private
+workspace and returns the final last-token normalized contextual representation.
+Model values retain atomic references through assignments, functions,
+persistent globals and worker snapshots/results. They cannot enter flat records
+or checkpoints. [MODELS.md](../docs/MODELS.md) defines the complete backend,
+metadata, ownership, error and build contracts.
+
 String lists are ordered mutable containers of immutable text, with a maximum
 of 65,536 items. Their intrinsics are `list_new`, `list_len`, `list_get`,
 `list_push`, `list_set`, `list_find`, `list_slice`, `list_clone`, `list_sorted`,
@@ -197,9 +221,9 @@ function parameters share it. Failed set growth preserves the prior map.
 Numeric operations reject maps. [MAPS.md](../docs/MAPS.md) defines ownership,
 host APIs, execution bounds, and operation-level allocation guarantees.
 
-Flat records group at most 256 ordered string-keyed fields. Leaves are scalar
+Flat records group at most 512 ordered string-keyed fields. Leaves are scalar
 float, numeric array/matrix, UTF-8 string, string list, or numeric map; nested
-records and tokenizer handles are rejected. `record_new()` creates an owner;
+records, tokenizer and inference-model handles are rejected. `record_new()` creates an owner;
 `record_set(r, key, value)` copies mutable leaves before publishing and returns
 r. `record_get(r, key)` retains the typed leaf; `record_has` returns 0/1;
 `record_keys` returns an independent ordered string list; `record_kind` returns
@@ -227,7 +251,7 @@ require one execution context or a synchronized embedding host.
 
 `checkpoint_save(record, path)` serializes the explicit record in portable
 version-1 form, preserving float32 bits, matrix shape and all ordered contents.
-The format admits 64 MiB total, 256 fields and 1,048,576 aggregate string/key
+The format admits 64 MiB total, 512 fields and 1,048,576 aggregate string/key
 objects, with each existing leaf limit enforced. A CRC32 covers its versioned
 header and payload. Save encodes before creating a mode-0600 temporary in the
 destination directory, writes/synchronizes/closes it, renames it to commit, then
@@ -283,7 +307,7 @@ A missing backend is an explicit runtime error; existing `randn` and tensor
 initialization keep their current streams. See [SAMPLING.md](../docs/SAMPLING.md).
 
 Numerical values use an independent optional `AM_NumericalBackend` table.
-`am_use_notorch()` registers canonical NoTorch numerical, sampling, tokenizer
+`am_use_notorch()` registers canonical NoTorch numerical, sampling, tokenizer, model
 and parliament tables; the sampling-only registration keeps its existing
 contract. Registration copies the tables,
 survives initialization, and must finish before workers run. A missing or
@@ -335,7 +359,7 @@ packed layouts and the canonical numerical contracts.
 The numeric array queries `len`, `sum`, `rows`, and `cols` take exactly one typed
 argument; `dot` takes exactly two. Parenthesized and returned values retain
 their type. Optional gamma/beta/bias array arguments are evaluated once and
-reject text/list/map/tokenizer/record values before the numeric operation updates output or tape.
+reject text/list/map/tokenizer/model/record values before the numeric operation updates output or tape.
 Existing scalar and undefined-name placeholders retain their absent-array
 behavior.
 
@@ -1390,7 +1414,7 @@ Each `SPAWN` block runs in its own pthread with detached mutable values,
 prepared helper code and source origins. Global variables and the currently
 visible function-local frame are captured separately; called helpers retain
 normal AML global/local resolution. Arrays, lists, maps and records are copied;
-immutable strings and tokenizers retain atomic references. The process field,
+immutable strings, tokenizers and inference models retain atomic references. The process field,
 tape and channels retain shared ownership. Build with `AM_ASYNC_DISABLED` to
 omit the async APIs.
 
@@ -1420,7 +1444,7 @@ result slot until joined; a
 successful or failed join frees that slot for subsequent jobs.
 
 A worker block can return a float, array/matrix, UTF-8 string, string list,
-numeric map, immutable tokenizer or flat record. The result owns its references
+numeric map, immutable tokenizer, immutable inference model or flat record. The result owns its references
 across worker teardown and is transferred into the awaiting scope exactly
 once. Missing jobs, duplicate awaits, missing explicit returns and worker
 execution errors leave the destination unchanged and stop the awaiting
