@@ -12,6 +12,44 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-10-14 — a day belongs to its experience (v5.13.0)
+
+`utc_day()` gives an organism an explicit UTC civil ordinal to capture with a
+foreground request. One `time(NULL)` call becomes `floor(POSIX_seconds / 86400)`;
+day zero is 1970-01-01 and the boundary is midnight UTC. Seconds stay at double
+precision until the bounded, exactly representable float32 day is published.
+The inclusive domain is `[-16777216, 16777216]`. Clock failure and exceeded
+range stop execution with named diagnostics while preserving the destination.
+The host's `-1` time sentinel remains a failure; other signed pre-epoch seconds
+use floor. No global field, calendar control, provider registry or public C API
+changes. Existing Janus field calculations keep their noon-UTC epoch.
+
+Expression dispatch reserves the name case-insensitively without taking a
+function slot. Preparation reads no clock; execution samples the current day.
+Ordinary scalar/record ownership carries a captured day through workers and
+checkpoints. The organism decides when to capture, replay and publish it.
+
+Proof on Linux x86_64 / GCC 13.3:
+
+- `make test-utc-day`: **1,117** real-clock C/runtime checks and **3,235** with
+  linker-wrapped `time`. Frozen fixtures cover midnight, 29 February, the Janus
+  noon, negative days, both exact-domain endpoints and refused neighbours.
+- Three timezone settings give the same ordinals. Whole-`AM_State` comparison,
+  unchanged birth/key/epoch controls, one-read counters, preparation/reexecution
+  boundaries, detached worker receipts and all **239** user functions pass.
+- Interpreter, resumable host, bytecode, runner and scalar compiled CLI agree.
+  Five invalid call/declaration cases, clock failure and out-of-domain values
+  stop before later AML and C-main effects. Clock substitution lives in test
+  linker fixtures only; the production runtime exposes no clock override.
+- `make test`: **550/550**. `make test-expressions`: **1,201** checks and **48**
+  rejected programs in five paths. `make test-imports`: **9,230** checks,
+  including exact **8,192** lines and overflow. The **512**-field record limit
+  and checkpoint encoding remain unchanged.
+
+README, `spec/AML_SPEC.md` and `docs/UTC_DAY.md` define the epoch, errors and
+capture contract. The spec's directive-lowering section now states the existing
+8,192-line frontend/runtime bounds. Main was refreshed at `745fdb6` before commit.
+
 ## 2026-10-14 — immutable bodies enter the language (v5.12.0)
 
 Haiku's frozen PEN7 sides now enter AML through an owned immutable model value.
