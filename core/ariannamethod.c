@@ -5426,6 +5426,9 @@ static const AML_BuiltinDef g_builtins[BUILTIN_COUNT] = {
     { "field_assemble",      BUILTIN_FIELD_ASSEMBLE,      0 },
 };
 
+_Static_assert(BUILTIN_COUNT <= AML_MAX_FUNCS,
+               "registered builtins must fit the shared function table");
+
 static void aml_register_builtins(AML_ExecCtx* ctx) {
     for (int i = 0; i < BUILTIN_COUNT; i++) {
         if (ctx->funcs.count >= AML_MAX_FUNCS) break;

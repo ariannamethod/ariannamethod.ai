@@ -123,7 +123,7 @@ scaled integer. Conversion uses integer arithmetic and preserves the caller's
 locale, rounding mode and floating-point exception flags. Invalid arguments or
 allocation failure stop execution without replacing the destination value.
 [TEXT_FIXED.md](../docs/TEXT_FIXED.md) defines the bit-level contract and tests.
-The shared function table holds 256 slots: 17 registered builtins and 239 user
+The shared function table holds 512 slots: 17 registered builtins and 495 user
 definitions. Intrinsics do not consume slots. Excess definitions fail during
 preparation before any statement executes.
 
@@ -221,7 +221,7 @@ function parameters share it. Failed set growth preserves the prior map.
 Numeric operations reject maps. [MAPS.md](../docs/MAPS.md) defines ownership,
 host APIs, execution bounds, and operation-level allocation guarantees.
 
-Flat records group at most 512 ordered string-keyed fields. Leaves are scalar
+Flat records group at most 1,024 ordered string-keyed fields. Leaves are scalar
 float, numeric array/matrix, UTF-8 string, string list, or numeric map; nested
 records, tokenizer and inference-model handles are rejected. `record_new()` creates an owner;
 `record_set(r, key, value)` copies mutable leaves before publishing and returns
@@ -251,7 +251,7 @@ require one execution context or a synchronized embedding host.
 
 `checkpoint_save(record, path)` serializes the explicit record in portable
 version-1 form, preserving float32 bits, matrix shape and all ordered contents.
-The format admits 64 MiB total, 512 fields and 1,048,576 aggregate string/key
+The format admits 64 MiB total, 1,024 fields and 1,048,576 aggregate string/key
 objects, with each existing leaf limit enforced. A CRC32 covers its versioned
 header and payload. Save encodes before creating a mode-0600 temporary in the
 destination directory, writes/synchronizes/closes it, renames it to commit, then
@@ -300,7 +300,7 @@ The expression leaves `AM_State`, global calendar controls and all owner values
 unchanged. It is evaluated at execution time, including for prepared/compiled
 programs; preparation captures no day. Callers choose when to capture a day
 and may carry it through records, workers or checkpoints. The name is reserved
-case-insensitively and consumes no registered function slot: 239 user definitions
+case-insensitively and consumes no registered function slot: 495 user definitions
 remain available. [UTC_DAY.md](../docs/UTC_DAY.md) documents the epoch and examples.
 
 Owned sampling uses an optional registered NoTorch backend. `rng_new(seed)`
@@ -396,12 +396,12 @@ and retain their block structure. Runtime failure prints `am_get_error()` and
 terminates before `main()`.
 
 `BLOOD COMPILE`, `BLOOD MAIN`, `BLOOD INCLUDE`, and `BLOOD LINK` retain their C
-compilation roles. Runtime source is bounded to 8,192 nonblank, noncomment lines
+compilation roles. Runtime source is bounded to 16,384 nonblank, noncomment lines
 of at most 511 bytes each in `amlc`; the interpreter's own line limits also
 apply. The call supplies the absolute input path captured by `amlc` and
 resolves runtime `INCLUDE` from that directory, regardless of launch directory.
 The main source file is embedded; imported and included files are read at runtime.
-The runtime accepts at most 255 bytes per executable line and 8,192 expanded
+The runtime accepts at most 255 bytes per executable line and 16,384 expanded
 lines, including import boundaries; exceeded budgets fail explicitly.
 
 `--scalar` links available AML/NoTorch archives without BLAS flags or libraries;

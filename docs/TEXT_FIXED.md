@@ -93,7 +93,7 @@ AML effects or C main; persistent aliases and failed destinations survive.
 Allocation refusal covers both string allocations and each preparation,
 execution and publication boundary through the three C execution APIs.
 
-The suite also calls every one of 112 and 239 user functions, rejects the
-240th definition before effects in all five paths, and runs a 239-function
-worker. The shared runtime now admits 8,192 expanded lines; the import suite
+The suite also calls every one of 112, 239, 240 and 495 user functions, rejects the
+496th definition before effects in all five paths, and runs a 495-function
+worker. The shared runtime now admits 16,384 expanded lines; the import suite
 checks exact capacity and overflow before effects.

@@ -69,25 +69,48 @@ The bytecode path uses the prepared function table once and advances past alread
 | Imported file | 1 MiB |
 | Source files per preparation | 64 including the root (`AML_MAX_IMPORTS`) |
 | Nested import edges from root | 16 (`AML_MAX_IMPORT_DEPTH`) |
-| Expanded executable/source-boundary lines | 8192 (`AML_MAX_LINES`) |
+| Expanded executable/source-boundary lines | 16384 (`AML_MAX_LINES`) |
 | Nonblank, noncomment line content after indentation | 255 bytes plus NUL (`AML_MAX_LINE_LEN`) |
-| Function table | 256 entries, including 17 current registered builtins: 239 user definitions |
+| Function table | 512 entries, including 17 current registered builtins: 495 user definitions |
 | Function name and parameter name | 31 bytes plus NUL |
 | Parameters per function | 16 |
 
-Whole-line comments and blank lines do not consume expanded line slots. Import boundaries do consume slots. The root `amlc` frontend accepts 8192 directives; imported runtime sources share the expanded 8192-line budget. These budgets fail explicitly instead of dropping trailing lines or definitions. The expanded budgets accommodate Haiku's complete experience, lexical-source and parliament organs.
+Whole-line comments and blank lines do not consume expanded line slots. Import boundaries do consume slots. The root `amlc` frontend accepts 16384 directives; imported runtime sources share the expanded 16384-line budget. These budgets fail explicitly instead of dropping trailing lines or definitions. The expanded budgets accommodate Haiku's complete experience, lexical-source, parliament and recursive-symbol organs.
 
-Rebuild C hosts together with the updated runtime: typed public structs and
-function argument tables have grown. On Linux x86_64, `AML_Functab` occupies
-143,364 bytes and `AML_ExecCtx` 561,912 bytes. Resumable programs own their
-context on the heap; ordinary and bytecode execution retain their existing
-stack context. The suites cover 239-function workers, sixteen typed arguments,
-exact 8,192-line execution and over-capacity preparation failure.
+Rebuild C hosts together with the updated runtime: the public `AML_Functab`
+and `AML_ExecCtx` layouts contain the expanded function table. On Linux x86_64,
+`AML_Func` remains 560 bytes, `AML_Functab` occupies 286,724 bytes and
+`AML_ExecCtx` 705,272 bytes. The increase from 256 slots is 143,360 bytes per
+context or saved bytecode table. Resumable programs and workers own their
+contexts on the heap; ordinary execution, bytecode execution and bytecode
+preparation retain their existing stack context. Sixteen outstanding workers
+therefore add at most 2,293,760 bytes of table storage over the old capacity.
+
+All imported modules use this one table. Worker snapshots copy the complete
+prepared table, and `amlc --scalar` prepares it through the same runtime.
+The compiler's separate 256 `BLOOD COMPILE` block limit does not count AML
+functions. The suites call every one of 495 user functions, preserve imported
+high-index helpers after source removal and through worker snapshots, and
+reject definition 496 at its source before effects. Sixteen arguments and the
+exact 16,384-line bound remain separately enforced.
+
+Source capacity increases heap storage, not execution-context stack size. Each
+preparation reserves 16,384 `AML_Line` entries of 520 bytes on Linux x86_64:
+8,519,680 bytes, twice the old reservation. Inherited workers copy only their
+actual prepared line count. Bytecode allocates one 4,140-byte operation per
+actual line, up to 67,829,760 bytes at the new limit. The compiler frontend's
+directive table is 8,388,608 bytes in static storage, not on its stack. The
+1 MiB bound on an individual imported file remains unchanged.
 
 ## Verification
 
 ```sh
 bash tests/test_aml_imports.sh
 ```
+
+With an existing build, `bash tests/test_aml_imports.sh --line-capacity` runs
+only the source-boundary gate. Its last worker publishes a value distinct from
+the prefix; the compiled C main verifies that value. Removing the final four
+lines must fail the same compiled witness.
 
 The suite exercises nested and diamond imports, canonical deduplication through a symlink, ordered shared globals, cross-module function calls, imported function and worker origins, source diagnostics, resumable and repeated bytecode snapshots after file removal, and interpreter/scalar executable parity from another directory. Rejection cases cover malformed directives and declarations, missing/nonregular/NUL-containing sources, cycles, function collisions, and path/source/depth/line/function budgets. The executable failure cases check that neither preceding AML effects nor `BLOOD MAIN` run after preparation failure.

@@ -154,12 +154,30 @@ record_set(right, 'c', 2)
 assert(record_equal(left, right) == 0, 'record key bytes differ')
 full = record_new()
 field = 0
-while field < 512:
+while field < 1024:
     record_set(full, text_fixed(field, 0), field)
     field = field + 1
-assert(list_len(record_keys(full)) == 512, 'full record capacity')
+assert(list_len(record_keys(full)) == 1024, 'full record capacity')
+record_set(full, '1023', [1, 2])
+expected_full = record_clone(full)
+record_set(expected_full, '0', 99)
+expected_array = record_get(expected_full, '1023')
+expected_array[1] = 7
+CHANNEL CREATE full_gate 1
 SPAWN full_copy:
+    CHANNEL READ full_gate go
+    record_set(full, '0', 99)
+    received_array = record_get(full, '1023')
+    received_array[1] = 7
     return full
+record_set(full, '1', 88)
+CHANNEL WRITE full_gate 1
 AWAIT full_copy INTO received
-assert(record_equal(full, received), 'full record worker result')
+assert(record_equal(expected_full, received), 'full record worker result')
+assert(record_get(full, '0') == 0 and record_get(full, '1') == 88, 'full record independent parent')
+parent_array = record_get(full, '1023')
+assert(parent_array[1] == 2, 'full record independent mutable leaf')
+record_swap(full, received)
+assert(record_equal(full, expected_full), 'full record publication')
+assert(record_get(received, '1') == 88, 'publication retains previous owner')
 PRINT 'AML_RECORD_VECTORS_OK'

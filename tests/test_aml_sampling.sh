@@ -118,9 +118,9 @@ printf 'assert(count == 600, "compiled root source budget")\n' >> "$WORK/large.a
 "$ROOT/tools/amlc" "$WORK/large.aml" --scalar -o "$WORK/large" > "$WORK/large-build.out" 2> "$WORK/large-build.err"
 "$WORK/large"
 echo 'PASS compiler source budget: 602 root directives survive lowering and execution'
-for ((i=0; i<8193; i++)); do printf 'count = 1\n'; done > "$WORK/overflow.aml"
+for ((i=0; i<16385; i++)); do printf 'count = 1\n'; done > "$WORK/overflow.aml"
 if "$ROOT/tools/amlc" "$WORK/overflow.aml" --emit-c > "$WORK/overflow.c" 2> "$WORK/overflow.err"; then
-    echo 'FAIL: compiler accepted 8193 root directives'; exit 1
+    echo 'FAIL: compiler accepted 16385 root directives'; exit 1
 fi
-grep -q 'too many AML directives (max 8192)' "$WORK/overflow.err"
-echo 'PASS compiler overflow: the 8,193rd root directive is rejected'
+grep -q 'too many AML directives (max 16384)' "$WORK/overflow.err"
+echo 'PASS compiler overflow: the 16,385th root directive is rejected'

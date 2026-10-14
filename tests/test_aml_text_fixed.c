@@ -117,12 +117,12 @@ static void test_values(int mode) {
 /* Every admitted helper is called, so registration without usable entries
  * cannot pass. Definitions and sequential calls fit the unchanged line limit. */
 static void append_source(char* script, size_t* used, const char* format, ...) {
-    if (!script || *used >= 32768) abort();
+    if (!script || *used >= 65536) abort();
     va_list args;
     va_start(args, format);
-    int count = vsnprintf(script + *used, 32768 - *used, format, args);
+    int count = vsnprintf(script + *used, 65536 - *used, format, args);
     va_end(args);
-    if (count < 0 || (size_t)count >= 32768 - *used) abort();
+    if (count < 0 || (size_t)count >= 65536 - *used) abort();
     *used += (size_t)count;
 }
 
@@ -138,10 +138,10 @@ static void capacity_script(char* script, int definitions, int print) {
 }
 
 static void test_capacity(void) {
-    CHECK(AML_MAX_FUNCS == 256);
-    CHECK(AML_MAX_LINES == 8192);
-    char script[32768];
-    int counts[] = {112, 239, 240};
+    CHECK(AML_MAX_FUNCS == 512);
+    CHECK(AML_MAX_LINES == 16384);
+    char script[65536];
+    int counts[] = {112, 239, 240, 495, 496};
     for (int mode = 0; mode < 3; mode++) {
         for (size_t j = 0; j < sizeof(counts) / sizeof(counts[0]); j++) {
             int n = counts[j];
@@ -152,7 +152,7 @@ static void test_capacity(void) {
             CHECK(am_exec("TENSION 0.125\n") == 0);
             am_persistent_mode(1);
             int rc = run(mode, script);
-            if (n < 240) {
+            if (n < 496) {
                 CHECK(rc == 0);
                 CHECK(am_get_var_float("total") == (float)(n * (n - 1) / 2));
                 CHECK(am_get_state()->tension == 0.875f);
@@ -165,15 +165,20 @@ static void test_capacity(void) {
     }
     am_init();
     CHECK(am_channel_create("capacity_result", 1) >= 0);
-    capacity_script(script, 239, 0);
+    capacity_script(script, 495, 0);
     CHECK(am_spawn_launch("capacity_worker", script) == 0);
     CHECK(am_spawn_await("capacity_worker") == 0);
     float total = -1;
     CHECK(am_channel_read("capacity_result", &total) == 0);
-    CHECK(total == 28441);
+    CHECK(total == 122265);
+    capacity_script(script, 496, 0);
+    CHECK(am_exec("TENSION 0.125\n") == 0);
+    CHECK(am_spawn_launch("capacity_overflow", script) < 0);
+    CHECK(strstr(am_get_error(), "function limit exceeded") != NULL);
+    CHECK(am_get_state()->tension == 0.125f);
     am_channel_close_all();
     am_persistent_clear();
-    printf("PASS function slots: 112 and 239 user functions; 240 rejects before effects; worker239; context=%zu bytes\n",
+    printf("PASS function slots: 112/239/240/495 user functions; 496 rejects before effects; worker495; context=%zu bytes\n",
            sizeof(AML_ExecCtx));
 }
 
@@ -241,8 +246,8 @@ int main(int argc, char** argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "--capacity")) {
         int n = atoi(argv[2]);
-        CHECK(n == 112 || n == 239 || n == 240);
-        char script[32768];
+        CHECK(n == 112 || n == 239 || n == 240 || n == 495 || n == 496);
+        char script[65536];
         capacity_script(script, n, 1);
         fputs(script, stdout);
         return 0;

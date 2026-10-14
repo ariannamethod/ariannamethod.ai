@@ -82,9 +82,9 @@ EOF
 done
 echo "PASS fixed text errors: $bad_count programs fail in all five execution paths"
 
-for count in 112 239 240; do
+for count in 112 239 240 495 496; do
     "$WORK/fixed-runtime" --capacity "$count" > "$WORK/capacity.aml"
-    if [ "$count" -lt 240 ]; then
+    if [ "$count" -lt 496 ]; then
         printf '%s\n' "$((count * (count - 1) / 2))" > "$WORK/capacity.expected"
         "$ROOT/runner/aml" "$WORK/capacity.aml" > "$WORK/capacity.out" 2> "$WORK/capacity.err"
         diff -u "$WORK/capacity.expected" "$WORK/capacity.out"
@@ -100,17 +100,17 @@ int main(void) { puts("WRONG_C_MAIN"); return 0; }
 }
 EOF
         if "$ROOT/runner/aml" "$WORK/capacity.aml" > "$WORK/capacity.out" 2> "$WORK/capacity.err"; then
-            echo 'FAIL: runner accepted 240 user functions'; exit 1
+            echo 'FAIL: runner accepted 496 user functions'; exit 1
         fi
         grep -q 'function limit exceeded' "$WORK/capacity.err"
         test ! -s "$WORK/capacity.out"
         "$ROOT/tools/amlc" "$WORK/capacity.aml" --scalar -o "$WORK/capacity" \
             > "$WORK/capacity-build.out" 2> "$WORK/capacity-build.err"
         if "$WORK/capacity" > "$WORK/capacity.out" 2> "$WORK/capacity.err"; then
-            echo 'FAIL: compiled program accepted 240 user functions'; exit 1
+            echo 'FAIL: compiled program accepted 496 user functions'; exit 1
         fi
         grep -q 'function limit exceeded' "$WORK/capacity.err"
         test ! -s "$WORK/capacity.out"
     fi
 done
-echo 'PASS function slots: all five paths admit 112/239 user definitions and reject 240 before effects'
+echo 'PASS function slots: all five paths admit 112/239/240/495 user definitions and reject 496 before effects'

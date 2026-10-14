@@ -29,14 +29,14 @@ it can report status 2 without retrying or rolling back the turn.
 
 ## Values and ownership
 
-Records preserve insertion order and admit at most **512 fields**. Keys are
+Records preserve insertion order and admit at most **1,024 fields**. Keys are
 ordinary immutable UTF-8 strings, including the empty string. Values are flat
 leaves: a float, numeric array or matrix, UTF-8 string, string list, or numeric
 map. Records, tokenizer models and immutable inference models cannot be fields.
 Models are reopened from application metadata and their stored identities are
 checked before restore. The version-1 checkpoint encoding remains unchanged;
-this runtime accepts up to 512 fields, and older runtimes retain their prior
-256-field load bound.
+this runtime accepts up to 1,024 fields, and older runtimes retain their prior
+512- or 256-field load bound. Existing files remain byte-for-byte compatible.
 
 | Intrinsic | Result |
 |---|---|
@@ -149,7 +149,7 @@ silently substitutes defaults after corruption.
 
 ## Portable checkpoint version 1
 
-The complete file is limited to **64 MiB**. It contains at most 512 fields and
+The complete file is limited to **64 MiB**. It contains at most 1,024 fields and
 **1,048,576 text objects** in aggregate: field keys, string leaves, list items
 and map keys. Each string is limited to 1 MiB, lists/maps to 65,536 entries, and
 arrays to 1,048,576 floats. These bounds apply before decoded objects become
@@ -195,6 +195,16 @@ structural invariant are checked even when a checksum is valid.
 `AM_Record` is opaque. The existing `AML_Var` carries a `type` tag and typed
 leaf pointer, plus the new `record` pointer for record values.
 
+Increasing the field bound from 512 to 1,024 changes no record ABI layout or
+checkpoint encoding. Entry storage grows on the heap as needed; existing
+records of at most 512 fields use the same allocation sizes. On Linux x86_64
+an entry is 104 bytes: growing from 512 to 1,024 reserved entries adds 53,248
+bytes, plus the independently owned leaf payloads. Cloning reserves space for
+the actual field count and still copies mutable leaves. Lookup is linear in
+the field count; exact comparison visits each corresponding entry once.
+The separate function-table expansion requires C hosts using the public
+execution-context structs to rebuild; see [module bounds](IMPORT.md#bounds).
+
 ```c
 AM_Record* am_record_new(void);
 void am_record_ref(AM_Record* record);
@@ -228,6 +238,9 @@ retains nor releases either owner.
 `make test-records` exercises ownership, allocation refusal, exact comparison
 (including ULP changes, signed zeros, NaN payloads, types, shapes and order), portable
 bytes, recomputed-checksum structural corruptions, every truncation of a golden
-file, I/O faults, worker/persistent copies and
-all five execution paths. `make test-tokenizer` includes immutable content
+file, I/O faults, worker/persistent copies and all five execution paths.
+The exact 1,024-field record survives cloning, worker return and publication;
+field 1,025 is refused with all admitted fields preserved. Independent encoders
+check both existing 512-field and full 1,024-field checkpoint bytes.
+`make test-tokenizer` includes immutable content
 identity and the native loaded-byte digest.

@@ -49,10 +49,12 @@ static void test_failures(int mode) {
         char source[256]; snprintf(source, sizeof(source), "def %s():\n    return 0\n", reserved[i]);
         CHECK(run(mode, source) != 0 && strstr(am_get_error(), "intrinsic"));
     }
-    CHECK(run(mode, "full = record_new()\ni=0\nwhile i<512:\n    record_set(full, text_fixed(i, 0), i)\n    i=i+1\n") == 0);
-    CHECK(run(mode, "record_set(full, 'overflow', 513)\n") != 0);
-    CHECK(run(mode, "assert(list_len(record_keys(full)) == 512, 'overflow preserves fields')\n"
-        "assert(record_get(full, '511') == 511, 'overflow preserves value')\n") == 0);
+    CHECK(run(mode, "full = record_new()\ni=0\nwhile i<1024:\n    record_set(full, text_fixed(i, 0), i)\n    i=i+1\n"
+                    "before = record_clone(full)\n") == 0);
+    CHECK(run(mode, "record_set(full, 'overflow', 1025)\n") != 0);
+    CHECK(run(mode, "assert(list_len(record_keys(full)) == 1024, 'overflow preserves fields')\n"
+        "assert(record_get(full, '1023') == 1023, 'overflow preserves last value')\n"
+        "assert(record_equal(full, before), 'overflow preserves complete record')\n") == 0);
     am_persistent_clear();
 }
 static void test_workers(int mode) {

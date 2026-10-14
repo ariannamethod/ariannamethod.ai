@@ -15,7 +15,7 @@ static int checks;
     fprintf(stderr, "FAIL checkpoint line %d: %s (errno=%d)\n", __LINE__, #c, errno); exit(1); } } while (0)
 #include "record_test_helpers.h"
 
-typedef struct { unsigned char bytes[4096]; size_t len; } Bytes;
+typedef struct { unsigned char bytes[32768]; size_t len; } Bytes;
 static size_t fields[5], keys_at[5], values_at[5];
 static void u32_at(unsigned char* p, uint32_t x) { for (int i = 0; i < 4; i++) p[i] = (unsigned char)(x >> (8*i)); }
 static void u64_at(unsigned char* p, uint64_t x) { for (int i = 0; i < 8; i++) p[i] = (unsigned char)(x >> (8*i)); }
@@ -245,18 +245,32 @@ static void test_allocations(const char* directory, const char* path) {
     (void)directory; (void)path;
 #endif
 }
-static void test_capacity(const char* path) {
+static void test_capacity(const char* path, int count) {
     AM_Record* record = am_record_new(); CHECK(record);
+    Bytes expected = {{'A','M','L','C','P',0,'\r','\n'}, 32};
+    u32_at(expected.bytes + 8, 1); u32_at(expected.bytes + 24, (uint32_t)count);
     AML_Var value = {.type = AML_TYPE_FLOAT};
-    for (int i = 0; i < AM_MAX_RECORD_FIELDS; i++) {
+    for (int i = 0; i < count; i++) {
         char name[32]; snprintf(name, sizeof(name), "field_%03d", i);
         value.value = (float)i; CHECK(put(record, name, &value) == 0);
+        u32(&expected, (uint32_t)strlen(name));
+        const unsigned char head[12] = {1, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0};
+        bytes(&expected, head, sizeof(head)); bytes(&expected, name, strlen(name));
+        u32(&expected, bits_of(value.value));
     }
-    CHECK(put(record, "overflow", &value) < 0);
+    u64_at(expected.bytes + 16, expected.len - 32); checksum(&expected);
+    if (count == AM_MAX_RECORD_FIELDS) CHECK(put(record, "overflow", &value) < 0);
     char error[256]; CHECK(am_checkpoint_save(record, path, error, sizeof(error)) == 1);
+    expect_file(path, &expected);
     AM_Record* loaded = am_checkpoint_load(path, error, sizeof(error));
     CHECK(loaded && am_record_equal(record, loaded) == 1);
-    AM_List* keys = am_record_keys(loaded); CHECK(keys && keys->len == AM_MAX_RECORD_FIELDS);
+    CHECK(am_checkpoint_save(loaded, path, error, sizeof(error)) == 1);
+    expect_file(path, &expected);
+    AM_List* keys = am_record_keys(loaded); CHECK(keys && keys->len == count);
+    if (count == AM_MAX_RECORD_FIELDS) {
+        u32_at(expected.bytes + 24, (uint32_t)count + 1); checksum(&expected);
+        rejected(path, &expected);
+    }
     am_list_free(keys); am_record_free(loaded); am_record_free(record);
 }
 int main(void) {
@@ -266,7 +280,8 @@ int main(void) {
 #ifdef AML_CHECKPOINT_IO_WRAP
     test_io_failures(directory, path);
 #endif
-    test_capacity(path);
+    test_capacity(path, 512); /* Existing version-1 bytes stay exact. */
+    test_capacity(path, AM_MAX_RECORD_FIELDS);
     CHECK(unlink(path) == 0 && rmdir(directory) == 0);
     printf("AML_CHECKPOINT_OK %d checks\n", checks); return 0;
 }
