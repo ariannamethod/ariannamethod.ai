@@ -12,6 +12,70 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-10-14 — immutable bodies enter the language (v5.12.0)
+
+Haiku's frozen PEN7 sides now enter AML through an owned immutable model value.
+`model_try_load` returns explicit readiness, load outcome and SHA-256 identities;
+empty configuration, missing/corrupt files and absent backends stay quiet.
+Assignments, typed calls, nested returns, persistent globals, worker snapshots
+and `AWAIT ... INTO` retain atomic owners. Every value keeps its copied backend
+callbacks through registry replacement or removal. No model handle is a flat
+record/checkpoint leaf, and numerical/tape operations reject the new type.
+
+The separate `AM_ModelBackend` table keeps existing numerical callbacks intact.
+The NoTorch bridge calls the public `pen7.h` API from the ordinary archive:
+canonical bounded BPE, exact loaded-byte/tokenizer identities, token surfaces,
+fresh final logits and the final last-token contextual representation. Each
+forward owns its bounded workspace. `model_mix_forward` mixes all parameters
+with explicit alpha and exact endpoints while both source bodies stay frozen.
+The detached success record contains `ok`, `error`, `logits`, `hidden`; a refused
+forward carries `ok = 0` and a diagnostic with neither partial array. Experience,
+proposal selection, learning and publication remain the organism's AML policy.
+
+The complete Haiku program also reached three concrete language bounds. Shared
+programs and the compiler frontend now admit 8,192 source lines; typed functions
+admit sixteen arguments; flat records admit 512 fields. The larger record carries
+a completed organism plus its exact pre-work receipt in a single worker result.
+Checkpoint version-1 bytes are unchanged: old golden files still round-trip,
+and the new bound admits larger flat files. Public typed structs have grown;
+C hosts must rebuild with the current header.
+
+Proof on Linux x86_64 / GCC 13.3, scalar AML and NoTorch:
+
+- `make test-model`: **726** C host/runtime checks; **1,580** with allocation
+  failure injection. Loaded mock native bodies are destroyed exactly once.
+  Each host mode completes 24 sequential model-backed worker returns after
+  transfer of a model whose launching owner was rebound.
+- The canonical tiny F32 fixture passes **149** direct bridge checks, including
+  byte-exact IDs/logits/hidden vectors against NoTorch and four concurrent
+  callers with separate workspaces. The actual Haiku1 Q8 body passes **147**
+  direct parity/concurrency checks through the same gate.
+- Interpreter, resumable host, bytecode, runner and scalar compiled execution
+  cover zero/one/two available sources, relative imported model paths, ranked
+  BPE, exact mixture endpoints, sixteen-argument inherited helpers and owned
+  worker transfers. **14** invalid calls fail in all five paths before later
+  AML or C-main effects. Standalone/incomplete-prefix unavailable cases emit
+  only the fixture's expected output.
+- ASan and UBSan pass the **726**-check owner/runtime gate. LeakSanitizer cannot
+  enumerate threads under this container's ptrace environment; the separate
+  allocation tracker covers failed allocation publication and release.
+- `make test-records`: **2,871** API checks (**4,780** with allocation injection),
+  **965** runtime checks and the existing **62** invalid calls in five paths.
+  Exact 512-field records survive worker transfer; field 513 is refused without
+  changing the first 512. Checkpoint gates pass **2,865**, **5,169** allocation,
+  and **3,047** I/O-failure checks, including an exact 512-field round-trip.
+- `make test-imports`: **9,230** checks. Exact 8,192-line roots execute in all
+  five paths; an expanded overflow fails before effects. The compiler frontend
+  rejects root directive 8,193. Sixteen parameters succeed and seventeen fail.
+- `make test`, `make test-workers`, `make test-tokenizer`, `make test-sampling`
+  and `make test-text-fixed` pass. Baseline remains **550/550**; owned workers
+  remain **1,998/2,018** checks. The 239-user-function worker gate still passes.
+
+`docs/MODELS.md`, the README, language spec and ownership/capacity documents
+record the API and its bounds. The canonical link order stays
+`libaml_notorch.a libaml.a libnotorch.a`; no separate harness library is needed.
+Main was refreshed at `5d5f3f7` before this change was committed.
+
 ## 2026-10-14 — INTO remains a worker name (v5.11.0)
 
 PR #37 review found that the previous whole-statement `INTO` scan rejected

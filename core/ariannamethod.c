@@ -111,6 +111,20 @@ static AM_SamplingBackend g_sampling_backend;
 static AM_NumericalBackend g_numerical_backend;
 static AM_ParliamentBackend g_parliament_backend;
 static AM_TokenizerBackend g_tokenizer_backend;
+static AM_ModelBackend g_model_backend;
+
+struct AM_Model {
+    void* native;
+    AM_ModelBackend backend;
+    AM_ModelInfo info;
+    char error[256];
+    int refcount;
+};
+
+void am_set_model_backend(const AM_ModelBackend* backend) {
+    if (backend) g_model_backend = *backend;
+    else memset(&g_model_backend, 0, sizeof(g_model_backend));
+}
 
 struct AM_Tokenizer {
     void* model;
@@ -792,6 +806,7 @@ static int      symtab_set_string(AML_Symtab* tab, const char* name, AM_String* 
 static int      symtab_set_list(AML_Symtab* tab, const char* name, AM_List* list);
 static int      symtab_set_map(AML_Symtab* tab, const char* name, AM_Map* map);
 static int      symtab_set_tokenizer(AML_Symtab* tab, const char* name, AM_Tokenizer* model);
+static int      symtab_set_model(AML_Symtab* tab, const char* name, AM_Model* model);
 static int      symtab_set_record(AML_Symtab* tab, const char* name, AM_Record* record);
 static void     symtab_clear_arrays(AML_Symtab* tab);
 static int      symtab_snapshot(AML_Symtab* dst, const AML_Symtab* src);
@@ -972,6 +987,26 @@ const AM_Tokenizer* am_get_var_tokenizer(const char* name) {
     if (!name) return NULL;
     AML_Var* v = symtab_get_var(&g_persistent_globals, name);
     return v && v->type == AML_TYPE_TOKENIZER ? v->tokenizer : NULL;
+}
+
+int am_set_var_model(const char* name, AM_Model* model) {
+    if (!name || !*name || strlen(name) >= AML_MAX_NAME || !model) return 1;
+    if (!(isalpha((unsigned char)*name) || *name == '_')) return 1;
+    for (const char* p = name + 1; *p; p++)
+        if (!(isalnum((unsigned char)*p) || *p == '_')) return 1;
+    am_model_ref(model);
+    if (symtab_set_model(&g_persistent_globals, name, model)) {
+        am_model_free(model);
+        return 1;
+    }
+    g_persistent_enabled = 1;
+    return 0;
+}
+
+const AM_Model* am_get_var_model(const char* name) {
+    if (!name) return NULL;
+    AML_Var* v = symtab_get_var(&g_persistent_globals, name);
+    return v && v->type == AML_TYPE_MODEL ? v->model : NULL;
 }
 
 int am_set_var_record(const char* name, const AM_Record* record) {
@@ -3018,6 +3053,7 @@ static void* am_spawn_thread_fn(void* data) {
         result.list = ctx->return_list; ctx->return_list = NULL;
         result.map = ctx->return_map; ctx->return_map = NULL;
         result.tokenizer = ctx->return_tokenizer; ctx->return_tokenizer = NULL;
+        result.model = ctx->return_model; ctx->return_model = NULL;
         result.record = ctx->return_record; ctx->return_record = NULL;
     }
     am_persistent_mode(0);
@@ -3409,7 +3445,9 @@ static int symtab_set(AML_Symtab* tab, const char* name, float value) {
             if (tab->vars[i].type == AML_TYPE_MAP) am_map_free(tab->vars[i].map);
             tab->vars[i].map = NULL;
             if (tab->vars[i].type == AML_TYPE_TOKENIZER) am_tokenizer_free(tab->vars[i].tokenizer);
+            if (tab->vars[i].type == AML_TYPE_MODEL) am_model_free(tab->vars[i].model);
             tab->vars[i].tokenizer = NULL;
+            tab->vars[i].model = NULL;
             if (tab->vars[i].type == AML_TYPE_RECORD) am_record_free(tab->vars[i].record);
             tab->vars[i].record = NULL;
             tab->vars[i].type = AML_TYPE_FLOAT;
@@ -3426,6 +3464,7 @@ static int symtab_set(AML_Symtab* tab, const char* name, float value) {
     tab->vars[tab->count].list = NULL;
     tab->vars[tab->count].map = NULL;
     tab->vars[tab->count].tokenizer = NULL;
+    tab->vars[tab->count].model = NULL;
     tab->vars[tab->count].record = NULL;
     tab->count++;
     return 0;
@@ -3446,7 +3485,9 @@ static int symtab_set_array(AML_Symtab* tab, const char* name, AM_Array* arr) {
             if (tab->vars[i].type == AML_TYPE_MAP) am_map_free(tab->vars[i].map);
             tab->vars[i].map = NULL;
             if (tab->vars[i].type == AML_TYPE_TOKENIZER) am_tokenizer_free(tab->vars[i].tokenizer);
+            if (tab->vars[i].type == AML_TYPE_MODEL) am_model_free(tab->vars[i].model);
             tab->vars[i].tokenizer = NULL;
+            tab->vars[i].model = NULL;
             if (tab->vars[i].type == AML_TYPE_RECORD) am_record_free(tab->vars[i].record);
             tab->vars[i].record = NULL;
             tab->vars[i].type = AML_TYPE_ARRAY;
@@ -3464,6 +3505,7 @@ static int symtab_set_array(AML_Symtab* tab, const char* name, AM_Array* arr) {
     tab->vars[tab->count].list = NULL;
     tab->vars[tab->count].map = NULL;
     tab->vars[tab->count].tokenizer = NULL;
+    tab->vars[tab->count].model = NULL;
     tab->vars[tab->count].record = NULL;
     tab->count++;
     return 0;
@@ -3504,6 +3546,14 @@ static int symtab_set_tokenizer(AML_Symtab* tab, const char* name, AM_Tokenizer*
     return 0;
 }
 
+static int symtab_set_model(AML_Symtab* tab, const char* name, AM_Model* model) {
+    if (symtab_set(tab, name, 0)) return 1;
+    AML_Var* v = symtab_get_var(tab, name);
+    v->type = AML_TYPE_MODEL;
+    v->model = model;
+    return 0;
+}
+
 static int symtab_set_record(AML_Symtab* tab, const char* name, AM_Record* record) {
     if (symtab_set(tab, name, 0)) return 1;
     AML_Var* v = symtab_get_var(tab, name);
@@ -3534,6 +3584,10 @@ static void symtab_clear_arrays(AML_Symtab* tab) {
         if (tab->vars[i].type == AML_TYPE_TOKENIZER) {
             am_tokenizer_free(tab->vars[i].tokenizer);
             tab->vars[i].tokenizer = NULL;
+        }
+        if (tab->vars[i].type == AML_TYPE_MODEL) {
+            am_model_free(tab->vars[i].model);
+            tab->vars[i].model = NULL;
         }
         if (tab->vars[i].type == AML_TYPE_RECORD) {
             am_record_free(tab->vars[i].record);
@@ -3580,6 +3634,12 @@ static int symtab_copy_value(AML_Symtab* dst, const AML_Var* v) {
         am_tokenizer_free(v->tokenizer);
         return 1;
     }
+    if (v->type == AML_TYPE_MODEL) {
+        am_model_ref(v->model);
+        if (!symtab_set_model(dst, v->name, v->model)) return 0;
+        am_model_free(v->model);
+        return 1;
+    }
     if (v->type == AML_TYPE_RECORD) {
         AM_Record* record = am_record_clone(v->record);
         if (!record) return 1;
@@ -3616,9 +3676,10 @@ static AML_Var* resolve_var_full(AML_ExecCtx* ctx, const char* name) {
 static int resolve_var(AML_ExecCtx* ctx, const char* name, float* out) {
     AML_Var* value = resolve_var_full(ctx, name);
     if (value && (value->type == AML_TYPE_STRING || value->type == AML_TYPE_LIST ||
-                  value->type == AML_TYPE_MAP || value->type == AML_TYPE_TOKENIZER || value->type == AML_TYPE_RECORD)) {
+                  value->type == AML_TYPE_MAP || value->type == AML_TYPE_TOKENIZER || value->type == AML_TYPE_MODEL || value->type == AML_TYPE_RECORD)) {
         set_error(ctx, value->type == AML_TYPE_RECORD ? "record used as a scalar expression" :
             value->type == AML_TYPE_TOKENIZER ? "tokenizer used as a scalar expression" :
+            value->type == AML_TYPE_MODEL ? "model used as a scalar expression" :
             value->type == AML_TYPE_MAP ? "map used as a scalar expression" :
             value->type == AML_TYPE_LIST
             ? "list used as a scalar expression" : "string used as a scalar expression");
@@ -3649,6 +3710,7 @@ static void aml_value_clear(AML_Var* v) {
     if (v->type == AML_TYPE_LIST) am_list_free(v->list);
     if (v->type == AML_TYPE_MAP) am_map_free(v->map);
     if (v->type == AML_TYPE_TOKENIZER) am_tokenizer_free(v->tokenizer);
+    if (v->type == AML_TYPE_MODEL) am_model_free(v->model);
     if (v->type == AML_TYPE_RECORD) am_record_free(v->record);
     memset(v, 0, sizeof(*v));
 }
@@ -3659,6 +3721,7 @@ static void aml_value_ref(AML_Var* v) {
     if (v->type == AML_TYPE_LIST) am_list_ref(v->list);
     if (v->type == AML_TYPE_MAP) am_map_ref(v->map);
     if (v->type == AML_TYPE_TOKENIZER) am_tokenizer_ref(v->tokenizer);
+    if (v->type == AML_TYPE_MODEL) am_model_ref(v->model);
     if (v->type == AML_TYPE_RECORD) am_record_ref(v->record);
 }
 
@@ -3668,12 +3731,14 @@ static void aml_clear_return(AML_ExecCtx* ctx) {
     am_list_free(ctx->return_list);
     am_map_free(ctx->return_map);
     am_tokenizer_free(ctx->return_tokenizer);
+    am_model_free(ctx->return_model);
     am_record_free(ctx->return_record);
     ctx->return_array = NULL;
     ctx->return_string = NULL;
     ctx->return_list = NULL;
     ctx->return_map = NULL;
     ctx->return_tokenizer = NULL;
+    ctx->return_model = NULL;
     ctx->return_record = NULL;
     ctx->return_type = AML_TYPE_FLOAT;
     ctx->return_value = 0;
@@ -3703,6 +3768,15 @@ static int aml_text_function(const char* name) {
 static int aml_tokenizer_function(const char* name) {
     return !strcasecmp(name, "tokenizer_load") || !strcasecmp(name, "tokenizer_pieces") ||
            !strcasecmp(name, "tokenizer_identity");
+}
+
+static int aml_model_function(const char* name) {
+    static const char* names[] = {"model_try_load", "model_ready", "model_error",
+        "model_identity", "model_tokenizer_identity", "model_info", "model_encode",
+        "model_forward", "model_mix_forward", "model_piece"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+        if (!strcasecmp(name, names[i])) return 1;
+    return 0;
 }
 
 static int aml_list_function(const char* name) {
@@ -3934,6 +4008,79 @@ static int aml_tokenizer_dispatch(AML_ExecCtx* ctx, const char* name,
                                         error, sizeof(error));
         if (!out->list) { set_error(ctx, error); return 1; }
         out->type = AML_TYPE_LIST;
+    }
+    return 0;
+}
+
+static int aml_model_dispatch(AML_ExecCtx* ctx, const char* name,
+                              AML_Var* args, int nargs, AML_Var* out) {
+    int loading = !strcasecmp(name, "model_try_load");
+    int encoding = !strcasecmp(name, "model_encode");
+    int single = !strcasecmp(name, "model_forward");
+    int mixing = !strcasecmp(name, "model_mix_forward");
+    int piece = !strcasecmp(name, "model_piece");
+    int need = mixing ? 4 : encoding ? 3 : single || piece ? 2 : 1;
+    if (nargs != need) { set_error(ctx, "wrong number of model arguments"); return 1; }
+    char error[256] = {0};
+    if (loading) {
+        if (args[0].type != AML_TYPE_STRING || !args[0].string) {
+            set_error(ctx, "model_try_load requires a path string"); return 1;
+        }
+        char* path = args[0].string->byte_len ? aml_resolve_value_path(ctx, &args[0]) : NULL;
+        if (args[0].string->byte_len && !path) return 1;
+        out->model = am_model_try_load(path ? path : "", error, sizeof(error));
+        free(path);
+        if (!out->model) { set_error(ctx, error); return 1; }
+        out->type = AML_TYPE_MODEL;
+        return 0;
+    }
+    if (args[0].type != AML_TYPE_MODEL || !args[0].model) {
+        set_error(ctx, "model operation requires an immutable model"); return 1;
+    }
+    AM_Model* model = args[0].model;
+    if (!strcasecmp(name, "model_ready")) out->value = (float)am_model_ready(model);
+    else if (!strcasecmp(name, "model_info")) {
+        out->record = am_model_info(model);
+        out->type = AML_TYPE_RECORD;
+        if (!out->record) { set_error(ctx, "model info allocation failed"); return 1; }
+    } else if (single || mixing) {
+        int input = mixing ? 3 : 1;
+        if (args[input].type != AML_TYPE_ARRAY || !args[input].array ||
+            (mixing && (args[1].type != AML_TYPE_MODEL || !args[1].model ||
+                        args[2].type != AML_TYPE_FLOAT))) {
+            set_error(ctx, "model forward requires model owners, a scalar alpha and token array");
+            return 1;
+        }
+        out->record = am_model_forward(model, mixing ? args[1].model : NULL,
+                                       mixing ? args[2].value : 1.0f, args[input].array);
+        out->type = AML_TYPE_RECORD;
+        if (!out->record) { set_error(ctx, "model result allocation failed"); return 1; }
+    } else if (encoding || piece) {
+        int index = encoding ? 2 : 1;
+        if (args[index].type != AML_TYPE_FLOAT || !isfinite(args[index].value) ||
+            args[index].value < 0 || args[index].value > AM_MAX_ARRAY_SIZE ||
+            floorf(args[index].value) != args[index].value) {
+            set_error(ctx, "model token index or bound must be a nonnegative integer"); return 1;
+        }
+        if (encoding) {
+            if (args[1].type != AML_TYPE_STRING || !args[1].string) {
+                set_error(ctx, "model_encode requires text"); return 1;
+            }
+            out->array = am_model_encode(model, args[1].string,
+                                         (int)args[2].value, error, sizeof(error));
+            if (!out->array) { set_error(ctx, error); return 1; }
+            out->type = AML_TYPE_ARRAY;
+        } else {
+            out->string = am_model_piece(model, (int)args[1].value, error, sizeof(error));
+            if (!out->string) { set_error(ctx, error); return 1; }
+            out->type = AML_TYPE_STRING;
+        }
+    } else {
+        const char* text = !strcasecmp(name, "model_error") ? am_model_error(model) :
+            !strcasecmp(name, "model_identity") ? model->info.identity : model->info.tokenizer_identity;
+        out->string = am_string_new(text);
+        if (!out->string) { set_error(ctx, "model identity allocation failed"); return 1; }
+        out->type = AML_TYPE_STRING;
     }
     return 0;
 }
@@ -4635,7 +4782,7 @@ static int aml_array_scalar_dispatch(AML_ExecCtx* ctx, const char* name,
         set_error(ctx, "wrong number of array arguments"); return 1;
     }
     for (int i = 0; i < nargs; i++) {
-        if (args[i].type == AML_TYPE_STRING || args[i].type == AML_TYPE_LIST || args[i].type == AML_TYPE_MAP || args[i].type == AML_TYPE_TOKENIZER || args[i].type == AML_TYPE_RECORD) {
+        if (args[i].type == AML_TYPE_STRING || args[i].type == AML_TYPE_LIST || args[i].type == AML_TYPE_MAP || args[i].type == AML_TYPE_TOKENIZER || args[i].type == AML_TYPE_MODEL || args[i].type == AML_TYPE_RECORD) {
             set_error(ctx, "array operation requires an array"); return 1;
         }
     }
@@ -4711,6 +4858,7 @@ static int aml_invoke_value(AML_ExecCtx* ctx, const char* name,
     else if (aml_sampling_function(name)) rc = aml_sampling_dispatch(ctx, name, args, nargs, out);
     else if (aml_numerical_function(name)) rc = aml_numerical_dispatch(ctx, name, args, nargs, out);
     else if (aml_tokenizer_function(name)) rc = aml_tokenizer_dispatch(ctx, name, args, nargs, out);
+    else if (aml_model_function(name)) rc = aml_model_dispatch(ctx, name, args, nargs, out);
     else if (aml_array_scalar_function(name)) rc = aml_array_scalar_dispatch(ctx, name, args, nargs, out);
     else {
         AML_Func* f = aml_value_function(ctx, name);
@@ -4789,10 +4937,11 @@ static float expr_primary(AML_Expr* e) {
 
             if (e->ctx) {
                 AML_Var* var = resolve_var_full(e->ctx, name);
-                if (var && (var->type == AML_TYPE_STRING || var->type == AML_TYPE_LIST || var->type == AML_TYPE_MAP || var->type == AML_TYPE_TOKENIZER || var->type == AML_TYPE_RECORD)) {
+                if (var && (var->type == AML_TYPE_STRING || var->type == AML_TYPE_LIST || var->type == AML_TYPE_MAP || var->type == AML_TYPE_TOKENIZER || var->type == AML_TYPE_MODEL || var->type == AML_TYPE_RECORD)) {
                     set_error(e->ctx, var->type == AML_TYPE_RECORD
                         ? "array indexing requires an array, not a record" : var->type == AML_TYPE_TOKENIZER
-                        ? "array indexing requires an array, not a tokenizer" : var->type == AML_TYPE_MAP
+                        ? "array indexing requires an array, not a tokenizer" : var->type == AML_TYPE_MODEL
+                        ? "array indexing requires an array, not a model" : var->type == AML_TYPE_MAP
                         ? "array indexing requires an array; use map_get for maps" : var->type == AML_TYPE_LIST
                         ? "array indexing requires an array; use list_get for lists"
                         : "array indexing requires an array; use text_codepoint/text_slice for text");
@@ -4814,7 +4963,7 @@ static float expr_primary(AML_Expr* e) {
         if (*e->p == '(') {
             if (e->ctx && (aml_text_function(name) || aml_list_function(name) ||
                            aml_map_function(name) || aml_scalar_intrinsic_function(name) ||
-                           aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) || aml_record_function(name) ||
+                           aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) || aml_model_function(name) || aml_record_function(name) ||
                            aml_array_scalar_function(name) ||
                            aml_value_function(e->ctx, name))) {
                 AML_Var result = {0};
@@ -4824,7 +4973,7 @@ static float expr_primary(AML_Expr* e) {
                 }
                 if (result.type != AML_TYPE_FLOAT) {
                     aml_value_clear(&result);
-                    set_error(e->ctx, "string/array/list/map/tokenizer/record value used as a scalar expression");
+                    set_error(e->ctx, "string/array/list/map/tokenizer/model/record value used as a scalar expression");
                     e->error = 1;
                     return 0;
                 }
@@ -5065,13 +5214,14 @@ static int aml_eval_value(AML_ExecCtx* ctx, const char* text, AML_Var* out) {
                 if (v->type == AML_TYPE_LIST) am_list_ref(out->list);
                 if (v->type == AML_TYPE_MAP) am_map_ref(out->map);
                 if (v->type == AML_TYPE_TOKENIZER) am_tokenizer_ref(out->tokenizer);
+                if (v->type == AML_TYPE_MODEL) am_model_ref(out->model);
                 if (v->type == AML_TYPE_RECORD) am_record_ref(out->record);
                 return 0;
             }
         }
         if (*p == '(' && (aml_text_function(name) || aml_list_function(name) ||
                           aml_map_function(name) || aml_scalar_intrinsic_function(name) ||
-                          aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) || aml_record_function(name) ||
+                          aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) || aml_model_function(name) || aml_record_function(name) ||
                           aml_array_scalar_function(name) ||
                           aml_value_function(ctx, name))) {
             const char* close = aml_value_close(p);
@@ -6247,7 +6397,7 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
         sscanf(rest, "%31s", vname);
         if (vname[0] && ctx) {
           AML_Var* v = resolve_var_full(ctx, vname);
-          if (v && (v->type == AML_TYPE_LIST || v->type == AML_TYPE_MAP || v->type == AML_TYPE_TOKENIZER || v->type == AML_TYPE_RECORD)) {
+          if (v && (v->type == AML_TYPE_LIST || v->type == AML_TYPE_MAP || v->type == AML_TYPE_TOKENIZER || v->type == AML_TYPE_MODEL || v->type == AML_TYPE_RECORD)) {
             set_error(ctx, "TAPE requires a numeric array");
             return;
           }
@@ -6340,7 +6490,7 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
         sscanf(rest, "%31s", vname);
         if (vname[0] && ctx) {
           AML_Var* v = resolve_var_full(ctx, vname);
-          if (v && (v->type == AML_TYPE_LIST || v->type == AML_TYPE_MAP || v->type == AML_TYPE_TOKENIZER || v->type == AML_TYPE_RECORD)) {
+          if (v && (v->type == AML_TYPE_LIST || v->type == AML_TYPE_MAP || v->type == AML_TYPE_TOKENIZER || v->type == AML_TYPE_MODEL || v->type == AML_TYPE_RECORD)) {
             set_error(ctx, "TAPE requires a numeric array");
             return;
           }
@@ -6476,6 +6626,7 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
         else if (value.type == AML_TYPE_LIST) symtab_set_list(tab, name, value.list);
         else if (value.type == AML_TYPE_MAP) symtab_set_map(tab, name, value.map);
         else if (value.type == AML_TYPE_TOKENIZER) symtab_set_tokenizer(tab, name, value.tokenizer);
+        else if (value.type == AML_TYPE_MODEL) symtab_set_model(tab, name, value.model);
         else if (value.type == AML_TYPE_RECORD) symtab_set_record(tab, name, value.record);
         else symtab_set(tab, name, value.value);
       } else if (count) {
@@ -6755,6 +6906,9 @@ static int aml_reserved_function(const char* name) {
         "nt_tanh", "nt_tanh_vjp", "nt_mse_grad", "nt_sgd", "rng_normal",
         "nt_parliament_elect", "nt_parliament_inject", "nt_oja",
         "tokenizer_load", "tokenizer_pieces", "tokenizer_identity", "codepoint_isalnum", "read_line",
+        "model_try_load", "model_ready", "model_error", "model_identity",
+        "model_tokenizer_identity", "model_info", "model_encode", "model_forward",
+        "model_mix_forward", "model_piece",
         "record_new", "record_set", "record_get", "record_has", "record_keys", "record_kind",
         "record_clone", "record_equal", "record_replace", "record_swap", "checkpoint_save", "checkpoint_load", "file_exists"
     };
@@ -6894,6 +7048,7 @@ static int aml_call_value(AML_ExecCtx* ctx, AML_Func* f, AML_Var* args,
     AM_List* saved_return_list = ctx->return_list;
     AM_Map* saved_return_map = ctx->return_map;
     AM_Tokenizer* saved_return_tokenizer = ctx->return_tokenizer;
+    AM_Model* saved_return_model = ctx->return_model;
     AM_Record* saved_return_record = ctx->return_record;
     int saved_return_type = ctx->return_type;
 
@@ -6919,6 +7074,9 @@ static int aml_call_value(AML_ExecCtx* ctx, AML_Func* f, AML_Var* args,
         } else if (args[i].type == AML_TYPE_TOKENIZER) {
             am_tokenizer_ref(args[i].tokenizer);
             symtab_set_tokenizer(locals, f->params[i], args[i].tokenizer);
+        } else if (args[i].type == AML_TYPE_MODEL) {
+            am_model_ref(args[i].model);
+            symtab_set_model(locals, f->params[i], args[i].model);
         } else if (args[i].type == AML_TYPE_RECORD) {
             am_record_ref(args[i].record);
             symtab_set_record(locals, f->params[i], args[i].record);
@@ -6935,6 +7093,7 @@ static int aml_call_value(AML_ExecCtx* ctx, AML_Func* f, AML_Var* args,
     ctx->return_list = NULL;
     ctx->return_map = NULL;
     ctx->return_tokenizer = NULL;
+    ctx->return_model = NULL;
     ctx->return_record = NULL;
     ctx->return_type = AML_TYPE_FLOAT;
 
@@ -6948,6 +7107,7 @@ static int aml_call_value(AML_ExecCtx* ctx, AML_Func* f, AML_Var* args,
         out->list = ctx->return_list;
         out->map = ctx->return_map;
         out->tokenizer = ctx->return_tokenizer;
+        out->model = ctx->return_model;
         out->record = ctx->return_record;
     }
     // Return expressions already own their references, including local aliases.
@@ -6963,6 +7123,7 @@ static int aml_call_value(AML_ExecCtx* ctx, AML_Func* f, AML_Var* args,
     ctx->return_list = saved_return_list;
     ctx->return_map = saved_return_map;
     ctx->return_tokenizer = saved_return_tokenizer;
+    ctx->return_model = saved_return_model;
     ctx->return_record = saved_return_record;
     ctx->return_type = saved_return_type;
     return ctx->error[0] != 0;
@@ -7099,7 +7260,7 @@ static int aml_optional_array(AML_ExecCtx* ctx, const char* expression, AM_Array
     if (aml_eval_value(ctx, expression, &value)) {
         aml_value_clear(&value); return 1;
     }
-    if (value.type == AML_TYPE_STRING || value.type == AML_TYPE_LIST || value.type == AML_TYPE_MAP || value.type == AML_TYPE_TOKENIZER || value.type == AML_TYPE_RECORD) {
+    if (value.type == AML_TYPE_STRING || value.type == AML_TYPE_LIST || value.type == AML_TYPE_MAP || value.type == AML_TYPE_TOKENIZER || value.type == AML_TYPE_MODEL || value.type == AML_TYPE_RECORD) {
         aml_value_clear(&value);
         set_error(ctx, "optional argument requires a numeric array"); return 1;
     }
@@ -7122,10 +7283,11 @@ static AM_Array* aml_array_dispatch(AML_ExecCtx* ctx, const char* fname, char ar
     if (aml_array_function(fname)) {
         for (int i = 0; i < nargs; i++) {
             AML_Var* v = resolve_var_full(ctx, arg_strs[i]);
-            if (v && (v->type == AML_TYPE_LIST || v->type == AML_TYPE_MAP || v->type == AML_TYPE_TOKENIZER || v->type == AML_TYPE_RECORD)) {
+            if (v && (v->type == AML_TYPE_LIST || v->type == AML_TYPE_MAP || v->type == AML_TYPE_TOKENIZER || v->type == AML_TYPE_MODEL || v->type == AML_TYPE_RECORD)) {
                 set_error(ctx, v->type == AML_TYPE_RECORD
                     ? "numeric array operation cannot consume a record" : v->type == AML_TYPE_TOKENIZER
-                    ? "numeric array operation cannot consume a tokenizer" : v->type == AML_TYPE_MAP
+                    ? "numeric array operation cannot consume a tokenizer" : v->type == AML_TYPE_MODEL
+                    ? "numeric array operation cannot consume a model" : v->type == AML_TYPE_MAP
                     ? "numeric array operation cannot consume a map"
                     : "numeric array operation cannot consume a list");
                 return NULL;
@@ -8187,6 +8349,7 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
         ctx->return_list = value.list;
         ctx->return_map = value.map;
         ctx->return_tokenizer = value.tokenizer;
+        ctx->return_model = value.model;
         ctx->return_record = value.record;
         return ctx->nlines;
     }
@@ -8215,6 +8378,8 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
                 putchar('}');
             } else if (value.type == AML_TYPE_TOKENIZER) {
                 fputs("<tokenizer>", stdout);
+            } else if (value.type == AML_TYPE_MODEL) {
+                fputs("<model>", stdout);
             } else if (value.type == AML_TYPE_RECORD) {
                 fputs("<record>", stdout);
             } else if (value.type == AML_TYPE_ARRAY) {
@@ -8394,10 +8559,11 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
 
                         // Find the array variable and write to it
                         AML_Var* var = resolve_var_full(ctx, varname);
-                        if (var && (var->type == AML_TYPE_LIST || var->type == AML_TYPE_MAP || var->type == AML_TYPE_TOKENIZER || var->type == AML_TYPE_RECORD)) {
+                        if (var && (var->type == AML_TYPE_LIST || var->type == AML_TYPE_MAP || var->type == AML_TYPE_TOKENIZER || var->type == AML_TYPE_MODEL || var->type == AML_TYPE_RECORD)) {
                             set_error(ctx, var->type == AML_TYPE_RECORD
                                 ? "array element write requires an array, not a record" : var->type == AML_TYPE_TOKENIZER
-                                ? "array element write requires an array, not a tokenizer" : var->type == AML_TYPE_MAP
+                                ? "array element write requires an array, not a tokenizer" : var->type == AML_TYPE_MODEL
+                                ? "array element write requires an array, not a model" : var->type == AML_TYPE_MAP
                                 ? "array element write requires an array; use map_set for maps"
                                 : "array element write requires an array; use list_set for lists");
                             return idx + 1;
@@ -8485,6 +8651,7 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
             else if (value.type == AML_TYPE_LIST) rc = symtab_set_list(tab, name, value.list);
             else if (value.type == AML_TYPE_MAP) rc = symtab_set_map(tab, name, value.map);
             else if (value.type == AML_TYPE_TOKENIZER) rc = symtab_set_tokenizer(tab, name, value.tokenizer);
+            else if (value.type == AML_TYPE_MODEL) rc = symtab_set_model(tab, name, value.model);
             else if (value.type == AML_TYPE_RECORD) rc = symtab_set_record(tab, name, value.record);
             else rc = symtab_set(tab, name, value.value);
             if (rc) {
@@ -8496,7 +8663,7 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
         if (n && n < AML_MAX_NAME && *p == '(' &&
             (aml_value_function(ctx, name) || aml_text_function(name) || aml_list_function(name) ||
              aml_map_function(name) || aml_scalar_intrinsic_function(name) ||
-             aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) || aml_record_function(name) ||
+             aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) || aml_model_function(name) || aml_record_function(name) ||
              aml_array_scalar_function(name))) {
             AML_Var value = {0};
             aml_eval_value(ctx, text, &value);
@@ -9021,7 +9188,7 @@ void* am_compile(const char* script) {
 // Helper: resolve var to array (inlined, frequent operation)
 static inline AM_Array* bc_get_array(AML_ExecCtx* ctx, const char* name) {
     AML_Var* v = resolve_var_full(ctx, name);
-    if (v && (v->type == AML_TYPE_LIST || v->type == AML_TYPE_MAP || v->type == AML_TYPE_TOKENIZER || v->type == AML_TYPE_RECORD)) {
+    if (v && (v->type == AML_TYPE_LIST || v->type == AML_TYPE_MAP || v->type == AML_TYPE_TOKENIZER || v->type == AML_TYPE_MODEL || v->type == AML_TYPE_RECORD)) {
         set_error(ctx, "TAPE requires a numeric array");
         return NULL;
     }
@@ -11375,6 +11542,241 @@ AM_List* am_tokenizer_pieces(const AM_Tokenizer* model, const AM_String* text,
         return NULL;
     }
     return sink.list;
+}
+
+// Immutable model owners and detached inference outcomes.
+static int am_model_digest_valid(const char digest[65]) {
+    if (digest[64]) return 0;
+    for (int i = 0; i < 64; i++)
+        if (!((digest[i] >= '0' && digest[i] <= '9') ||
+              (digest[i] >= 'a' && digest[i] <= 'f'))) return 0;
+    return 1;
+}
+
+static int am_model_metadata_valid(const AM_ModelInfo* info) {
+    return info->vocab > 0 && info->vocab <= AM_MAX_ARRAY_SIZE &&
+        info->width > 0 && info->width <= AM_MAX_ARRAY_SIZE &&
+        info->context > 0 && info->context <= AM_MAX_ARRAY_SIZE &&
+        info->layers > 0 && info->layers <= AM_MAX_ARRAY_SIZE &&
+        info->ffn > 0 && info->ffn <= AM_MAX_ARRAY_SIZE &&
+        info->heads > 0 && info->heads <= info->width &&
+        info->width % info->heads == 0 &&
+        am_model_digest_valid(info->identity) &&
+        am_model_digest_valid(info->tokenizer_identity);
+}
+
+AM_Model* am_model_try_load(const char* path, char* error, size_t error_cap) {
+    am_text_error(error, error_cap, "");
+    AM_Model* model = calloc(1, sizeof(*model));
+    if (!model) { am_text_error(error, error_cap, "model allocation failed"); return NULL; }
+    model->refcount = 1;
+    model->backend = g_model_backend;
+    AM_ModelBackend* backend = &model->backend;
+    if (!path || !*path || strnlen(path, AM_MAX_STRING_BYTES + 1) > AM_MAX_STRING_BYTES)
+        snprintf(model->error, sizeof(model->error), "invalid model path");
+    else if (!backend->load || !backend->destroy || !backend->info ||
+             !backend->encode || !backend->forward)
+        snprintf(model->error, sizeof(model->error), "model backend unavailable");
+    else {
+        model->native = backend->load(path, model->error, sizeof(model->error));
+        model->error[sizeof(model->error) - 1] = 0;
+        if (model->native && (backend->info(model->native, &model->info) ||
+                              !am_model_metadata_valid(&model->info))) {
+            backend->destroy(model->native);
+            model->native = NULL;
+            snprintf(model->error, sizeof(model->error), "invalid model metadata or identity");
+        }
+        if (!model->native && !model->error[0])
+            snprintf(model->error, sizeof(model->error), "model load failed");
+    }
+    if (model->native) model->error[0] = 0;
+    else memset(&model->info, 0, sizeof(model->info));
+    if (am_string_validate_bytes(model->error, strlen(model->error)) < 0)
+        snprintf(model->error, sizeof(model->error), "invalid model backend diagnostic");
+    am_text_error(error, error_cap, model->error);
+    return model;
+}
+
+void am_model_ref(AM_Model* model) {
+    if (model) __atomic_add_fetch(&model->refcount, 1, __ATOMIC_RELAXED);
+}
+
+void am_model_free(AM_Model* model) {
+    if (!model || __atomic_sub_fetch(&model->refcount, 1, __ATOMIC_ACQ_REL) > 0) return;
+    if (model->native) model->backend.destroy(model->native);
+    free(model);
+}
+
+int am_model_ready(const AM_Model* model) { return model && model->native; }
+const char* am_model_error(const AM_Model* model) {
+    return model ? model->error : "invalid model owner";
+}
+const AM_ModelInfo* am_model_get_info(const AM_Model* model) {
+    return am_model_ready(model) ? &model->info : NULL;
+}
+
+static int am_model_record_put(AM_Record* record, const char* key, const AML_Var* value) {
+    AM_String* name = am_string_new(key);
+    if (!name) return -1;
+    int rc = am_record_set(record, name, value);
+    am_string_free(name);
+    return rc;
+}
+static int am_model_record_number(AM_Record* record, const char* key, float number) {
+    AML_Var value = {.type = AML_TYPE_FLOAT, .value = number};
+    return am_model_record_put(record, key, &value);
+}
+static int am_model_record_text(AM_Record* record, const char* key, const char* text) {
+    AML_Var value = {.type = AML_TYPE_STRING, .string = am_string_new(text)};
+    if (!value.string) return -1;
+    int rc = am_model_record_put(record, key, &value);
+    am_string_free(value.string);
+    return rc;
+}
+
+AM_Record* am_model_info(const AM_Model* model) {
+    if (!model) return NULL;
+    AM_Record* out = am_record_new();
+    if (!out) return NULL;
+    const AM_ModelInfo* i = &model->info;
+    if (am_model_record_number(out, "ready", (float)am_model_ready(model)) ||
+        am_model_record_number(out, "vocab", (float)i->vocab) ||
+        am_model_record_number(out, "width", (float)i->width) ||
+        am_model_record_number(out, "context", (float)i->context) ||
+        am_model_record_number(out, "layers", (float)i->layers) ||
+        am_model_record_number(out, "ffn", (float)i->ffn) ||
+        am_model_record_number(out, "heads", (float)i->heads) ||
+        am_model_record_text(out, "identity", i->identity) ||
+        am_model_record_text(out, "tokenizer_identity", i->tokenizer_identity) ||
+        am_model_record_text(out, "error", model->error)) {
+        am_record_free(out); return NULL;
+    }
+    return out;
+}
+
+AM_Array* am_model_encode(const AM_Model* model, const AM_String* text,
+                          int max_tokens, char* error, size_t error_cap) {
+    am_text_error(error, error_cap, "");
+    if (!am_model_ready(model)) {
+        am_text_error(error, error_cap, am_model_error(model)); return NULL;
+    }
+    if (!text || text->byte_len <= 0 ||
+        am_string_validate_bytes(text->data, (size_t)text->byte_len) < 0 ||
+        max_tokens < 1 || max_tokens > model->info.context) {
+        am_text_error(error, error_cap, "model_encode requires nonempty text and a bounded token capacity");
+        return NULL;
+    }
+    int* ids = malloc((size_t)max_tokens * sizeof(*ids));
+    if (!ids) { am_text_error(error, error_cap, "model token allocation failed"); return NULL; }
+    size_t count = 0;
+    char detail[256] = {0};
+    int rc = model->backend.encode(model->native, text->data, (size_t)text->byte_len,
+                                   ids, (size_t)max_tokens, &count, detail, sizeof(detail));
+    detail[sizeof(detail) - 1] = 0;
+    if (!rc && (count == 0 || count > (size_t)max_tokens)) rc = -1;
+    if (!rc) for (size_t i = 0; i < count; i++)
+        if (ids[i] < 0 || ids[i] >= model->info.vocab) { rc = -1; break; }
+    if (rc) {
+        free(ids);
+        am_text_error(error, error_cap, detail[0] ? detail : "model backend returned invalid token ids");
+        return NULL;
+    }
+    AM_Array* out = am_array_new((int)count);
+    if (out) for (size_t i = 0; i < count; i++) out->data[i] = (float)ids[i];
+    else am_text_error(error, error_cap, "model token allocation failed");
+    free(ids);
+    return out;
+}
+
+AM_String* am_model_piece(const AM_Model* model, int id, char* error, size_t cap) {
+    am_text_error(error, cap, "");
+    if (!am_model_ready(model) || !model->backend.piece || id < 0 || id >= model->info.vocab) {
+        am_text_error(error, cap, "model piece requires a ready model and a valid token id"); return NULL;
+    }
+    size_t bytes = 0;
+    const unsigned char* piece = model->backend.piece(model->native, id, &bytes);
+    if (!piece || bytes > AM_MAX_STRING_BYTES) {
+        am_text_error(error, cap, "invalid model token piece"); return NULL;
+    }
+    // Byte BPE can split a UTF-8 sequence. Such pieces have no standalone text
+    // value; callers receive the empty surface and choose their lexical policy.
+    AM_String* out = am_string_validate_bytes((const char*)piece, bytes) < 0
+        ? am_string_new("") : am_string_new_bytes((const char*)piece, bytes);
+    if (!out) am_text_error(error, cap, "model piece allocation failed");
+    return out;
+}
+
+static AM_Record* am_model_outcome(const char* error, AM_Array* logits, AM_Array* hidden) {
+    AM_Record* out = am_record_new();
+    if (!out) return NULL;
+    if (error && am_string_validate_bytes(error, strlen(error)) < 0)
+        error = "invalid model backend diagnostic";
+    int failed = error && *error;
+    if (am_model_record_number(out, "ok", failed ? 0.0f : 1.0f) ||
+        am_model_record_text(out, "error", failed ? error : "")) goto failure;
+    if (!failed) {
+        AML_Var value = {.type = AML_TYPE_ARRAY, .array = logits};
+        if (am_model_record_put(out, "logits", &value)) goto failure;
+        value.array = hidden;
+        if (am_model_record_put(out, "hidden", &value)) goto failure;
+    }
+    return out;
+failure:
+    am_record_free(out); return NULL;
+}
+
+static int am_model_compatible(const AM_Model* a, const AM_Model* b) {
+    const AM_ModelInfo* x = &a->info;
+    const AM_ModelInfo* y = &b->info;
+    return a->backend.forward == b->backend.forward &&
+        a->backend.load == b->backend.load && a->backend.info == b->backend.info &&
+        a->backend.destroy == b->backend.destroy &&
+        x->vocab == y->vocab && x->width == y->width && x->context == y->context &&
+        x->layers == y->layers && x->ffn == y->ffn && x->heads == y->heads &&
+        !strcmp(x->tokenizer_identity, y->tokenizer_identity);
+}
+
+AM_Record* am_model_forward(const AM_Model* left, const AM_Model* right,
+                            float alpha, const AM_Array* tokens) {
+    if (!am_model_ready(left)) return am_model_outcome(am_model_error(left), NULL, NULL);
+    if (right && !am_model_ready(right)) return am_model_outcome(am_model_error(right), NULL, NULL);
+    if (!isfinite(alpha) || alpha < 0 || alpha > 1)
+        return am_model_outcome("model mixture alpha must be finite in [0,1]", NULL, NULL);
+    if (right && !am_model_compatible(left, right))
+        return am_model_outcome("incompatible model geometry, tokenizer or backend", NULL, NULL);
+    if (!tokens || !tokens->data || tokens->len < 1 || tokens->len > left->info.context ||
+        tokens->rows || tokens->cols)
+        return am_model_outcome("model forward requires a nonempty bounded token vector", NULL, NULL);
+#ifdef USE_CUDA
+    ensure_cpu((AM_Array*)tokens);
+#endif
+    for (int i = 0; i < tokens->len; i++) {
+        float id = tokens->data[i];
+        if (!isfinite(id) || id < 0 || id >= left->info.vocab || floorf(id) != id)
+            return am_model_outcome("model token ids must be integral and inside the vocabulary", NULL, NULL);
+    }
+    int* ids = malloc((size_t)tokens->len * sizeof(*ids));
+    AM_Array* logits = am_array_new(left->info.vocab);
+    AM_Array* hidden = am_array_new(left->info.width);
+    if (!ids || !logits || !hidden) {
+        free(ids); am_array_free(logits); am_array_free(hidden); return NULL;
+    }
+    for (int i = 0; i < tokens->len; i++) ids[i] = (int)tokens->data[i];
+    char error[256] = {0};
+    int rc = left->backend.forward(left->native, right ? right->native : NULL, alpha,
+        ids, (size_t)tokens->len, logits->data, (size_t)logits->len,
+        hidden->data, (size_t)hidden->len, error, sizeof(error));
+    free(ids);
+    error[sizeof(error) - 1] = 0;
+    if (!rc) {
+        for (int i = 0; i < logits->len; i++) if (!isfinite(logits->data[i])) rc = -1;
+        for (int i = 0; i < hidden->len; i++) if (!isfinite(hidden->data[i])) rc = -1;
+    }
+    AM_Record* out = am_model_outcome(rc ? (error[0] ? error : "model backend failed or returned nonfinite output") : "",
+                                      logits, hidden);
+    am_array_free(logits);
+    am_array_free(hidden);
+    return out;
 }
 
 void am_string_ref(AM_String* text) {

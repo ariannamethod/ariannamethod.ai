@@ -14,6 +14,19 @@ export AML_PREFIX="$WORK/prefix"
     -o "$WORK/import-api"
 "$WORK/import-api" "$WORK/sources"
 
+# Exact root capacity also survives amlc lowering before a C main effect.
+cat >> "$WORK/sources/exact-lines.aml" <<'EOF'
+BLOOD MAIN {
+#include <stdio.h>
+int main(void) { puts("AML_EXACT_SOURCE_CAPACITY_OK"); return 0; }
+}
+EOF
+"$ROOT/tools/amlc" "$WORK/sources/exact-lines.aml" --scalar -o "$WORK/exact-lines" > "$WORK/exact-build.out" 2> "$WORK/exact-build.err"
+"$WORK/exact-lines" > "$WORK/exact.out" 2> "$WORK/exact.err"
+grep -qx 'AML_EXACT_SOURCE_CAPACITY_OK' "$WORK/exact.out"
+test ! -s "$WORK/exact.err"
+echo 'PASS source capacity: exact 8192 root lines through all five paths'
+
 cat "$WORK/sources/graph.aml" > "$WORK/sources/main.aml"
 cat >> "$WORK/sources/main.aml" <<'EOF'
 if abs(tension - 0.7) < 0.000001:

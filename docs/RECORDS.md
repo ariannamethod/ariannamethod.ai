@@ -29,11 +29,14 @@ it can report status 2 without retrying or rolling back the turn.
 
 ## Values and ownership
 
-Records preserve insertion order and admit at most **256 fields**. Keys are
+Records preserve insertion order and admit at most **512 fields**. Keys are
 ordinary immutable UTF-8 strings, including the empty string. Values are flat
 leaves: a float, numeric array or matrix, UTF-8 string, string list, or numeric
-map. Records and tokenizer models cannot be fields. A model is reopened from
-its application metadata and checked with `tokenizer_identity` before restore.
+map. Records, tokenizer models and immutable inference models cannot be fields.
+Models are reopened from application metadata and their stored identities are
+checked before restore. The version-1 checkpoint encoding remains unchanged;
+this runtime accepts up to 512 fields, and older runtimes retain their prior
+256-field load bound.
 
 | Intrinsic | Result |
 |---|---|
@@ -146,7 +149,7 @@ silently substitutes defaults after corruption.
 
 ## Portable checkpoint version 1
 
-The complete file is limited to **64 MiB**. It contains at most 256 fields and
+The complete file is limited to **64 MiB**. It contains at most 512 fields and
 **1,048,576 text objects** in aggregate: field keys, string leaves, list items
 and map keys. Each string is limited to 1 MiB, lists/maps to 65,536 entries, and
 arrays to 1,048,576 floats. These bounds apply before decoded objects become

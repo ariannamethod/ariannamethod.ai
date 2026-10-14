@@ -95,4 +95,5 @@ execution and publication boundary through the three C execution APIs.
 
 The suite also calls every one of 112 and 239 user functions, rejects the
 240th definition before effects in all five paths, and runs a 239-function
-worker. It preserves the separate 4,096 expanded-line limit.
+worker. The shared runtime now admits 8,192 expanded lines; the import suite
+checks exact capacity and overflow before effects.

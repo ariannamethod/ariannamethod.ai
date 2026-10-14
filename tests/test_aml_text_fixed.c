@@ -139,7 +139,7 @@ static void capacity_script(char* script, int definitions, int print) {
 
 static void test_capacity(void) {
     CHECK(AML_MAX_FUNCS == 256);
-    CHECK(AML_MAX_LINES == 4096);
+    CHECK(AML_MAX_LINES == 8192);
     char script[32768];
     int counts[] = {112, 239, 240};
     for (int mode = 0; mode < 3; mode++) {

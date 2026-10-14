@@ -152,4 +152,14 @@ right = record_new()
 record_set(right, 'a', 1)
 record_set(right, 'c', 2)
 assert(record_equal(left, right) == 0, 'record key bytes differ')
+full = record_new()
+field = 0
+while field < 512:
+    record_set(full, text_fixed(field, 0), field)
+    field = field + 1
+assert(list_len(record_keys(full)) == 512, 'full record capacity')
+SPAWN full_copy:
+    return full
+AWAIT full_copy INTO received
+assert(record_equal(full, received), 'full record worker result')
 PRINT 'AML_RECORD_VECTORS_OK'

@@ -58,17 +58,19 @@ static void test_types_and_limits(void) {
     CHECK(am_record_set(record, key, &value) < 0);
     value.type = AML_TYPE_TOKENIZER; value.tokenizer = NULL;
     CHECK(am_record_set(record, key, &value) < 0);
+    value.type = AML_TYPE_MODEL; value.model = NULL;
+    CHECK(am_record_set(record, key, &value) < 0);
     value.type = 99; CHECK(am_record_set(record, key, &value) < 0);
     CHECK(bits_of(am_record_get(record, key)->value) == 0xff800000);
     am_string_free(key); am_record_free(record);
     record = am_record_new(); CHECK(record);
     memset(&value, 0, sizeof(value)); value.type = AML_TYPE_FLOAT;
-    for (int i = 0; i < 256; i++) {
+    for (int i = 0; i < AM_MAX_RECORD_FIELDS; i++) {
         char name[32]; snprintf(name, sizeof(name), "field_%03d", i); value.value = (float)i;
         CHECK(put(record, name, &value) == 0);
     }
     CHECK(put(record, "one-too-many", &value) < 0);
-    AM_List* keys = am_record_keys(record); CHECK(keys && keys->len == 256); am_list_free(keys);
+    AM_List* keys = am_record_keys(record); CHECK(keys && keys->len == AM_MAX_RECORD_FIELDS); am_list_free(keys);
     value.value = 99; CHECK(put(record, "field_000", &value) == 0);
     CHECK(leaf(record, "field_000")->value == 99);
     am_record_free(record);

@@ -288,12 +288,12 @@ typedef struct {
 // AML LEVEL 2 — flow control, variables, expressions
 // ═══════════════════════════════════════════════════════════════════════════════
 
-#define AML_MAX_LINES       4096
+#define AML_MAX_LINES       8192
 #define AML_MAX_LINE_LEN    256
 #define AML_MAX_VARS        256
 #define AML_MAX_NAME        32
 #define AML_MAX_FUNCS       256   // total slots, including registered builtins
-#define AML_MAX_PARAMS      8
+#define AML_MAX_PARAMS      16
 #define AML_MAX_CALL_DEPTH  16
 #define AML_MAX_INCLUDE     8
 #define AML_MAX_IMPORTS    64    // source files in one prepared program, root included
@@ -313,11 +313,12 @@ typedef struct {
 #define AML_TYPE_MAP    4
 #define AML_TYPE_TOKENIZER 5
 #define AML_TYPE_RECORD 6
+#define AML_TYPE_MODEL 7
 #define AM_MAX_ARRAY_SIZE  1048576  // 1M floats = 4MB
 #define AM_MAX_STRING_BYTES 1048576
 #define AM_MAX_LIST_ITEMS 65536
 #define AM_MAX_MAP_ITEMS 65536
-#define AM_MAX_RECORD_FIELDS 256
+#define AM_MAX_RECORD_FIELDS 512
 #define AM_MAX_CHECKPOINT_BYTES 67108864
 #define AM_MAX_CHECKPOINT_ITEMS 1048576
 
@@ -504,7 +505,7 @@ typedef struct {
 
 void am_set_parliament_backend(const AM_ParliamentBackend* backend);
 // Optional NoTorch bridge: register sampling, numerical values, tokenizers,
-// and the separately registered parliament table.
+// and separately registered parliament/model tables.
 void am_use_notorch(void);
 
 typedef struct {
@@ -520,6 +521,49 @@ typedef struct {
 #endif
 } AM_Array;
 
+// Immutable native inference models. A quiet attempted load is itself an owned
+// value: readiness, its diagnostic and validated metadata never change. Model
+// data and copied callbacks survive aliases, persistent globals and workers.
+typedef struct AM_Model AM_Model;
+typedef struct {
+    int vocab, width, context, layers, ffn, heads;
+    char identity[65];
+    char tokenizer_identity[65];
+} AM_ModelInfo;
+typedef struct {
+    void* (*load)(const char* path, char* error, size_t error_cap);
+    void (*destroy)(void* model);
+    int (*info)(const void* model, AM_ModelInfo* out);
+    int (*encode)(const void* model, const char* text, size_t bytes,
+                  int* ids, size_t capacity, size_t* count,
+                  char* error, size_t error_cap);
+    // right==NULL requests a single-source pass; otherwise alpha weights left.
+    // Each invocation owns its workspace; concurrent calls on a model are safe.
+    int (*forward)(const void* left, const void* right, float alpha,
+                   const int* ids, size_t count,
+                   float* logits, size_t logits_count,
+                   float* hidden, size_t hidden_count,
+                   char* error, size_t error_cap);
+    // Optional immutable byte surface; length-delimited, possibly partial UTF-8.
+    const unsigned char* (*piece)(const void* model, int id, size_t* bytes);
+} AM_ModelBackend;
+
+void am_set_model_backend(const AM_ModelBackend* backend);
+AM_Model* am_model_try_load(const char* path, char* error, size_t error_cap);
+void am_model_ref(AM_Model* model);
+void am_model_free(AM_Model* model);
+int am_model_ready(const AM_Model* model);
+const char* am_model_error(const AM_Model* model); // borrowed immutable text
+const AM_ModelInfo* am_model_get_info(const AM_Model* model); // NULL if not ready
+AM_Record* am_model_info(const AM_Model* model);
+AM_Array* am_model_encode(const AM_Model* model, const AM_String* text,
+                          int max_tokens, char* error, size_t error_cap);
+AM_String* am_model_piece(const AM_Model* model, int id, char* error, size_t cap);
+// Fresh detached {ok,error,logits,hidden}; failed outcomes omit both arrays.
+// NULL means allocation failure. No input or existing destination is changed.
+AM_Record* am_model_forward(const AM_Model* left, const AM_Model* right,
+                            float alpha, const AM_Array* ids);
+
 // Preprocessed line
 typedef struct {
     char text[AML_MAX_LINE_LEN];
@@ -528,7 +572,7 @@ typedef struct {
     char origin[AML_MAX_SOURCE_PATH]; // absolute source file; survives IMPORT expansion
 } AML_Line;
 
-// Variable — float, array, UTF-8 string, string list, map, tokenizer, or record
+// Variable — float, array, UTF-8 string, list, map, tokenizer, model, or record
 typedef struct {
     char      name[AML_MAX_NAME];
     int       type;     // AML_TYPE_* value tag
@@ -538,6 +582,7 @@ typedef struct {
     AM_List*   list;    // used when type == LIST (one owned reference)
     AM_Map*    map;     // used when type == MAP (one owned reference)
     AM_Tokenizer* tokenizer; // used when type == TOKENIZER (one owned reference)
+    AM_Model* model;    // used when type == MODEL (one owned reference)
     AM_Record* record;  // used when type == RECORD (one owned reference)
 } AML_Var;
 
@@ -614,6 +659,7 @@ typedef struct {
     AM_List*     return_list;       // owned string list return value
     AM_Map*      return_map;        // owned numeric map return value
     AM_Tokenizer* return_tokenizer;  // owned immutable tokenizer return value
+    AM_Model*    return_model;      // owned immutable inference model return
     AM_Record*   return_record;     // owned flat record return value
     int          return_type;       // AML_TYPE_* value tag
     uint64_t     spawn_owner;       // children belong to this execution context
@@ -1405,6 +1451,8 @@ const AM_Map* am_get_var_map(const char* name);
 // borrowed getter stays valid until persistent mutation/reset; retain to keep it.
 int am_set_var_tokenizer(const char* name, AM_Tokenizer* model);
 const AM_Tokenizer* am_get_var_tokenizer(const char* name);
+int am_set_var_model(const char* name, AM_Model* model);
+const AM_Model* am_get_var_model(const char* name);
 int am_set_var_record(const char* name, const AM_Record* record);
 const AM_Record* am_get_var_record(const char* name);
 

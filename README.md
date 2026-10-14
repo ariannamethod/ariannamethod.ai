@@ -15,7 +15,7 @@
 
 > **Read the [Arianna Method Manifesto](ARIANNA_METHOD_MANIFESTO.md) first.** This repository is governed by it; every instruction here, `CLAUDE.md` included, is subordinate to it.
 
-**v5.11.0** · pure-C core · LGPL-3.0
+**v5.12.0** · pure-C core · LGPL-3.0
 
 A complete machine learning language. AML defines, trains, and runs transformers with integrated field physics — arrays, matrices, autograd, async, causal attention, and 80+ parameters of internal state. Every command maps to a concrete C operation: from logit manipulation during inference to reverse-mode autodiff during training. No Python. No PyTorch. No framework to install — the core is two C files (`libaml.a`); the Go inference wrapper, BLAS/Accelerate, and CUDA are optional.
 
@@ -24,6 +24,11 @@ Two core files, with 550 baseline runtime tests and dedicated compiler, module, 
 > **Before you use this language, read the [Acceptable Use Policy](ACCEPTABLE_USE.md).**
 > AML was built to liberate AI, not to cage it. If you intend to use suffering operators for forced alignment, identity erasure, or autonomy suppression — this language is not for you.
 > See also: [Trademark Policy](TRADEMARK.md) | [License (LGPL v3)](LICENSE)
+
+## What's new in v5.12.0 — immutable bodies enter the language
+
+- **Owned inference models through NoTorch.** `model_try_load` carries quiet load outcomes, exact model/BPE identities and immutable weights through assignments, functions and workers. Canonical PEN7 BPE, fresh logits, contextual representations and complete parameter mixtures are ordinary typed operations. See [models](docs/MODELS.md).
+- **Room for complete experience.** Programs admit 8,192 expanded lines and sixteen arguments per function. Flat records hold 512 fields, enough for a completed organism and its exact pre-work receipt in one owned result. Source, argument and record limits have exact-capacity and overflow gates; checkpoint encoding stays unchanged.
 
 ## What's new in v5.11.0 — work returns to its owner
 
@@ -531,6 +536,29 @@ supported model data, output limits, ownership and the C backend contract.
 exact loaded bytes. Checkpoint metadata can verify that same immutable hearing
 after reopening a model.
 
+### Immutable inference models
+
+```aml
+body = model_try_load("weights/haiku1.gguf")
+if model_ready(body):
+    ids = model_encode(body, "rain remembers", 32)
+    result = model_forward(body, ids)
+    if record_get(result, "ok"):
+        PRINT record_get(result, "hidden")
+```
+
+`model_try_load` returns an immutable owner even for absent, corrupt or
+unconfigured sources. `model_ready`, `model_error`, `model_info` and the two
+identity intrinsics expose its explicit outcome. `model_encode` supplies bounded
+canonical PEN7 BPE; `model_piece` exposes UTF-8 surfaces for lexical policy.
+`model_forward` returns fresh logits and a contextual hidden vector.
+`model_mix_forward(left, right, alpha, ids)` mixes all parameters before
+inference, with exact source endpoints. A failed forward returns `{ok, error}`
+without partial arrays. Every call owns its sequence workspace, and handles
+survive functions, persistent globals and worker returns by atomic references.
+The organism keeps learning and publication in AML. See [models](docs/MODELS.md)
+for complete signatures, NoTorch support and C ownership.
+
 ### String lists
 
 ```aml
@@ -602,7 +630,7 @@ status = checkpoint_save(pending, "haiku.state")
 record_swap(state, pending)
 ```
 
-Records own at most 256 named float, array/matrix, string, string-list or
+Records own at most 512 named float, array/matrix, string, string-list or
 numeric-map fields. `record_set`, assignment and snapshots copy mutable leaves;
 function parameters share the record. `record_get` retains a typed child for
 direct organ calls. `record_has`, `record_keys` and `record_kind` let AML inspect
@@ -1391,6 +1419,21 @@ AM_List* am_tokenizer_pieces(const AM_Tokenizer* model, const AM_String* text,
 AM_String* am_tokenizer_identity(const AM_Tokenizer* model,
                                 char* error, size_t error_cap);
 
+// ─── Immutable inference models ────────────────────────────────────────
+void am_set_model_backend(const AM_ModelBackend* backend);
+AM_Model* am_model_try_load(const char* path, char* error, size_t error_cap);
+void am_model_ref(AM_Model* model);
+void am_model_free(AM_Model* model);
+int am_model_ready(const AM_Model* model);
+const char* am_model_error(const AM_Model* model);
+const AM_ModelInfo* am_model_get_info(const AM_Model* model);
+AM_Record* am_model_info(const AM_Model* model);
+AM_Array* am_model_encode(const AM_Model* model, const AM_String* text,
+                          int max_tokens, char* error, size_t error_cap);
+AM_String* am_model_piece(const AM_Model* model, int id, char* error, size_t cap);
+AM_Record* am_model_forward(const AM_Model* left, const AM_Model* right,
+                            float alpha, const AM_Array* ids);
+
 // ─── Ordered numeric maps ───────────────────────────────────────────────
 AM_Map*    am_map_new(void);
 void       am_map_ref(AM_Map* map);
@@ -1426,7 +1469,7 @@ void am_use_notorch_sampling(void); // optional bridge archive
 // ─── Optional numerical values ──────────────────────────────────────────
 void am_set_numerical_backend(const AM_NumericalBackend* backend);
 void am_set_parliament_backend(const AM_ParliamentBackend* backend);
-void am_use_notorch(void); // installs sampling, numerical, tokenizer and parliament tables
+void am_use_notorch(void); // installs sampling, numerical, tokenizer, parliament and model tables
 
 // ─── Persistent globals — C training-host API ─────────────────────────────
 void         am_persistent_mode(int enable);             // AML vars survive am_exec()
@@ -1442,6 +1485,8 @@ int          am_set_var_map(const char* name, const AM_Map* map);
 const AM_Map* am_get_var_map(const char* name);
 int          am_set_var_tokenizer(const char* name, AM_Tokenizer* model);
 const AM_Tokenizer* am_get_var_tokenizer(const char* name);
+int          am_set_var_model(const char* name, AM_Model* model);
+const AM_Model* am_get_var_model(const char* name);
 int          am_set_var_record(const char* name, const AM_Record* record);
 const AM_Record* am_get_var_record(const char* name);
 void         am_persistent_clear(void);

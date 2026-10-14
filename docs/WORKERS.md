@@ -38,7 +38,7 @@ local frame. These remain separate scopes: the block sees a captured local
 argument; a called helper resolves its own arguments and the original global
 bindings. Earlier caller frames remain outside the worker's visible scope.
 Arrays, lists, maps and records receive independent mutable owners. Immutable
-strings and tokenizer models retain atomic references. The parent can mutate
+strings, tokenizers and inference models retain atomic references. The parent can mutate
 or release its own values immediately after launch.
 
 Source, value-copy, function-preparation and thread-creation failures report an
@@ -55,7 +55,7 @@ Sequential jobs can reuse a name and slot for the lifetime of a conversation.
 
 A `return value` executed by the worker block supplies one result. It supports
 all AML value types: float, array/matrix, UTF-8 string, string list, numeric map,
-immutable tokenizer and flat record. Returns from a helper retain their usual
+immutable tokenizer, immutable inference model and flat record. Returns from a helper retain their usual
 function meaning; the block returns the helper's result explicitly.
 
 `AWAIT name INTO variable` waits, joins and transfers that result into the
