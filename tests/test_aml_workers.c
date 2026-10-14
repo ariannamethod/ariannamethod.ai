@@ -1,5 +1,6 @@
 /* Owned worker lifecycle across interpreter, bytecode, resumable and C hosts. */
 #include "ariannamethod.h"
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +28,22 @@ int __wrap_pthread_create(pthread_t* thread, const pthread_attr_t* attr, void* (
 #endif
 static int checks;
 #define CHECK(x) do { checks++; if (!(x)) { fprintf(stderr, "FAIL workers line %d: %s (%s)\n", __LINE__, #x, am_get_error()); exit(1); } } while (0)
+static void append_source(char* buffer, size_t capacity, size_t* used,
+                          const char* format, ...) {
+    if (*used >= capacity) {
+        fputs("FAIL: worker fixture source capacity exhausted\n", stderr);
+        exit(1);
+    }
+    va_list args;
+    va_start(args, format);
+    int written = vsnprintf(buffer + *used, capacity - *used, format, args);
+    va_end(args);
+    if (written < 0 || (size_t)written >= capacity - *used) {
+        fputs("FAIL: worker fixture source truncated\n", stderr);
+        exit(1);
+    }
+    *used += (size_t)written;
+}
 static int run(int mode, const char* source) {
     if (mode == 0) return am_exec(source);
     if (mode == 1) {
@@ -155,13 +172,13 @@ static void test_errors(int mode) {
     char all_names[1024] = {0};
     size_t used = 0;
     for (int i = 0; i < AM_MAX_SPAWNS; i++)
-        used += (size_t)snprintf(all_names + used, sizeof(all_names) - used,
-                               "SPAWN job%d:\n    return %d\n", i, i);
-    used += (size_t)snprintf(all_names + used, sizeof(all_names) - used, "AWAIT");
+        append_source(all_names, sizeof(all_names), &used,
+                      "SPAWN job%d:\n    return %d\n", i, i);
+    append_source(all_names, sizeof(all_names), &used, "AWAIT");
     for (int i = 0; i < AM_MAX_SPAWNS; i++)
-        used += (size_t)snprintf(all_names + used, sizeof(all_names) - used, " job%d", i);
-    snprintf(all_names + used, sizeof(all_names) - used,
-             "\nSPAWN job0:\n    return 17\nAWAIT job0 INTO count\nassert(count == 17, 'slot reused')\n");
+        append_source(all_names, sizeof(all_names), &used, " job%d", i);
+    append_source(all_names, sizeof(all_names), &used,
+                  "\nSPAWN job0:\n    return 17\nAWAIT job0 INTO count\nassert(count == 17, 'slot reused')\n");
     CHECK(run(mode, all_names) == 0);
     fail(mode, "CHANNEL WRITE absent 1\n", "channel missing");
     fail(mode, "CHANNEL READ absent kept\n", "channel missing");
