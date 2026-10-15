@@ -1,4 +1,4 @@
-# Content hashes, a line journal and external processes; paths resolve from this file.
+# Content hashes, a line journal, file slices and external processes; paths resolve from this file.
 def argv2(program, argument):
     xs = list_new()
     list_push(xs, program)
@@ -15,6 +15,26 @@ assert(file_append_line('journal.log', 'second') == 1, 'second line synced')
 journal = file_hash_sha256('journal.log')
 assert(text_equal(journal, text_hash_sha256('first\nsecond\n')), 'file hash equals text hash')
 assert(text_equal(journal, 'dbea9325179efe46ea2add94f7b6b745ca983fabb208dc6d34aa064623d7ee23'), 'journal oracle')
+assert(file_size('journal.log') == 13, 'journal size')
+assert(text_equal(file_read_slice('journal.log', 0, 5), 'first'), 'slice head')
+assert(text_equal(file_read_slice('journal.log', 6, 100), 'second\n'), 'slice bounded by end of file')
+assert(text_equal(file_read_slice('journal.log', 13, 5), ''), 'offset at end')
+assert(text_equal(file_read_slice('journal.log', 14, 5), ''), 'offset past end')
+assert(text_equal(file_read_slice('journal.log', 0, 0), ''), 'zero bytes')
+# Offset cursor over this file (שלום 🌧): five-byte slices cut characters.
+offset = 0
+short = 0
+copy = ''
+piece = file_read_slice('transport_vectors.aml', offset, 5)
+while text_bytes(piece) > 0:
+    if text_bytes(piece) < 5:
+        short = short + 1
+    copy = text_concat(copy, piece)
+    offset = offset + text_bytes(piece)
+    piece = file_read_slice('transport_vectors.aml', offset, 5)
+assert(offset == file_size('transport_vectors.aml'), 'cursor reached the end')
+assert(text_equal(text_hash_sha256(copy), file_hash_sha256('transport_vectors.aml')), 'slices reassemble the file')
+assert(short > 1, 'a slice edge fell inside a character')
 r = process_run(argv2('echo', 'hi'))
 assert(record_get(r, 'status') == 0, 'echo status')
 assert(text_equal(record_get(r, 'stdout'), 'hi\n'), 'echo stdout')

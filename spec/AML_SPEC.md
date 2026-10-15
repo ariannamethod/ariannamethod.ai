@@ -303,18 +303,28 @@ and may carry it through records, workers or checkpoints. The name is reserved
 case-insensitively and consumes no registered function slot: 495 user definitions
 remain available. [UTC_DAY.md](../docs/UTC_DAY.md) documents the epoch and examples.
 
-The four transport intrinsics are `text_hash_sha256`, `file_hash_sha256`,
-`file_append_line` and `process_run`. `text_hash_sha256(text)` returns 64
-lowercase hex digits of the SHA-256 of the text's UTF-8 bytes;
-`file_hash_sha256(path)` streams a regular file's bytes to the same digest.
-`file_append_line(path, text)` appends text and one LF through
+The six transport intrinsics are `text_hash_sha256`, `file_hash_sha256`,
+`file_append_line`, `file_size`, `file_read_slice` and `process_run`.
+`text_hash_sha256(text)` returns 64 lowercase hex digits of the SHA-256 of the
+text's UTF-8 bytes; `file_hash_sha256(path)` streams a regular file's bytes to
+the same digest. `file_append_line(path, text)` appends text and one LF through
 `O_APPEND|O_CREAT` (mode 0644), then synchronizes: 1 means write and fsync
 succeeded, 2 means written with fsync/close failure. Text containing LF is an
 error before the file is opened; a failed write truncates back to the previous
-length. `process_run(argv, env?, timeout?)` executes a string list directly,
-without a shell, using execvp's `PATH` rule over the child's environment. A
-text-valued record adds or replaces environment names, and a positive timeout
-sends `SIGTERM`, then `SIGKILL` after one second. It returns a fresh
+length. `file_size(path)` returns a regular file's byte size and refuses sizes
+above 16,777,216, the exact float32 integer range.
+`file_read_slice(path, offset, max_bytes)` takes integers `offset` in
+`[0, 16777216]` and `max_bytes` in `[0, 1048576]` and returns fresh text: the
+longest run of whole UTF-8 characters starting at byte `offset` within
+`max_bytes` bytes and the end of file that `fstat` reported at open. An offset
+at or past the end, or `max_bytes` 0, gives `''`. A character cut by either
+edge is left for the slice that starts at it, so callers advance by
+`text_bytes`. An offset inside a character, invalid UTF-8, NUL, `max_bytes`
+smaller than the character at the offset, and a slice ending past byte
+16,777,216 are errors. `process_run(argv, env?, timeout?)` executes a string
+list directly, without a shell, using execvp's `PATH` rule over the child's
+environment. A text-valued record adds or replaces environment names, and a
+positive timeout sends `SIGTERM`, then `SIGKILL` after one second. It returns a fresh
 `{status, stdout, stderr}` record: exit code 0–255, `-N` for death by signal N,
 `-256` for timeout. Both streams are drained together, each bounded by the
 1 MiB text limit and required to be UTF-8 without NUL. Unexecutable programs,

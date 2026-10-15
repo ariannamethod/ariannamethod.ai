@@ -12,6 +12,75 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-10-15 — a journal reads back by byte offset
+
+Two stateless transport organs read a regular file back. `file_size(path)`
+opens read-only with `O_NONBLOCK|O_CLOEXEC`, returns the size `fstat`
+reports and refuses FIFOs, directories and missing paths.
+`file_read_slice(path, offset, max_bytes)` opens the same way and `pread`s at
+most `max_bytes` from `offset`, bounded by the size `fstat` saw, so a file still
+being appended yields the prefix present at that moment. An offset at or past
+the end and `max_bytes` 0 give `''`.
+
+AML numbers are float32. Sizes, offsets and slice ends are therefore held to
+the exact integer range: `file_size` refuses files above 16,777,216 bytes,
+`offset` must be an integer in `[0, 16777216]`, and a slice ending past byte
+16,777,216 is an error, so a cursor never rounds. `max_bytes` lies in
+`[0, 1048576]`, the text limit.
+
+Slices cut bytes, but AML text holds only whole UTF-8 characters, so a cut
+character cannot become a value. A character cut by the `max_bytes` edge or by
+the current end of file is left for the slice that starts at it: a slice can
+be up to three bytes shorter than requested, and the caller advances by
+`text_bytes`. The runtime keeps no buffer and joins nothing. An offset inside
+a character, invalid UTF-8, NUL, and `max_bytes` smaller than the character at
+the offset are errors, so `''` means end of file or a writer stopped
+mid-character, never a cursor that cannot advance.
+
+Proof on macOS 26.4.1 arm64 / Apple clang 21.0.0:
+
+- `make clean && make`: zero warnings. `make test`: **550/550**.
+- `make test-transport`: **11,985** harness checks (3,294 before on this host)
+  across interpreter, resumable host and bytecode. A journal written by
+  `file_append_line` is sliced at every offset with every `max_bytes` up to two
+  past the end and checked against the longest-whole-character rule. Further
+  cases cover empty files, offsets at and past the end, zero `max_bytes`, a
+  sparse file on both sides of byte 16,777,216, cuts through two- and four-byte
+  characters, offsets inside a character, NUL, invalid and overlong bytes,
+  FIFO, directory, missing path and wrong arities. An AML cursor with
+  65,537-byte slices reads a 1,201,125-byte file of Hebrew, Cyrillic and emoji
+  lines and rebuilds it line by line through `file_append_line`. The copy's
+  `file_hash_sha256` equals the source's, and the offset ends at `file_size`.
+  A child process appends 80 lines in two writes split inside 🌧 while AML
+  follows the file with seven-byte slices. The slices join to the final file
+  without an error. In one instrumented run, 290–326 polls per path returned
+  `''` while bytes already stood past the offset: the reader met the writer
+  between the halves. The test itself asserts only the exact join.
+- Interposed `open`, `fstat` and `pread` alongside the existing write/read
+  faults: **12,326** checks (3,478 before). Failed open/stat/read refuse with
+  the system reason and no leaked descriptor. Three-byte and `EINTR` reads
+  still return the exact slice.
+- The vector file reads its own bytes back through five-byte slices in all
+  five paths. **16** invalid calls (11 before) stop before later AML, C
+  `main()` or journal effects.
+- Eight mutations, each compiled from a copy of the source, fail their named
+  test: an offset at the end raised as an error (`slice_journal_bytes`),
+  no NUL guard (`slice_bounds`), no cut-character trim
+  (`slice_journal_bytes`), no small-`max_bytes` guard
+  (`slice_journal_bytes`), a single `pread` (`slice_faults`), no `close` on
+  the non-regular path (`slice_refusals`), no slice-end range check
+  (`slice_bounds`), and no `file_size` range check (`slice_bounds`).
+- utc-day, expressions, text, text-lower, text-fixed, text-input, lists and
+  maps pass. workers, imports and amlc end in `SIGBUS` and records fails to
+  build (`mkdtemp`), with logs identical to the run before this change. Linux
+  was not run.
+
+```sh
+make clean && make
+make test
+make test-transport
+```
+
 ## 2026-10-15 — a journal line is whole or absent
 
 A hash-chained append-only journal and engine orchestration need four transport

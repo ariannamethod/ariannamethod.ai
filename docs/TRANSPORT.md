@@ -1,18 +1,26 @@
-# Hashes, journals and processes
+# Hashes, journals, file slices and processes
 
 This work follows the [Arianna Method Manifesto](../ARIANNA_METHOD_MANIFESTO.md).
 
 An organism that keeps a hash-chained append-only journal and drives external
-engines needs three things from its runtime: an exact digest of bytes, one
-durable line at a time, and a child process whose results return as values.
-Four intrinsics provide them. Chaining, entry schema, retry policy and the
-meaning of an engine's output stay in AML.
+engines needs four things from its runtime: an exact digest of bytes, one
+durable line at a time, a way to read the journal back, and a child process
+whose results return as values. Six intrinsics provide them. Chaining, entry
+schema, retry policy, line splitting and the meaning of an engine's output stay
+in AML.
 
 ```aml
 head = text_hash_sha256('')
 entry = text_concat(head, ' turn 1')
 status = file_append_line('journal.log', entry)
 head = text_hash_sha256(entry)
+
+offset = 0
+piece = file_read_slice('journal.log', offset, 65536)
+while text_bytes(piece) > 0:
+    offset = offset + text_bytes(piece)
+    piece = file_read_slice('journal.log', offset, 65536)
+assert(offset == file_size('journal.log'), 'journal read to its end')
 
 argv = list_new()
 list_push(argv, '/opt/homebrew/bin/aml')
@@ -28,14 +36,16 @@ assert(record_get(run, 'status') == 0, 'engine step')
 | `text_hash_sha256(text)` | 64 lowercase hex digits: SHA-256 of the text's UTF-8 bytes |
 | `file_hash_sha256(path)` | The same digest over a regular file's bytes, streamed in 64 KiB chunks |
 | `file_append_line(path, text)` | Scalar 1 after write and fsync; 2 when written but fsync/close failed; text containing LF is an error before the file is opened |
+| `file_size(path)` | A regular file's size in bytes, an exact scalar up to 16,777,216 |
+| `file_read_slice(path, offset, max_bytes)` | Fresh text: at most `max_bytes` bytes of a regular file from byte `offset`, ending on a whole character; `''` at end of file |
 | `process_run(argv)` / `process_run(argv, env)` / `process_run(argv, env, timeout)` | New record `{status, stdout, stderr}` |
 
 Names are case-insensitive, reserved against user function definitions and
 consume no function slot. Wrong arity or argument types stop execution before
 any file is opened or any process starts, and a failed assignment keeps its
-previous value. Paths given to `file_hash_sha256` and `file_append_line`
-resolve from the statement's original source file, exactly as checkpoint
-paths do; an absolute path stays absolute.
+previous value. Paths given to `file_hash_sha256`, `file_append_line`,
+`file_size` and `file_read_slice` resolve from the statement's original source
+file, exactly as checkpoint paths do; an absolute path stays absolute.
 
 ## Content hashes
 
@@ -85,6 +95,50 @@ first `checkpoint_save` beside it.
 One writer per file is the contract. `O_APPEND` places each write at the
 current end, but continuing a partial write and restoring the previous length
 both assume no concurrent appender. A hash chain assumes the same.
+
+## File size and slices
+
+`file_size(path)` opens the path read-only and returns the size `fstat`
+reports. `file_read_slice(path, offset, max_bytes)` opens it the same way and
+reads with `pread`. No descriptor, position or buffer outlives a call, so two
+identical calls on an unchanged file return identical text. Both accept regular
+files only: as with hashing, `O_NONBLOCK` refuses a FIFO without waiting for a
+writer, and missing paths, directories and open, stat, read or close failures
+are errors.
+
+Sizes and offsets count bytes. AML numbers are float32 and exact for integers
+through 2^24, so `file_size` refuses a file larger than 16,777,216 bytes,
+`offset` must be an integer in `[0, 16777216]`, and a slice that would end
+beyond byte 16,777,216 is an error instead of a cursor that rounds. `max_bytes`
+is an integer in `[0, 1048576]`, the text limit.
+
+| Case | Result |
+|---|---|
+| `max_bytes` is 0 | `''`; the file is still opened and checked |
+| `offset` at or past the end of the file | `''`: end of file, not an error |
+| otherwise | the longest run of whole characters that starts at `offset` and fits within `max_bytes` bytes and the current end of the file |
+
+A slice cuts bytes, not codepoints, while a text value holds only whole UTF-8
+characters. A character cut by the `max_bytes` edge or by the current end of
+the file is left out of the slice; it begins the slice that starts at the next
+offset. A slice can therefore be up to three bytes shorter than requested, and
+the cursor advances by `text_bytes(slice)`, never by `max_bytes` or
+`text_len`. The runtime buffers and joins nothing: assembling lines across
+slices is AML's work. An `offset` inside a character, invalid UTF-8, and a
+`max_bytes` smaller than the character at `offset` are errors, so an empty
+slice never hides a cursor that cannot advance. A NUL byte inside the slice is
+an error: binary data does not pass as text. Only the slice's own bytes are
+checked, so the bytes before a NUL or an invalid byte remain readable.
+
+The read is bounded by the size `fstat` reported when the call opened the
+file. A file that its single writer is still appending is legal input: each
+slice comes from the prefix present at that moment, and a later call sees what
+was appended since. A writer that has written part of a character leaves an
+incomplete sequence at the end of the file; a slice starting there returns
+`''` until the rest arrives, so a reader that follows the file polls without
+an error. On a finished file, `''` with `offset < file_size(path)` means the
+file ends with up to three bytes of an incomplete sequence. A file truncated
+during the call yields what `pread` still finds.
 
 ## External processes
 
@@ -141,7 +195,18 @@ checks the NIST vectors, the 56-byte two-block vector, UTF-8 text, and lengths
 1/55/56/63/64/65/119/120/128 and 1,000,000 against independent `shasum`
 digests, both as text and as files. It checks journal order, mode, empty and
 CR lines, LF refusal on existing and absent paths, and FIFO, directory and
-missing-directory refusals. For processes it covers exit codes 0/1/3/137,
+missing-directory refusals. For slices it reads a journal written by
+`file_append_line` at every offset with every `max_bytes` up to two past the
+end, against the longest-whole-character rule; empty files, offsets at and
+past the end, zero `max_bytes`, both edges of the exact range on a sparse
+16 MiB file, cuts through two- and four-byte characters, an offset inside a
+character, NUL, invalid UTF-8, FIFO, directory and missing paths. A
+1.2 MB file of Hebrew, Cyrillic and emoji lines is read by an AML cursor
+with 65,537-byte slices and rebuilt line by line through `file_append_line`;
+the copy's `file_hash_sha256` equals the source's. A child process appends
+lines in two writes split inside a four-byte character while AML follows the
+file with seven-byte slices; the slices join to the final file without an
+error. For processes it covers exit codes 0/1/3/137,
 deaths by signals 9 and 15, inherited/overridden/added environment, a `PATH`
 override that hides `echo`, single argv entries, `/dev/null` stdin, closed host
 stdin/stdout, invalid UTF-8 and NUL output, missing and non-executable
@@ -150,11 +215,14 @@ both streams, the first refused byte on each, and four workers running twenty
 processes concurrently. After each call the harness confirms no child remains
 and no descriptor leaked.
 
-A second build interposes `write`, `read`, `fsync` and `ftruncate` beneath the
-same suite: fsync failure returns 2 with the complete line, a partial write
-followed by `ENOSPC` restores the previous bytes, a partial write that
-continues completes the line, a failed restore names its torn bytes, and
-seven-byte reads still produce the million-`a` digest. A vector file runs
-through the interpreter, resumable host, bytecode, runner and compiled program,
-and eleven invalid calls stop in all five before later AML, C `main()` or
-journal effects.
+A second build interposes `write`, `read`, `fsync`, `ftruncate`, `open`,
+`fstat` and `pread` beneath the same suite: fsync failure returns 2 with the
+complete line, a partial write followed by `ENOSPC` restores the previous
+bytes, a partial write that continues completes the line, a failed restore
+names its torn bytes, and seven-byte reads still produce the million-`a`
+digest. Failed `open`, `fstat` and `pread` refuse slices and sizes with the
+system reason and no leaked descriptor; three-byte and `EINTR`-interrupted
+`pread` calls still return the exact slice. A vector file runs through the
+interpreter, resumable host, bytecode, runner and compiled program, reads its
+own bytes back through five-byte slices, and sixteen invalid calls stop in all
+five before later AML, C `main()` or journal effects.
