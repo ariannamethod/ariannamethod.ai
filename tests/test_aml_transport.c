@@ -1,6 +1,9 @@
 /* Transport organs: SHA-256 oracles, line journal faults, process capture. */
 #undef _FORTIFY_SOURCE
 #define _POSIX_C_SOURCE 200809L
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 700
+#endif
 #if defined(__APPLE__)
 #define _DARWIN_C_SOURCE
 #elif defined(AML_TRANSPORT_FAULTS)
@@ -579,16 +582,20 @@ static void test_process_workers(int mode) {
     for (int i = 0; i < 4; i++) {
         char var[8], tag[8]; snprintf(var, sizeof(var), "c%d", i); snprintf(tag, sizeof(tag), "w%d", i);
         set_command(var, self, "--child", "args", tag, NULL);
-        used += (size_t)snprintf(source + used, sizeof(source) - used,
+        int n = snprintf(source + used, sizeof(source) - used,
             "SPAWN w%d:\n    acc = ''\n    k = 0\n    while k < 5:\n"
             "        acc = text_concat(acc, record_get(process_run(c%d), 'stdout'))\n"
             "        k = k + 1\n    return acc\n", i, i);
+        CHECK(n > 0 && (size_t)n < sizeof(source) - used);
+        used += (size_t)n;
     }
-    for (int i = 0; i < 4; i++)
-        used += (size_t)snprintf(source + used, sizeof(source) - used,
+    for (int i = 0; i < 4; i++) {
+        int n = snprintf(source + used, sizeof(source) - used,
             "AWAIT w%d INTO o%d\nassert(text_equal(o%d, '1[w%d]1[w%d]1[w%d]1[w%d]1[w%d]'), 'worker %d')\n",
             i, i, i, i, i, i, i, i, i);
-    CHECK(used < sizeof(source));
+        CHECK(n > 0 && (size_t)n < sizeof(source) - used);
+        used += (size_t)n;
+    }
     CHECK(run(mode, source) == 0);
     no_children();
     am_persistent_clear();
