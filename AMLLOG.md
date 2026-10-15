@@ -12,6 +12,76 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-10-15 — a journal line is whole or absent
+
+A hash-chained append-only journal and engine orchestration need four transport
+organs. `text_hash_sha256(text)` and `file_hash_sha256(path)` return lowercase
+SHA-256 hex from an in-tree FIPS 180-4 implementation; the file form streams a
+regular file through a 64 KiB buffer. `file_append_line(path, text)` refuses
+text containing LF before opening the file, writes the line and one LF through
+`O_APPEND|O_CREAT` (0644), synchronizes, and returns 1, or 2 when the line is
+written but `fsync`/`close` failed. A write failure truncates back to the
+length seen before the call, so one writer never leaves a torn line. When the
+call creates the file its directory is not synchronized; the guide states it.
+
+`process_run(argv, env?, timeout?)` forks and execs a string list with no
+shell. The `PATH` search follows execvp's rule over the child's environment,
+prepared before the fork so the child calls only `dup2`, `execve`, `write` and
+`_exit`; there is no `/bin/sh` fallback for files without `#!`. A text record
+replaces or appends environment names. The child reads `/dev/null`. Both pipes
+drain through `poll`, each bounded by the 1 MiB text limit and required to be
+UTF-8 without NUL. The result is `{status, stdout, stderr}`: exit code 0–255,
+`-N` for signal N, and `-256` once a timeout has sent `SIGTERM`, then `SIGKILL`
+after one second. Exec failures arrive through a close-on-exec report pipe as
+errors naming the program. Every path reaps its child; descriptor creation and
+`fork` share one lock across workers. The names are reserved intrinsics and
+consume no function slot: 495 user definitions remain.
+
+Proof on macOS 26.4.1 arm64 / Apple clang 21.0.0:
+
+- `make clean && make`: zero warnings. `make test`: **550/550**.
+- `make test-transport`: **3,273** harness checks across interpreter, resumable
+  host and bytecode. Text and file digests match NIST and independent `shasum`
+  values for 0, 1, 55, 56, 63, 64, 65, 119, 120, 128 and 1,000,000 bytes. Two
+  appends give exactly `first\nsecond\n`; LF leaves an existing file
+  byte-identical and an absent path absent. Processes cover exit 0/1/3/137,
+  signals 9/15, environment override, `a;b c` as one argument, missing/non-
+  executable/`#!`-less programs, timeouts at 0.2–0.3 s with `SIGKILL`
+  escalation, 1 MiB on both streams and the first refused byte, closed host
+  stdin/stdout, and four workers running twenty processes. After every call no
+  child remains and no descriptor leaked.
+- The same suite under `write`/`read`/`fsync`/`ftruncate` interposition:
+  **3,457** checks. fsync failure returns 2 with the complete line, partial
+  write + `ENOSPC` restores the previous bytes, a continued partial write
+  completes, a failed restore names its torn bytes, seven-byte reads keep the
+  million-`a` digest. Interposition is symbol override plus `RTLD_NEXT`
+  because Darwin ld has no `--wrap`.
+- The vector file passes through interpreter, resumable host, bytecode, runner
+  and compiled program from another directory; **11** invalid calls stop all
+  five before later AML, C `main()` or journal creation.
+- Six mutations each fail their named test, then restore byte-identically: a
+  changed round constant (`sha256_vectors`), no `O_APPEND`
+  (`append_ordering`), `environ` instead of the built environment
+  (`process_environment`), no LF guard (`append_newline_rejected`), no restore
+  `ftruncate` (`append_faults`), and no descriptor move above the standard
+  streams (`process_closed_stdio`).
+- Existing suites keep their exact verdict lines on this host. utc-day,
+  expressions, text, text-lower, text-fixed, text-input, lists and maps pass,
+  and records passes when its checkpoint harness gets `_DARWIN_C_SOURCE` for
+  `mkdtemp`. workers, imports and amlc stop with `SIGBUS` at the same points
+  before and after this change. NoTorch suites were not run without a NoTorch
+  build.
+
+```sh
+make clean && make
+make test
+make test-transport
+```
+
+Quote: “Every line is whole or absent.”
+Method: refuse the dirty line before the file opens, restore the length after
+a failed write, and reap every child the call creates.
+
 ## 2026-10-14 — complete graphs keep their named state
 
 Haiku's recursive-symbol work needs its helper graph, explicit per-owner leaves

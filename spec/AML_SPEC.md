@@ -303,6 +303,26 @@ and may carry it through records, workers or checkpoints. The name is reserved
 case-insensitively and consumes no registered function slot: 495 user definitions
 remain available. [UTC_DAY.md](../docs/UTC_DAY.md) documents the epoch and examples.
 
+The four transport intrinsics are `text_hash_sha256`, `file_hash_sha256`,
+`file_append_line` and `process_run`. `text_hash_sha256(text)` returns 64
+lowercase hex digits of the SHA-256 of the text's UTF-8 bytes;
+`file_hash_sha256(path)` streams a regular file's bytes to the same digest.
+`file_append_line(path, text)` appends text and one LF through
+`O_APPEND|O_CREAT` (mode 0644), then synchronizes: 1 means write and fsync
+succeeded, 2 means written with fsync/close failure. Text containing LF is an
+error before the file is opened; a failed write truncates back to the previous
+length. `process_run(argv, env?, timeout?)` executes a string list directly,
+without a shell, using execvp's `PATH` rule over the child's environment. A
+text-valued record adds or replaces environment names, and a positive timeout
+sends `SIGTERM`, then `SIGKILL` after one second. It returns a fresh
+`{status, stdout, stderr}` record: exit code 0–255, `-N` for death by signal N,
+`-256` for timeout. Both streams are drained together, each bounded by the
+1 MiB text limit and required to be UTF-8 without NUL. Unexecutable programs,
+invalid arguments, exceeded output and invalid output are errors; every child
+is reaped. Paths resolve from the original statement's source directory; the
+names are reserved case-insensitively and consume no function slot.
+[TRANSPORT.md](../docs/TRANSPORT.md) defines the complete contracts.
+
 Owned sampling uses an optional registered NoTorch backend. `rng_new(seed)`
 accepts an integer seed in `[0, 16777215]` and returns a numeric map with
 `algorithm=1` and four little-endian 16-bit limbs, `state0` through `state3`.
