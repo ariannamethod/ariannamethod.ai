@@ -89,6 +89,18 @@ ssize_t read(int fd, void* data, size_t n) {
     if (fd > 2 && fault == FAULT_SHORT_READ) { fault_hits++; return real_read(fd, data, n < 7 ? n : 7); }
     return real_read(fd, data, n);
 }
+#if defined(__GLIBC__)
+/* glibc fortification compiles the core's pread/read calls into __pread_chk/
+ * __read_chk, which bypass the plain symbols above; forward them back. */
+ssize_t __pread_chk(int fd, void* data, size_t n, off_t offset, size_t bufsize) {
+    (void)bufsize;
+    return pread(fd, data, n, offset);
+}
+ssize_t __read_chk(int fd, void* data, size_t n, size_t buflen) {
+    (void)buflen;
+    return read(fd, data, n);
+}
+#endif
 int fsync(int fd) {
     if (fault == FAULT_FSYNC) { fault_hits++; errno = EIO; return -1; }
     return real_fsync(fd);
@@ -372,7 +384,7 @@ static void test_append_newline_rejected(int mode) {
 
 static void test_append_refusals(int mode) {
     prepare("append_refusals");
-    char fifo[512], blocked[512], path[512];
+    char fifo[512], blocked[528], path[512];
     path_in_work(fifo, sizeof(fifo), "journal.fifo"); CHECK(mkfifo(fifo, 0600) == 0);
     path_in_work(path, sizeof(path), "plain.log"); write_file(path, "keep\n", 5);
     snprintf(blocked, sizeof(blocked), "%s/child.log", path);
