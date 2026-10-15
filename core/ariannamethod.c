@@ -3809,7 +3809,8 @@ static int aml_record_function(const char* name) {
 
 static int aml_transport_function(const char* name) {
     return !strcasecmp(name, "text_hash_sha256") || !strcasecmp(name, "file_hash_sha256") ||
-           !strcasecmp(name, "file_append_line") || !strcasecmp(name, "process_run");
+           !strcasecmp(name, "file_append_line") || !strcasecmp(name, "process_run") ||
+           !strcasecmp(name, "file_size") || !strcasecmp(name, "file_read_slice");
 }
 
 static int aml_scalar_intrinsic_function(const char* name) {
@@ -4377,6 +4378,87 @@ static int aml_append_line(const char* path, const AM_String* text, char* error,
     return 1;
 }
 
+// Byte sizes and offsets travel as float32 scalars, exact up to 2^24.
+#define AML_FILE_EXACT_BYTES 16777216
+
+// O_NONBLOCK keeps a FIFO from blocking inside open; fstat then refuses it.
+static int aml_open_regular(const char* path, const char* organ, struct stat* st,
+                            char* error, size_t cap) {
+    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) { snprintf(error, cap, "%s open failed: %s", organ, strerror(errno)); return -1; }
+    if (fstat(fd, st)) {
+        int number = errno;
+        close(fd);
+        snprintf(error, cap, "%s stat failed: %s", organ, strerror(number)); return -1;
+    }
+    if (!S_ISREG(st->st_mode)) {
+        close(fd);
+        snprintf(error, cap, "%s requires a regular file", organ); return -1;
+    }
+    return fd;
+}
+
+static int aml_file_size(const char* path, float* size, char* error, size_t cap) {
+    struct stat st;
+    int fd = aml_open_regular(path, "file_size", &st, error, cap);
+    if (fd < 0) return -1;
+    if (close(fd)) { aml_transport_io_error(error, cap, "file_size close failed", errno); return -1; }
+    if (st.st_size > AML_FILE_EXACT_BYTES) {
+        snprintf(error, cap, "file_size exceeds the exact scalar range of 16777216 bytes"); return -1;
+    }
+    *size = (float)st.st_size;
+    return 0;
+}
+
+// Reads at most max_bytes from offset, bounded by the size fstat reports, so a
+// file being appended yields the prefix present at that moment. A character
+// cut by the end of the bytes read stays for the call that starts at it; the
+// empty slice therefore means end of file (or a writer mid-character) only.
+static AM_String* aml_read_slice(const char* path, off_t offset, size_t max_bytes,
+                                 char* error, size_t cap) {
+    struct stat st;
+    int fd = aml_open_regular(path, "file_read_slice", &st, error, cap);
+    if (fd < 0) return NULL;
+    size_t want = st.st_size > offset ? (size_t)(st.st_size - offset) : 0;
+    if (want > max_bytes) want = max_bytes;
+    if (offset + (off_t)want > AML_FILE_EXACT_BYTES) {
+        close(fd);
+        snprintf(error, cap, "file_read_slice end exceeds the exact scalar range of 16777216 bytes");
+        return NULL;
+    }
+    unsigned char* bytes = malloc(want ? want : 1);
+    if (!bytes) { close(fd); snprintf(error, cap, "file_read_slice allocation failed"); return NULL; }
+    size_t n = 0;
+    int number = 0;
+    while (n < want) {
+        ssize_t count = pread(fd, bytes + n, want - n, offset + (off_t)n);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) { number = errno; break; }
+        if (count == 0) break;
+        n += (size_t)count;
+    }
+    if (close(fd) && !number) number = errno;
+    size_t lead = n, keep = n, width = 0;
+    while (lead > 0 && n - lead < 4) if ((bytes[--lead] & 0xC0) != 0x80) break;
+    if (lead < n) {
+        unsigned b = bytes[lead];
+        width = b >= 0xC2 && b <= 0xDF ? 2 : b >= 0xE0 && b <= 0xEF ? 3 : b >= 0xF0 && b <= 0xF4 ? 4 : 0;
+        if (n - lead < width) keep = lead;
+        else width = 0;
+    }
+    AM_String* text = NULL;
+    if (number) aml_transport_io_error(error, cap, "file_read_slice read/close failed", number);
+    else if (!keep && width > max_bytes)
+        snprintf(error, cap, "file_read_slice max_bytes is smaller than the character at offset");
+    else if (memchr(bytes, 0, keep)) snprintf(error, cap, "file_read_slice slice contains NUL");
+    else if (am_string_validate_bytes((const char*)bytes, keep) < 0)
+        snprintf(error, cap, "file_read_slice slice is not UTF-8 text");
+    else if (!(text = am_string_new_bytes((const char*)bytes, keep)))
+        snprintf(error, cap, "file_read_slice text allocation failed");
+    free(bytes);
+    return text;
+}
+
 #define AML_PROCESS_TIMEOUT_STATUS (-256)
 #define AML_PROCESS_GRACE_SECONDS 1.0
 
@@ -4720,9 +4802,44 @@ static int aml_process_run(AML_ExecCtx* ctx, AML_Var* args, int nargs, AML_Var* 
     return 0;
 }
 
+static int aml_file_read_dispatch(AML_ExecCtx* ctx, int slicing, AML_Var* args, int nargs, AML_Var* out) {
+    if (nargs != (slicing ? 3 : 1)) {
+        set_error(ctx, slicing ? "file_read_slice requires a path, offset and max_bytes"
+                               : "file_size requires exactly one path");
+        return 1;
+    }
+    if (slicing) {
+        const AML_Var* offset = &args[1], * max = &args[2];
+        if (offset->type != AML_TYPE_FLOAT || !isfinite(offset->value) || offset->value < 0 ||
+            offset->value > AML_FILE_EXACT_BYTES || truncf(offset->value) != offset->value) {
+            set_error(ctx, "file_read_slice offset must be an integer in [0, 16777216]"); return 1;
+        }
+        if (max->type != AML_TYPE_FLOAT || !isfinite(max->value) || max->value < 0 ||
+            max->value > AM_MAX_STRING_BYTES || truncf(max->value) != max->value) {
+            set_error(ctx, "file_read_slice max_bytes must be an integer in [0, 1048576]"); return 1;
+        }
+    }
+    char* path = aml_resolve_value_path(ctx, &args[0]);
+    if (!path) return 1;
+    char error[256] = {0};
+    int failed;
+    if (slicing) {
+        out->string = aml_read_slice(path, (off_t)args[1].value, (size_t)args[2].value, error, sizeof(error));
+        failed = !out->string;
+        if (!failed) out->type = AML_TYPE_STRING;
+    } else {
+        failed = aml_file_size(path, &out->value, error, sizeof(error)) != 0;
+    }
+    free(path);
+    if (failed) { set_error(ctx, error); return 1; }
+    return 0;
+}
+
 static int aml_transport_dispatch(AML_ExecCtx* ctx, const char* name,
                                   AML_Var* args, int nargs, AML_Var* out) {
     if (!strcasecmp(name, "process_run")) return aml_process_run(ctx, args, nargs, out);
+    if (!strcasecmp(name, "file_size") || !strcasecmp(name, "file_read_slice"))
+        return aml_file_read_dispatch(ctx, !strcasecmp(name, "file_read_slice"), args, nargs, out);
     int appending = !strcasecmp(name, "file_append_line");
     if (nargs != (appending ? 2 : 1)) { set_error(ctx, "wrong number of hash/journal arguments"); return 1; }
     char hex[65];
@@ -7506,7 +7623,8 @@ static int aml_reserved_function(const char* name) {
         "model_mix_forward", "model_piece",
         "record_new", "record_set", "record_get", "record_has", "record_keys", "record_kind",
         "record_clone", "record_equal", "record_replace", "record_swap", "checkpoint_save", "checkpoint_load", "file_exists",
-        "text_hash_sha256", "file_hash_sha256", "file_append_line", "process_run"
+        "text_hash_sha256", "file_hash_sha256", "file_append_line", "process_run",
+        "file_size", "file_read_slice"
     };
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (strcasecmp(name, names[i]) == 0) return 1;

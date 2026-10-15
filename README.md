@@ -668,9 +668,13 @@ ownership, wire format, limits and all failure guarantees.
 `text_hash_sha256(text)` and `file_hash_sha256(path)` return lowercase SHA-256
 hex. `file_append_line(path, text)` appends one LF-terminated line, refuses
 text containing LF before opening the file and returns 1 after fsync (2 when
-written but unsynchronized). `process_run(argv, env, timeout)` runs a string
-list without a shell and returns `{status, stdout, stderr}`; a timeout reports
-status -256. See [transport](docs/TRANSPORT.md).
+written but unsynchronized). `file_size(path)` and
+`file_read_slice(path, offset, max_bytes)` read a regular file back by byte
+offset: a slice ends on a whole character, the cursor advances by
+`text_bytes`, and `''` marks the end of the file.
+`process_run(argv, env, timeout)` runs a string list without a shell and
+returns `{status, stdout, stderr}`; a timeout reports status -256. See
+[transport](docs/TRANSPORT.md).
 
 ### Owned sampling
 

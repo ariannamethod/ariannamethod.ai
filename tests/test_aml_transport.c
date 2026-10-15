@@ -1,4 +1,4 @@
-/* Transport organs: SHA-256 oracles, line journal faults, process capture. */
+/* Transport organs: SHA-256 oracles, line journal faults, file slices, process capture. */
 #undef _FORTIFY_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #ifndef _XOPEN_SOURCE
@@ -52,12 +52,32 @@ static const struct { size_t bytes; const char* digest; } repeated_a[] = {
 /* Definitions in this executable outrank libc for libaml.a's references; the
  * real functions are resolved once, before any fork. */
 enum { FAULT_NONE, FAULT_FSYNC, FAULT_PARTIAL_FAIL, FAULT_PARTIAL_CONTINUE,
-       FAULT_PARTIAL_NO_RESTORE, FAULT_SHORT_READ };
+       FAULT_PARTIAL_NO_RESTORE, FAULT_SHORT_READ, FAULT_OPEN, FAULT_FSTAT,
+       FAULT_PREAD_EIO, FAULT_PREAD_SHORT, FAULT_PREAD_EINTR };
 static int fault, fault_hits;
 static ssize_t (*real_write)(int, const void*, size_t);
 static ssize_t (*real_read)(int, void*, size_t);
 static int (*real_fsync)(int);
 static int (*real_ftruncate)(int, off_t);
+static int (*real_open)(const char*, int, ...);
+static int (*real_fstat)(int, struct stat*);
+static ssize_t (*real_pread)(int, void*, size_t, off_t);
+int open(const char* path, int flags, ...) {
+    mode_t mode = 0;
+    if (flags & O_CREAT) { va_list ap; va_start(ap, flags); mode = (mode_t)va_arg(ap, int); va_end(ap); }
+    if (fault == FAULT_OPEN) { fault_hits++; errno = EACCES; return -1; }
+    return real_open(path, flags, mode);
+}
+int fstat(int fd, struct stat* st) {
+    if (fault == FAULT_FSTAT && fd > 2) { fault_hits++; errno = EIO; return -1; }
+    return real_fstat(fd, st);
+}
+ssize_t pread(int fd, void* data, size_t n, off_t offset) {
+    if (fault == FAULT_PREAD_EIO) { fault_hits++; errno = EIO; return -1; }
+    if (fault == FAULT_PREAD_SHORT) { fault_hits++; return real_pread(fd, data, n < 3 ? n : 3, offset); }
+    if (fault == FAULT_PREAD_EINTR && !fault_hits) { fault_hits++; errno = EINTR; return -1; }
+    return real_pread(fd, data, n, offset);
+}
 ssize_t write(int fd, const void* data, size_t n) {
     if (fd > 2 && fault >= FAULT_PARTIAL_FAIL && fault <= FAULT_PARTIAL_NO_RESTORE) {
         if (fault_hits++ == 0) return real_write(fd, data, n / 2);
@@ -82,7 +102,11 @@ static void resolve_real(void) {
     real_read = (ssize_t (*)(int, void*, size_t))dlsym(RTLD_NEXT, "read");
     real_fsync = (int (*)(int))dlsym(RTLD_NEXT, "fsync");
     real_ftruncate = (int (*)(int, off_t))dlsym(RTLD_NEXT, "ftruncate");
-    if (!real_write || !real_read || !real_fsync || !real_ftruncate) {
+    real_open = (int (*)(const char*, int, ...))dlsym(RTLD_NEXT, "open");
+    real_fstat = (int (*)(int, struct stat*))dlsym(RTLD_NEXT, "fstat");
+    real_pread = (ssize_t (*)(int, void*, size_t, off_t))dlsym(RTLD_NEXT, "pread");
+    if (!real_write || !real_read || !real_fsync || !real_ftruncate ||
+        !real_open || !real_fstat || !real_pread) {
         fprintf(stderr, "FAIL transport: real I/O symbols unavailable\n"); exit(1);
     }
 }
@@ -368,6 +392,314 @@ static void test_append_refusals(int mode) {
     am_persistent_clear();
 }
 
+/* ── File size and byte slices ── */
+static void slice_is(int mode, const char* var, double offset, double max, const char* expected) {
+    char expression[256];
+    snprintf(expression, sizeof(expression), "file_read_slice(%s, %.0f, %.0f)", var, offset, max);
+    if (call(mode, expression)) {
+        fprintf(stderr, "FAIL transport %s: '%s' failed: %s\n", current_test, expression, am_get_error());
+        exit(1);
+    }
+    const char* got = am_get_var_text("r");
+    if (!got || strcmp(got, expected)) {
+        fprintf(stderr, "FAIL transport %s: '%s' gave '%s', expected '%s'\n",
+                current_test, expression, got ? got : "(not text)", expected);
+        exit(1);
+    }
+    checks++;
+}
+static void size_is(int mode, const char* var, float expected) {
+    char expression[128]; snprintf(expression, sizeof(expression), "file_size(%s)", var);
+    CHECK(call(mode, expression) == 0 && am_get_var_float("r") == expected);
+}
+static void slice_refused(int mode, const char* var, double offset, double max, const char* diagnostic) {
+    char expression[256];
+    snprintf(expression, sizeof(expression), "file_read_slice(%s, %.0f, %.0f)", var, offset, max);
+    refused(mode, expression, diagnostic);
+}
+static int continuation(const char* s, size_t i) { return ((unsigned char)s[i] & 0xC0) == 0x80; }
+
+/* Every slice of a journal written by file_append_line, against the spec: the
+ * longest prefix of [offset, offset+max) that ends on a character boundary. */
+static void test_slice_journal_bytes(int mode) {
+    prepare("slice_journal_bytes");
+    char path[512]; path_in_work(path, sizeof(path), "slice.log");
+    CHECK(am_set_var_text("journal", path) == 0);
+    CHECK(run(mode, "file_append_line(journal, 'first')\nfile_append_line(journal, 'שלום 🌧')\n"
+                    "file_append_line(journal, '')\nfile_append_line(journal, 'tail\\r')\n") == 0);
+    const char* j = "first\nשלום 🌧\n\ntail\r\n";
+    size_t size = strlen(j);
+    expect_file(path, j, size);
+    size_is(mode, "journal", (float)size);
+    slice_is(mode, "journal", 0, (double)size, j);
+    slice_is(mode, "journal", 0, 1048576, j);
+    slice_is(mode, "journal", 6, 8, "שלום");
+    char expected[64];
+    for (size_t o = 0; o <= size; o++) {
+        for (size_t m = 1; m <= size - o + 2; m++) {
+            if (o < size && continuation(j, o)) {
+                slice_refused(mode, "journal", (double)o, (double)m, "file_read_slice slice is not UTF-8 text");
+                continue;
+            }
+            size_t limit = o + m < size ? o + m : size, end = o;
+            for (size_t b = o + 1; b <= limit; b++) if (b == size || !continuation(j, b)) end = b;
+            if (end == o && o < size) {
+                slice_refused(mode, "journal", (double)o, (double)m, "smaller than the character at offset");
+                continue;
+            }
+            memcpy(expected, j + o, end - o); expected[end - o] = 0;
+            slice_is(mode, "journal", (double)o, (double)m, expected);
+        }
+    }
+    CHECK(unlink(path) == 0);
+    am_persistent_clear();
+}
+
+static void test_slice_bounds(int mode) {
+    prepare("slice_bounds");
+    char path[512], big[512];
+    path_in_work(path, sizeof(path), "bounds.txt"); path_in_work(big, sizeof(big), "big.bin");
+    CHECK(am_set_var_text("p", path) == 0 && am_set_var_text("big", big) == 0);
+    write_file(path, "", 0);
+    size_is(mode, "p", 0);
+    slice_is(mode, "p", 0, 0, ""); slice_is(mode, "p", 0, 10, ""); slice_is(mode, "p", 5, 10, "");
+    slice_is(mode, "p", 16777216, 1048576, "");
+    write_file(path, "abc", 3);
+    size_is(mode, "p", 3);
+    slice_is(mode, "p", 3, 10, ""); slice_is(mode, "p", 4, 10, ""); slice_is(mode, "p", 1000, 1, "");
+    slice_is(mode, "p", 0, 0, ""); slice_is(mode, "p", 3, 0, ""); slice_is(mode, "p", 1, 1, "b");
+    slice_is(mode, "p", 1, 1048576, "bc");
+    /* Float32 offsets are exact through 2^24: a sparse file straddles that edge. */
+    int fd = open(big, O_CREAT | O_TRUNC | O_WRONLY, 0644); CHECK(fd >= 0);
+    CHECK(ftruncate(fd, 16777217) == 0);
+    CHECK(pwrite(fd, "yz", 2, 16777215) == 2 && close(fd) == 0);
+    refused(mode, "file_size(big)", "file_size exceeds the exact scalar range");
+    slice_is(mode, "big", 16777215, 1, "y");
+    slice_refused(mode, "big", 16777215, 2, "end exceeds the exact scalar range");
+    slice_refused(mode, "big", 16777216, 1, "end exceeds the exact scalar range");
+    slice_refused(mode, "big", 16777214, 1, "file_read_slice slice contains NUL");
+    CHECK(truncate(big, 16777216) == 0);
+    size_is(mode, "big", 16777216);
+    slice_is(mode, "big", 16777215, 5, "y");
+    slice_is(mode, "big", 16777216, 5, "");
+    CHECK(unlink(big) == 0);
+    const char* offset = "offset must be an integer in [0, 16777216]";
+    const char* max = "max_bytes must be an integer in [0, 1048576]";
+    refused(mode, "file_read_slice(p, -1, 1)", offset);
+    refused(mode, "file_read_slice(p, 0.5, 1)", offset);
+    refused(mode, "file_read_slice(p, 16777218, 1)", offset);
+    refused(mode, "file_read_slice(p, 'x', 1)", offset);
+    refused(mode, "file_read_slice('/nonexistent-aml-transport/f', -1, 1)", offset);
+    refused(mode, "file_read_slice(p, 0, -1)", max);
+    refused(mode, "file_read_slice(p, 0, 1048577)", max);
+    refused(mode, "file_read_slice(p, 0, 2.5)", max);
+    refused(mode, "file_read_slice(p, 0, list_new())", max);
+    CHECK(unlink(path) == 0);
+    am_persistent_clear();
+}
+
+static void test_slice_refusals(int mode) {
+    prepare("slice_refusals");
+    char path[512], fifo[512];
+    path_in_work(path, sizeof(path), "nul.bin"); path_in_work(fifo, sizeof(fifo), "slice.fifo");
+    CHECK(mkfifo(fifo, 0600) == 0);
+    CHECK(am_set_var_text("p", path) == 0 && am_set_var_text("fifo", fifo) == 0);
+    CHECK(am_set_var_text("directory", work) == 0);
+    CHECK(am_set_var_text("missing", "/nonexistent-aml-transport/file") == 0);
+    write_file(path, "ab\0cd", 5);
+    size_is(mode, "p", 5);
+    slice_refused(mode, "p", 0, 5, "file_read_slice slice contains NUL");
+    slice_refused(mode, "p", 2, 1, "file_read_slice slice contains NUL");
+    slice_is(mode, "p", 0, 2, "ab"); slice_is(mode, "p", 3, 2, "cd");
+    refused(mode, "file_read_slice(p, 0, 2) + 1", "used as a scalar");
+    write_file(path, "ok\xff", 3);
+    slice_refused(mode, "p", 0, 3, "file_read_slice slice is not UTF-8 text");
+    slice_is(mode, "p", 0, 2, "ok");
+    write_file(path, "\xc0\xaf", 2);
+    slice_refused(mode, "p", 0, 2, "file_read_slice slice is not UTF-8 text");
+    slice_refused(mode, "missing", 0, 1, "file_read_slice open failed: No such file");
+    slice_refused(mode, "directory", 0, 1, "file_read_slice requires a regular file");
+    slice_refused(mode, "fifo", 0, 1, "file_read_slice requires a regular file");
+    refused(mode, "file_read_slice('', 0, 1)", "file path must be a nonempty string");
+    refused(mode, "file_read_slice(3, 0, 1)", "file path must be a nonempty string");
+    refused(mode, "file_read_slice()", "requires a path, offset and max_bytes");
+    refused(mode, "file_read_slice(p)", "requires a path, offset and max_bytes");
+    refused(mode, "file_read_slice(p, 0)", "requires a path, offset and max_bytes");
+    refused(mode, "file_read_slice(p, 0, 1, 1)", "requires a path, offset and max_bytes");
+    refused(mode, "file_size(missing)", "file_size open failed: No such file");
+    refused(mode, "file_size(directory)", "file_size requires a regular file");
+    refused(mode, "file_size(fifo)", "file_size requires a regular file");
+    refused(mode, "file_size('')", "file path must be a nonempty string");
+    refused(mode, "file_size(list_new())", "file path must be a nonempty string");
+    refused(mode, "file_size()", "file_size requires exactly one path");
+    refused(mode, "file_size(p, p)", "file_size requires exactly one path");
+    CHECK(unlink(fifo) == 0 && unlink(path) == 0);
+    am_persistent_clear();
+}
+
+/* A slice cuts bytes: a character cut by max_bytes or by the current end of
+ * file waits for the call that starts at it, never enters text in halves. */
+static void test_slice_utf8_boundaries(int mode) {
+    prepare("slice_utf8_boundaries");
+    char path[512]; path_in_work(path, sizeof(path), "utf8.txt");
+    CHECK(am_set_var_text("p", path) == 0);
+    write_file(path, "a\xd7\xa9\xf0\x9f\x8c\xa7", 7);   /* a ש 🌧 */
+    size_is(mode, "p", 7);
+    slice_is(mode, "p", 0, 1, "a"); slice_is(mode, "p", 0, 2, "a"); slice_is(mode, "p", 0, 3, "aש");
+    slice_is(mode, "p", 0, 6, "aש"); slice_is(mode, "p", 0, 7, "aש🌧");
+    slice_refused(mode, "p", 1, 1, "max_bytes is smaller than the character at offset");
+    slice_is(mode, "p", 1, 2, "ש");
+    slice_refused(mode, "p", 2, 5, "file_read_slice slice is not UTF-8 text");
+    slice_refused(mode, "p", 3, 3, "max_bytes is smaller than the character at offset");
+    slice_is(mode, "p", 3, 4, "🌧");
+    slice_refused(mode, "p", 4, 4, "file_read_slice slice is not UTF-8 text");
+    CHECK(run(mode, "t = file_read_slice(p, 0, 6)\nn = text_bytes(t)\nk = text_len(t)\n") == 0);
+    CHECK(am_get_var_float("n") == 3 && am_get_var_float("k") == 2);
+    /* A writer between the two halves of ש. */
+    write_file(path, "x\xd7", 2);
+    size_is(mode, "p", 2);
+    slice_is(mode, "p", 0, 10, "x"); slice_is(mode, "p", 1, 10, "");
+    slice_refused(mode, "p", 1, 1, "max_bytes is smaller than the character at offset");
+    FILE* f = fopen(path, "ab"); CHECK(f && fwrite("\xa9\n", 1, 2, f) == 2 && fclose(f) == 0);
+    slice_is(mode, "p", 1, 10, "ש\n");
+    CHECK(unlink(path) == 0);
+    am_persistent_clear();
+}
+
+/* More than 1 MiB of UTF-8 lines through an offset cursor in AML itself. The
+ * odd slice size cuts characters; the copy is rebuilt line by line. */
+static void test_slice_large_loop(int mode) {
+    prepare("slice_large_loop");
+    char src[512], dst[512];
+    path_in_work(src, sizeof(src), "large.src"); path_in_work(dst, sizeof(dst), "large.copy");
+    const char* unit = "שלום 🌧 жизнь a ";
+    size_t unit_len = strlen(unit), cap = 2 << 20, size = 0;
+    char* data = malloc(cap); CHECK(data);
+    for (int i = 0; size < 1200000; i++) {
+        int units = 100 + (i * 37) % 400;
+        CHECK(size + (size_t)units * unit_len + 2 < cap);
+        for (int u = 0; u < units; u++) { memcpy(data + size, unit, unit_len); size += unit_len; }
+        data[size++] = (char)('0' + i % 10); data[size++] = '\n';
+    }
+    write_file(src, data, size);
+    absent(dst);
+    CHECK(am_set_var_text("src", src) == 0 && am_set_var_text("dst", dst) == 0);
+    CHECK(run(mode,
+        "offset = 0\nshort = 0\nslices = 0\ncarry = ''\n"
+        "chunk = file_read_slice(src, offset, 65537)\n"
+        "while text_bytes(chunk) > 0:\n"
+        "    slices = slices + 1\n"
+        "    if text_bytes(chunk) < 65537:\n"
+        "        short = short + 1\n"
+        "    offset = offset + text_bytes(chunk)\n"
+        "    carry = text_concat(carry, chunk)\n"
+        "    cut = text_find(carry, '\\n')\n"
+        "    while cut >= 0:\n"
+        "        file_append_line(dst, text_slice(carry, 0, cut))\n"
+        "        carry = text_slice(carry, cut + 1, text_len(carry))\n"
+        "        cut = text_find(carry, '\\n')\n"
+        "    chunk = file_read_slice(src, offset, 65537)\n"
+        "assert(offset == file_size(src), 'cursor reached the end')\n"
+        "assert(text_bytes(carry) == 0, 'source ends with LF')\n"
+        "assert(text_equal(file_hash_sha256(dst), file_hash_sha256(src)), 'copy hashes as the source')\n") == 0);
+    CHECK(am_get_var_float("offset") == (float)size);
+    /* A trimmed slice loses at most three bytes, and some edges fell inside a character. */
+    float slices = am_get_var_float("slices");
+    CHECK(slices >= (float)(size / 65537) && slices <= (float)(size / 65534 + 1));
+    CHECK(am_get_var_float("short") >= 2);
+    expect_file(dst, data, size);
+    CHECK(run(mode, "whole = file_read_slice(src, 0, 1048576)\nn = text_bytes(whole)\n") == 0);
+    size_t n = (size_t)am_get_var_float("n");
+    CHECK(n <= 1048576 && n > 1048572 && !continuation(data, n));
+    CHECK(!memcmp(am_get_var_text("whole"), data, n) && strlen(am_get_var_text("whole")) == n);
+    free(data);
+    CHECK(unlink(src) == 0 && unlink(dst) == 0);
+    am_persistent_clear();
+}
+
+/* A child appends lines in two writes split inside 🌧, pausing 1 ms after
+ * each, while AML follows the file with seven-byte slices. The reader catches
+ * the writer between the halves (empty slices with bytes beyond the offset);
+ * the slices still concatenate to the final file without an error. */
+static void test_slice_concurrent_writer(int mode) {
+    prepare("slice_concurrent_writer");
+    char path[512]; path_in_work(path, sizeof(path), "growing.log");
+    write_file(path, "", 0);
+    CHECK(am_set_var_text("p", path) == 0);
+    const char* line = "line שלום 🌧 end\n";
+    size_t split = strstr(line, "🌧") - line + 2, len = strlen(line), lines = 80;
+    int before = open_descriptors();
+    pid_t child = fork(); CHECK(child >= 0);
+    if (child == 0) {
+        int fd = open(path, O_WRONLY | O_APPEND);
+        if (fd < 0) _exit(1);
+        struct timespec pause = {0, 1000000};
+        for (size_t i = 0; i < lines; i++) {
+            if (write(fd, line, split) != (ssize_t)split) _exit(2);
+            nanosleep(&pause, NULL);
+            if (write(fd, line + split, len - split) != (ssize_t)(len - split)) _exit(3);
+            nanosleep(&pause, NULL);
+        }
+        _exit(close(fd) ? 4 : 0);
+    }
+    char* seen = malloc(len * lines + 1); CHECK(seen);
+    size_t offset = 0;
+    int status = 0, done = 0, ok = 1, saved = checks;
+    double deadline = now_seconds() + 60;
+    /* The poll count follows scheduling; the loop adds one check, not one per poll. */
+    while (ok && offset < len * lines) {
+        char source[256];
+        snprintf(source, sizeof(source), "r = file_read_slice(p, %zu, 7)\n", offset);
+        const char* got = NULL;
+        ok = now_seconds() < deadline && run(mode, source) == 0 && (got = am_get_var_text("r")) &&
+             strlen(got) <= 7 && offset + strlen(got) <= len * lines;
+        if (ok) { memcpy(seen + offset, got, strlen(got)); offset += strlen(got); }
+        if (!done && waitpid(child, &status, WNOHANG) == child) done = 1;
+    }
+    checks = saved;
+    CHECK(ok);
+    if (!done) done = waitpid(child, &status, 0) == child;
+    CHECK(done);
+    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    no_children();
+    CHECK(open_descriptors() == before);
+    expect_file(path, seen, offset);
+    slice_is(mode, "p", (double)offset, 7, "");
+    free(seen);
+    CHECK(unlink(path) == 0);
+    am_persistent_clear();
+}
+
+#ifdef AML_TRANSPORT_FAULTS
+static void test_slice_faults(int mode) {
+    prepare("slice_faults");
+    char path[512]; path_in_work(path, sizeof(path), "fault.txt");
+    const char* text = "שלום 🌧 slice under faults\n";
+    write_file(path, text, strlen(text));
+    CHECK(am_set_var_text("p", path) == 0);
+    fault = FAULT_OPEN; fault_hits = 0;
+    slice_refused(mode, "p", 0, 5, "file_read_slice open failed: Permission denied");
+    refused(mode, "file_size(p)", "file_size open failed: Permission denied");
+    fault = FAULT_NONE; CHECK(fault_hits == 2);
+    fault = FAULT_FSTAT; fault_hits = 0;
+    slice_refused(mode, "p", 0, 5, "file_read_slice stat failed: Input/output error");
+    refused(mode, "file_size(p)", "file_size stat failed: Input/output error");
+    fault = FAULT_NONE; CHECK(fault_hits == 2);
+    fault = FAULT_PREAD_EIO; fault_hits = 0;
+    slice_refused(mode, "p", 0, 5, "file_read_slice read/close failed: Input/output error");
+    fault = FAULT_NONE; CHECK(fault_hits == 1);
+    fault = FAULT_PREAD_SHORT; fault_hits = 0;
+    slice_is(mode, "p", 0, 1048576, text);
+    fault = FAULT_NONE; CHECK(fault_hits >= (int)strlen(text) / 3);
+    fault = FAULT_PREAD_EINTR; fault_hits = 0;
+    slice_is(mode, "p", 0, 1048576, text);
+    fault = FAULT_NONE; CHECK(fault_hits == 1);
+    expect_file(path, text, strlen(text));
+    CHECK(unlink(path) == 0);
+    am_persistent_clear();
+}
+#endif
+
 #ifdef AML_TRANSPORT_FAULTS
 static void test_append_faults(int mode) {
     prepare("append_faults");
@@ -606,7 +938,8 @@ static void test_process_workers(int mode) {
 
 static void test_reserved_names(int mode) {
     prepare("reserved_names");
-    const char* names[] = {"text_hash_sha256", "FILE_HASH_SHA256", "file_append_line", "Process_Run"};
+    const char* names[] = {"text_hash_sha256", "FILE_HASH_SHA256", "file_append_line", "Process_Run",
+                           "file_size", "FILE_READ_SLICE"};
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
         char source[128]; snprintf(source, sizeof(source), "def %s(x):\n    return x\n", names[i]);
         CHECK(run(mode, source) != 0 && strstr(am_get_error(), "collides with an intrinsic"));
@@ -627,6 +960,11 @@ static const char* const invalid[] = {
     "xs = list_new()\nlist_push(xs, 'echo')\nr = process_run(xs, 1)\n",
     "xs = list_new()\nlist_push(xs, 'echo')\nr = process_run(xs, record_new(), 0)\n",
     "def file_append_line(a, b):\n    return 1\n",
+    "n = file_size('transport-missing-file')\n",
+    "s = file_read_slice('transport-missing-file', 0, 1)\n",
+    "s = file_read_slice('journal.log', -1, 1)\n",
+    "s = file_read_slice('journal.log', 0, 1048577)\n",
+    "s = file_read_slice('journal.log', 0)\n",
 };
 
 static char* read_source(const char* path) {
@@ -663,12 +1001,19 @@ int main(int argc, char** argv) {
     for (int mode = 0; mode < 3; mode++) {
 #ifdef AML_TRANSPORT_FAULTS
         test_append_faults(mode);
+        test_slice_faults(mode);
 #endif
         test_sha256_vectors(mode);
         test_file_hash_equals_text_hash(mode);
         test_append_ordering(mode);
         test_append_newline_rejected(mode);
         test_append_refusals(mode);
+        test_slice_journal_bytes(mode);
+        test_slice_bounds(mode);
+        test_slice_refusals(mode);
+        test_slice_utf8_boundaries(mode);
+        test_slice_large_loop(mode);
+        test_slice_concurrent_writer(mode);
         test_process_echo_and_status(mode);
         test_process_argv_one_entry(mode);
         test_process_environment(mode);

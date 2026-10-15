@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Content hashes, line journal and external processes through every execution path.
+# Content hashes, line journal, file slices and external processes through every execution path.
 set -euo pipefail
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 TRANSPORT_CC=${CC:-cc}
@@ -13,7 +13,7 @@ export AML_PREFIX="$WORK/prefix"
     "$ROOT/libaml.a" -lm -lpthread -o "$WORK/transport"
 "$WORK/transport"
 # Symbol interposition (both macOS and Linux): fsync failure, partial writes
-# with and without restore, and short reads, beneath an otherwise full run.
+# with and without restore, short reads, and open/fstat/pread failures, beneath an otherwise full run.
 FAULT_LIBS=
 if [ "$(uname -s)" = Linux ]; then FAULT_LIBS=-ldl; fi
 "$TRANSPORT_CC" -O2 -Wall -Wextra -DAML_TRANSPORT_FAULTS -I"$ROOT/core" "$ROOT/tests/test_aml_transport.c" \
@@ -35,7 +35,7 @@ rm "$WORK/vector dir/journal.log"
 (cd "$WORK/elsewhere" && "$WORK/transport program") > "$WORK/compiled"
 diff -u "$WORK/expected" "$WORK/compiled"
 printf 'first\nsecond\n' | cmp - "$WORK/vector dir/journal.log"
-echo 'PASS transport vectors: NIST hashes, source-relative journal, process status/env/argv/timeout through five paths'
+echo 'PASS transport vectors: NIST hashes, source-relative journal, file size and slice cursor, process status/env/argv/timeout through five paths'
 
 bad_count=$("$WORK/transport" --bad-count)
 mkdir "$WORK/bad"
