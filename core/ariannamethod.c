@@ -40,6 +40,9 @@
 #include <unistd.h>
 #include <errno.h>
 #include <float.h>
+#include <poll.h>     // process_run stream capture
+#include <signal.h>   // process_run timeout termination
+#include <sys/wait.h> // process_run exit status
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -3804,6 +3807,11 @@ static int aml_record_function(const char* name) {
     return 0;
 }
 
+static int aml_transport_function(const char* name) {
+    return !strcasecmp(name, "text_hash_sha256") || !strcasecmp(name, "file_hash_sha256") ||
+           !strcasecmp(name, "file_append_line") || !strcasecmp(name, "process_run");
+}
+
 static int aml_scalar_intrinsic_function(const char* name) {
     return strcasecmp(name, "assert") == 0 || strcasecmp(name, "floor") == 0 ||
            strcasecmp(name, "isfinite") == 0 || strcasecmp(name, "utc_day") == 0;
@@ -4187,6 +4195,566 @@ static int aml_record_dispatch(AML_ExecCtx* ctx, const char* name,
     }
     if (!out->record) { set_error(ctx, "record allocation failed"); return 1; }
     out->type = AML_TYPE_RECORD;
+    return 0;
+}
+
+// ═══ Transport organs: content hashes, a line journal, external processes ═══
+
+static int am_string_validate_bytes(const char* utf8, size_t bytes);
+static AM_String* am_string_new_bytes(const char* utf8, size_t bytes);
+
+// SHA-256 written in-tree from FIPS 180-4 §4.1.2, §4.2.2, §5.1.1 and §6.2,
+// a public-domain U.S. federal standard. No external source text is copied.
+typedef struct {
+    uint32_t state[8];
+    uint64_t bytes;
+    unsigned char block[64];
+    size_t used;
+} AML_Sha256;
+
+static uint32_t aml_sha256_rotate(uint32_t x, unsigned n) { return x >> n | x << (32 - n); }
+
+static void aml_sha256_compress(uint32_t state[8], const unsigned char block[64]) {
+    static const uint32_t k[64] = {
+        0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+        0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+        0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+        0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+        0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+        0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+        0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+        0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+    };
+    uint32_t w[64];
+    for (int i = 0; i < 16; i++)
+        w[i] = (uint32_t)block[4*i] << 24 | (uint32_t)block[4*i+1] << 16 |
+               (uint32_t)block[4*i+2] << 8 | (uint32_t)block[4*i+3];
+    for (int i = 16; i < 64; i++) {
+        uint32_t s0 = aml_sha256_rotate(w[i-15], 7) ^ aml_sha256_rotate(w[i-15], 18) ^ (w[i-15] >> 3);
+        uint32_t s1 = aml_sha256_rotate(w[i-2], 17) ^ aml_sha256_rotate(w[i-2], 19) ^ (w[i-2] >> 10);
+        w[i] = w[i-16] + s0 + w[i-7] + s1;
+    }
+    uint32_t a = state[0], b = state[1], c = state[2], d = state[3];
+    uint32_t e = state[4], f = state[5], g = state[6], h = state[7];
+    for (int i = 0; i < 64; i++) {
+        uint32_t t1 = h + (aml_sha256_rotate(e, 6) ^ aml_sha256_rotate(e, 11) ^ aml_sha256_rotate(e, 25)) +
+                      ((e & f) ^ (~e & g)) + k[i] + w[i];
+        uint32_t t2 = (aml_sha256_rotate(a, 2) ^ aml_sha256_rotate(a, 13) ^ aml_sha256_rotate(a, 22)) +
+                      ((a & b) ^ (a & c) ^ (b & c));
+        h = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+    }
+    state[0] += a; state[1] += b; state[2] += c; state[3] += d;
+    state[4] += e; state[5] += f; state[6] += g; state[7] += h;
+}
+
+static void aml_sha256_init(AML_Sha256* sha) {
+    static const uint32_t initial[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+                                        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+    memcpy(sha->state, initial, sizeof(initial));
+    sha->bytes = 0;
+    sha->used = 0;
+}
+
+static void aml_sha256_update(AML_Sha256* sha, const unsigned char* data, size_t n) {
+    sha->bytes += n;
+    if (sha->used) {
+        size_t take = 64 - sha->used < n ? 64 - sha->used : n;
+        memcpy(sha->block + sha->used, data, take);
+        sha->used += take; data += take; n -= take;
+        if (sha->used < 64) return;
+        aml_sha256_compress(sha->state, sha->block);
+        sha->used = 0;
+    }
+    for (; n >= 64; data += 64, n -= 64) aml_sha256_compress(sha->state, data);
+    if (n) memcpy(sha->block, data, n);
+    sha->used = n;
+}
+
+static void aml_sha256_hex(AML_Sha256* sha, char hex[65]) {
+    uint64_t bits = sha->bytes * 8;
+    unsigned char pad[72] = {0x80};
+    size_t padding = (sha->used < 56 ? 56 : 120) - sha->used;
+    for (int i = 0; i < 8; i++) pad[padding + i] = (unsigned char)(bits >> (56 - 8 * i));
+    aml_sha256_update(sha, pad, padding + 8);
+    static const char digits[] = "0123456789abcdef";
+    for (int i = 0; i < 32; i++) {
+        unsigned byte = (sha->state[i / 4] >> (24 - 8 * (i % 4))) & 0xff;
+        hex[2 * i] = digits[byte >> 4];
+        hex[2 * i + 1] = digits[byte & 15];
+    }
+    hex[64] = 0;
+}
+
+static void aml_transport_io_error(char* error, size_t cap, const char* operation, int number) {
+    snprintf(error, cap, "%s: %s", operation, strerror(number));
+}
+
+static int aml_file_sha256(const char* path, char hex[65], char* error, size_t cap) {
+    // O_NONBLOCK keeps an unexpected FIFO from blocking before fstat refuses it.
+    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) { aml_transport_io_error(error, cap, "file_hash_sha256 open failed", errno); return -1; }
+    struct stat st;
+    if (fstat(fd, &st)) {
+        int number = errno;
+        close(fd);
+        aml_transport_io_error(error, cap, "file_hash_sha256 stat failed", number); return -1;
+    }
+    if (!S_ISREG(st.st_mode)) {
+        close(fd);
+        snprintf(error, cap, "file_hash_sha256 requires a regular file"); return -1;
+    }
+    unsigned char* buffer = malloc(65536);
+    if (!buffer) { close(fd); snprintf(error, cap, "file_hash_sha256 buffer allocation failed"); return -1; }
+    AML_Sha256 sha;
+    aml_sha256_init(&sha);
+    int number = 0;
+    for (;;) {
+        ssize_t count = read(fd, buffer, 65536);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) { number = errno; break; }
+        if (count == 0) break;
+        aml_sha256_update(&sha, buffer, (size_t)count);
+    }
+    free(buffer);
+    if (close(fd) && !number) number = errno;
+    if (number) { aml_transport_io_error(error, cap, "file_hash_sha256 read/close failed", number); return -1; }
+    aml_sha256_hex(&sha, hex);
+    return 1;
+}
+
+// One journal line per call. A partial write is continued while it makes
+// progress; any failure truncates back to the length seen before writing, so a
+// single-writer journal never keeps a torn line. 1 = written and synced,
+// 2 = written but fsync/close failed (durability unconfirmed), -1 = error.
+static int aml_append_line(const char* path, const AM_String* text, char* error, size_t cap) {
+    size_t total = (size_t)text->byte_len + 1;
+    char* line = malloc(total);
+    if (!line) { snprintf(error, cap, "file_append_line allocation failed"); return -1; }
+    memcpy(line, text->data, total - 1);
+    line[total - 1] = '\n';
+    // O_NONBLOCK refuses a reader-less FIFO instead of waiting inside open.
+    int fd = open(path, O_WRONLY | O_APPEND | O_CREAT | O_NONBLOCK | O_CLOEXEC, 0644);
+    if (fd < 0) {
+        free(line);
+        aml_transport_io_error(error, cap, "file_append_line open failed", errno); return -1;
+    }
+    struct stat st;
+    if (fstat(fd, &st)) {
+        int number = errno;
+        free(line); close(fd);
+        aml_transport_io_error(error, cap, "file_append_line stat failed", number); return -1;
+    }
+    if (!S_ISREG(st.st_mode)) {
+        free(line); close(fd);
+        snprintf(error, cap, "file_append_line requires a regular file"); return -1;
+    }
+    size_t done = 0;
+    int number = 0;
+    while (done < total) {
+        ssize_t count = write(fd, line + done, total - done);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) { number = count < 0 ? errno : EIO; break; }
+        done += (size_t)count;
+    }
+    free(line);
+    if (number) {
+        if (done && ftruncate(fd, st.st_size)) {
+            int restore = errno;
+            close(fd);
+            snprintf(error, cap, "file_append_line wrote %zu of %zu bytes (%s) and could not restore "
+                     "the previous length: %s", done, total, strerror(number), strerror(restore));
+            return -1;
+        }
+        close(fd);
+        aml_transport_io_error(error, cap, "file_append_line write failed", number); return -1;
+    }
+    int sync_error = fsync(fd) ? errno : 0;
+    if (close(fd) && !sync_error) sync_error = errno;
+    if (sync_error) {
+        aml_transport_io_error(error, cap, "file_append_line written; sync/close failed", sync_error);
+        return 2;
+    }
+    return 1;
+}
+
+#define AML_PROCESS_TIMEOUT_STATUS (-256)
+#define AML_PROCESS_GRACE_SECONDS 1.0
+
+extern char** environ;
+
+#ifndef AM_ASYNC_DISABLED
+// Descriptor creation and fork share one lock, so a concurrent process_run
+// child never inherits another call's pipe before close-on-exec is set.
+static pthread_mutex_t g_process_lock = PTHREAD_MUTEX_INITIALIZER;
+#endif
+
+typedef struct { char* data; size_t len, cap; int fd; } AML_Capture;
+
+// A close-on-exec descriptor above the standard streams, so the child's dup2
+// onto 0/1/2 cannot overwrite a descriptor it still needs.
+static int aml_process_fd(int fd) {
+    if (fd < 0) return -1;
+    int moved = fd > 2 ? (fcntl(fd, F_SETFD, FD_CLOEXEC) ? -1 : fd) : fcntl(fd, F_DUPFD_CLOEXEC, 3);
+    if (moved != fd) { int number = errno; close(fd); errno = number; }
+    return moved;
+}
+
+static int aml_process_pipe(int fds[2]) {
+    int raw[2];
+    fds[0] = fds[1] = -1;
+    if (pipe(raw)) return -1;
+    fds[0] = aml_process_fd(raw[0]);
+    fds[1] = aml_process_fd(raw[1]);
+    if (fds[0] >= 0 && fds[1] >= 0) return 0;
+    int number = errno;
+    if (fds[0] >= 0) close(fds[0]);
+    if (fds[1] >= 0) close(fds[1]);
+    fds[0] = fds[1] = -1;
+    errno = number;
+    return -1;
+}
+
+// Inherited environment with the record's names replaced or appended. Record
+// strings are carved from one owned block; inherited entries are borrowed.
+static char** aml_process_environment(const AM_Record* env, char** block) {
+    size_t inherited = 0, bytes = 0;
+    while (environ && environ[inherited]) inherited++;
+    int added = env ? env->len : 0;
+    for (int i = 0; i < added; i++)
+        bytes += (size_t)env->entries[i].key->byte_len + (size_t)env->entries[i].value.string->byte_len + 2;
+    char** envp = calloc(inherited + (size_t)added + 1, sizeof(char*));
+    *block = malloc(bytes ? bytes : 1);
+    if (!envp || !*block) { free(envp); free(*block); *block = NULL; return NULL; }
+    size_t n = 0;
+    for (size_t i = 0; i < inherited; i++) {
+        const char* entry = environ[i];
+        const char* equals = strchr(entry, '=');
+        size_t name = equals ? (size_t)(equals - entry) : strlen(entry);
+        int replaced = 0;
+        for (int j = 0; j < added && !replaced; j++) {
+            const AM_String* key = env->entries[j].key;
+            replaced = (size_t)key->byte_len == name && !memcmp(key->data, entry, name);
+        }
+        if (!replaced) envp[n++] = (char*)entry;
+    }
+    char* at = *block;
+    for (int i = 0; i < added; i++) {
+        const AM_String* key = env->entries[i].key;
+        const AM_String* value = env->entries[i].value.string;
+        envp[n++] = at;
+        memcpy(at, key->data, (size_t)key->byte_len); at += key->byte_len;
+        *at++ = '=';
+        memcpy(at, value->data, (size_t)value->byte_len + 1); at += value->byte_len + 1;
+    }
+    return envp;
+}
+
+// execvp's search, prepared before fork so the child calls only execve: a name
+// with '/' is used as given, otherwise each PATH entry of the child's
+// environment (an empty entry is "."). Without PATH, "/usr/bin:/bin".
+// One allocation holds the pointer array and the candidate strings.
+static char** aml_process_candidates(const char* file, char* const* envp) {
+    const char* path = "/usr/bin:/bin";
+    for (int i = 0; envp[i]; i++)
+        if (!strncmp(envp[i], "PATH=", 5)) { path = envp[i] + 5; break; }
+    size_t file_bytes = strlen(file), count = 1, bytes = 0;
+    if (strchr(file, '/')) bytes = file_bytes + 1;
+    else {
+        for (const char* p = path; *p; p++) count += *p == ':';
+        bytes = strlen(path) + count * (file_bytes + 3);
+    }
+    char** candidates = malloc((count + 1) * sizeof(char*) + bytes);
+    if (!candidates) return NULL;
+    char* at = (char*)(candidates + count + 1);
+    if (strchr(file, '/')) {
+        candidates[0] = at;
+        memcpy(at, file, file_bytes + 1);
+    } else {
+        const char* segment = path;
+        for (size_t i = 0; i < count; i++) {
+            const char* end = strchr(segment, ':');
+            size_t length = end ? (size_t)(end - segment) : strlen(segment);
+            candidates[i] = at;
+            if (length) { memcpy(at, segment, length); at += length; }
+            else *at++ = '.';
+            *at++ = '/';
+            memcpy(at, file, file_bytes + 1); at += file_bytes + 1;
+            segment = end ? end + 1 : segment + length;
+        }
+    }
+    candidates[count] = NULL;
+    return candidates;
+}
+
+// Runs between fork and exec: async-signal-safe calls only.
+static void aml_process_child(int input, int output, int errors, int report,
+                              char* const* candidates, char* const* argv, char* const* envp) {
+    int number = 0;
+    if (dup2(input, 0) < 0 || dup2(output, 1) < 0 || dup2(errors, 2) < 0) number = errno;
+    else {
+        int denied = 0;
+        for (int i = 0; candidates[i]; i++) {
+            execve(candidates[i], argv, envp);
+            number = errno;
+            if (number == EACCES) denied = 1;
+            else if (number != ENOENT && number != ENOTDIR) break;
+        }
+        if (denied && (number == ENOENT || number == ENOTDIR)) number = EACCES;
+    }
+    while (write(report, &number, sizeof(number)) < 0 && errno == EINTR) {}
+    _exit(127);
+}
+
+static double aml_monotonic_seconds(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (double)now.tv_sec + (double)now.tv_nsec / 1e9;
+}
+
+// 0 = bytes read, 1 = end of stream, -1 = read error (errno), -2 = text limit,
+// -3 = allocation. Capacity stops at the limit plus one byte, never beyond.
+static int aml_capture_read(AML_Capture* capture) {
+    if (capture->len == capture->cap) {
+        size_t next = capture->cap ? capture->cap * 2 : 65536;
+        if (next > (size_t)AM_MAX_STRING_BYTES + 1) next = (size_t)AM_MAX_STRING_BYTES + 1;
+        char* grown = realloc(capture->data, next);
+        if (!grown) return -3;
+        capture->data = grown;
+        capture->cap = next;
+    }
+    ssize_t count = read(capture->fd, capture->data + capture->len, capture->cap - capture->len);
+    if (count < 0) return errno == EINTR || errno == EAGAIN ? 0 : -1;
+    if (count == 0) return 1;
+    capture->len += (size_t)count;
+    return capture->len > AM_MAX_STRING_BYTES ? -2 : 0;
+}
+
+static int aml_process_wait(pid_t pid, int* status) {
+    for (;;) {
+        pid_t done = waitpid(pid, status, 0);
+        if (done == pid) return 0;
+        if (done < 0 && errno != EINTR) return -1;
+    }
+}
+
+static int aml_process_run(AML_ExecCtx* ctx, AML_Var* args, int nargs, AML_Var* out) {
+    if (nargs < 1 || nargs > 3) {
+        set_error(ctx, "process_run requires argv, an optional environment record and timeout"); return 1;
+    }
+    if (args[0].type != AML_TYPE_LIST || !args[0].list || !args[0].list->len) {
+        set_error(ctx, "process_run requires a nonempty argv string list"); return 1;
+    }
+    const AM_List* list = args[0].list;
+    if (!list->items[0]->byte_len) { set_error(ctx, "process_run program name must be nonempty"); return 1; }
+    const AM_Record* env = NULL;
+    if (nargs >= 2) {
+        if (args[1].type != AML_TYPE_RECORD || !args[1].record) {
+            set_error(ctx, "process_run environment must be a record"); return 1;
+        }
+        env = args[1].record;
+        for (int i = 0; i < env->len; i++) {
+            const AM_String* key = env->entries[i].key;
+            if (env->entries[i].value.type != AML_TYPE_STRING || !env->entries[i].value.string) {
+                set_error(ctx, "process_run environment values must be text"); return 1;
+            }
+            if (!key->byte_len || memchr(key->data, '=', (size_t)key->byte_len)) {
+                set_error(ctx, "process_run environment names must be nonempty and contain no '='"); return 1;
+            }
+        }
+    }
+    double timeout = 0;
+    if (nargs == 3) {
+        if (args[2].type != AML_TYPE_FLOAT || !isfinite(args[2].value) || args[2].value <= 0) {
+            set_error(ctx, "process_run timeout must be a positive finite number of seconds"); return 1;
+        }
+        timeout = args[2].value;
+    }
+    char** argv = calloc((size_t)list->len + 1, sizeof(char*));
+    char* env_block = NULL;
+    char** envp = argv ? aml_process_environment(env, &env_block) : NULL;
+    char** candidates = envp ? aml_process_candidates(list->items[0]->data, envp) : NULL;
+    if (!candidates) {
+        free(argv); free(envp); free(env_block);
+        set_error(ctx, "process_run allocation failed"); return 1;
+    }
+    for (int i = 0; i < list->len; i++) argv[i] = list->items[i]->data;
+
+    int input = -1, output[2] = {-1, -1}, errors[2] = {-1, -1}, report[2] = {-1, -1};
+    int number = 0;
+    pid_t pid = -1;
+#ifndef AM_ASYNC_DISABLED
+    pthread_mutex_lock(&g_process_lock);
+#endif
+    // The child reads /dev/null: it cannot consume the program's own input.
+    input = aml_process_fd(open("/dev/null", O_RDONLY | O_CLOEXEC));
+    if (input < 0 || aml_process_pipe(output) || aml_process_pipe(errors) || aml_process_pipe(report))
+        number = errno;
+    else if ((pid = fork()) == 0)
+        aml_process_child(input, output[1], errors[1], report[1], candidates, argv, envp);
+    else if (pid < 0) number = errno;
+#ifndef AM_ASYNC_DISABLED
+    pthread_mutex_unlock(&g_process_lock);
+#endif
+    int ends[] = {input, output[1], errors[1], report[1]};
+    for (int i = 0; i < 4; i++) if (ends[i] >= 0) close(ends[i]);
+    if (number) {
+        int reads[] = {output[0], errors[0], report[0]};
+        for (int i = 0; i < 3; i++) if (reads[i] >= 0) close(reads[i]);
+        free(argv); free(envp); free(env_block); free(candidates);
+        char message[256];
+        aml_transport_io_error(message, sizeof(message), "process_run could not start", number);
+        set_error(ctx, message); return 1;
+    }
+    double deadline = aml_monotonic_seconds() + timeout;
+    int exec_error = 0, status = 0;
+    ssize_t got;
+    do { got = read(report[0], &exec_error, sizeof(exec_error)); } while (got < 0 && errno == EINTR);
+    close(report[0]);
+    if (got != 0) {
+        close(output[0]); close(errors[0]);
+        // A malformed report cannot prove the exec failed: stop the child.
+        if (got != (ssize_t)sizeof(exec_error)) { kill(pid, SIGKILL); exec_error = EIO; }
+        aml_process_wait(pid, &status);
+        char message[256];
+        snprintf(message, sizeof(message), "process_run could not execute '%.120s': %s",
+                 argv[0], strerror(exec_error));
+        free(argv); free(envp); free(env_block); free(candidates);
+        set_error(ctx, message); return 1;
+    }
+    free(envp); free(env_block); free(candidates);
+
+    // Timeout covers the child's exit and the close of both streams. At the
+    // deadline the child gets SIGTERM, then SIGKILL after the grace period;
+    // reading then stops and the status is AML_PROCESS_TIMEOUT_STATUS.
+    AML_Capture streams[2] = {{NULL, 0, 0, output[0]}, {NULL, 0, 0, errors[0]}};
+    const char* failure = NULL;
+    int reaped = 0, timed_out = 0, terminating = 0;
+    double kill_at = 0;
+    while (!reaped && !failure) {
+        struct pollfd fds[2];
+        AML_Capture* owners[2];
+        int count = 0;
+        for (int i = 0; i < 2; i++) {
+            if (streams[i].fd < 0) continue;
+            fds[count].fd = streams[i].fd; fds[count].events = POLLIN; fds[count].revents = 0;
+            owners[count++] = &streams[i];
+        }
+        if (!count) {
+            if (timeout <= 0) {
+                if (aml_process_wait(pid, &status)) failure = "process_run could not collect the child status";
+                reaped = 1;
+                break;
+            }
+            pid_t done = waitpid(pid, &status, WNOHANG);
+            if (done == pid) { reaped = 1; break; }
+            if (done < 0 && errno != EINTR) {
+                reaped = 1; failure = "process_run could not collect the child status"; break;
+            }
+        }
+        int wait_ms = -1;
+        if (timeout > 0) {
+            double now = aml_monotonic_seconds();
+            if (!terminating && now >= deadline) {
+                kill(pid, SIGTERM);
+                terminating = timed_out = 1;
+                kill_at = now + AML_PROCESS_GRACE_SECONDS;
+            }
+            if (terminating && now >= kill_at) break;
+            double ms = ((terminating ? kill_at : deadline) - now) * 1000.0 + 1.0;
+            wait_ms = ms > 1e9 ? 1000000000 : (int)ms;
+            if (!count && wait_ms > 10) wait_ms = 10;
+        }
+        int ready = poll(count ? fds : NULL, (nfds_t)count, wait_ms);
+        if (ready < 0) {
+            if (errno != EINTR) failure = "process_run could not poll the child streams";
+            continue;
+        }
+        for (int i = 0; i < count && !failure; i++) {
+            if (!fds[i].revents) continue;
+            int result = aml_capture_read(owners[i]);
+            if (result == 1) { close(owners[i]->fd); owners[i]->fd = -1; }
+            else if (result == -1) failure = owners[i] == &streams[0]
+                ? "process_run could not read stdout" : "process_run could not read stderr";
+            else if (result == -2) failure = owners[i] == &streams[0]
+                ? "process_run stdout exceeds 1 MiB" : "process_run stderr exceeds 1 MiB";
+            else if (result == -3) failure = "process_run capture allocation failed";
+        }
+    }
+    if (!reaped) {
+        kill(pid, SIGKILL);
+        if (aml_process_wait(pid, &status) && !failure) failure = "process_run could not collect the child status";
+    }
+    for (int i = 0; i < 2; i++) if (streams[i].fd >= 0) close(streams[i].fd);
+    free(argv);
+
+    AM_String* text[2] = {NULL, NULL};
+    for (int i = 0; i < 2 && !failure; i++) {
+        const char* bytes = streams[i].data ? streams[i].data : "";
+        if (am_string_validate_bytes(bytes, streams[i].len) < 0)
+            failure = i ? "process_run stderr is not UTF-8 text without NUL"
+                        : "process_run stdout is not UTF-8 text without NUL";
+        else if (!(text[i] = am_string_new_bytes(bytes, streams[i].len)))
+            failure = "process_run capture allocation failed";
+    }
+    free(streams[0].data); free(streams[1].data);
+    float code = 0;
+    if (timed_out) code = (float)AML_PROCESS_TIMEOUT_STATUS;
+    else if (WIFEXITED(status)) code = (float)WEXITSTATUS(status);
+    else if (WIFSIGNALED(status)) code = -(float)WTERMSIG(status);
+    else if (!failure) failure = "process_run child status is neither an exit nor a signal";
+    AM_Record* record = failure ? NULL : am_record_new();
+    if (!failure && !record) failure = "process_run result allocation failed";
+    static const char* const keys[] = {"status", "stdout", "stderr"};
+    for (int i = 0; i < 3 && !failure; i++) {
+        AML_Var leaf = {0};
+        if (i) { leaf.type = AML_TYPE_STRING; leaf.string = text[i - 1]; }
+        else leaf.value = code;
+        AM_String* key = am_string_new(keys[i]);
+        if (!key || am_record_set(record, key, &leaf)) failure = "process_run result allocation failed";
+        am_string_free(key);
+    }
+    am_string_free(text[0]); am_string_free(text[1]);
+    if (failure) { am_record_free(record); set_error(ctx, failure); return 1; }
+    out->record = record;
+    out->type = AML_TYPE_RECORD;
+    return 0;
+}
+
+static int aml_transport_dispatch(AML_ExecCtx* ctx, const char* name,
+                                  AML_Var* args, int nargs, AML_Var* out) {
+    if (!strcasecmp(name, "process_run")) return aml_process_run(ctx, args, nargs, out);
+    int appending = !strcasecmp(name, "file_append_line");
+    if (nargs != (appending ? 2 : 1)) { set_error(ctx, "wrong number of hash/journal arguments"); return 1; }
+    char hex[65];
+    if (!strcasecmp(name, "text_hash_sha256")) {
+        if (args[0].type != AML_TYPE_STRING || !args[0].string) {
+            set_error(ctx, "text_hash_sha256 requires text"); return 1;
+        }
+        AML_Sha256 sha;
+        aml_sha256_init(&sha);
+        aml_sha256_update(&sha, (const unsigned char*)args[0].string->data, (size_t)args[0].string->byte_len);
+        aml_sha256_hex(&sha, hex);
+    } else {
+        if (appending) {
+            if (args[1].type != AML_TYPE_STRING || !args[1].string) {
+                set_error(ctx, "file_append_line requires a path and text"); return 1;
+            }
+            if (memchr(args[1].string->data, '\n', (size_t)args[1].string->byte_len)) {
+                set_error(ctx, "file_append_line text must not contain a newline"); return 1;
+            }
+        }
+        char* path = aml_resolve_value_path(ctx, &args[0]);
+        if (!path) return 1;
+        char error[256] = {0};
+        int status = appending ? aml_append_line(path, args[1].string, error, sizeof(error))
+                               : aml_file_sha256(path, hex, error, sizeof(error));
+        free(path);
+        if (status < 0) { set_error(ctx, error); return 1; }
+        if (appending) { out->value = (float)status; return 0; }
+    }
+    out->string = am_string_new(hex);
+    if (!out->string) { set_error(ctx, "hash text allocation failed"); return 1; }
+    out->type = AML_TYPE_STRING;
     return 0;
 }
 
@@ -4869,6 +5437,7 @@ static int aml_invoke_value(AML_ExecCtx* ctx, const char* name,
     else if (aml_list_function(name)) rc = aml_list_dispatch(ctx, name, args, nargs, out);
     else if (aml_map_function(name)) rc = aml_map_dispatch(ctx, name, args, nargs, out);
     else if (aml_record_function(name)) rc = aml_record_dispatch(ctx, name, args, nargs, out);
+    else if (aml_transport_function(name)) rc = aml_transport_dispatch(ctx, name, args, nargs, out);
     else if (aml_scalar_intrinsic_function(name)) rc = aml_scalar_intrinsic_dispatch(ctx, name, args, nargs, out);
     else if (aml_sampling_function(name)) rc = aml_sampling_dispatch(ctx, name, args, nargs, out);
     else if (aml_numerical_function(name)) rc = aml_numerical_dispatch(ctx, name, args, nargs, out);
@@ -4978,7 +5547,7 @@ static float expr_primary(AML_Expr* e) {
         if (*e->p == '(') {
             if (e->ctx && (aml_text_function(name) || aml_list_function(name) ||
                            aml_map_function(name) || aml_scalar_intrinsic_function(name) ||
-                           aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) || aml_model_function(name) || aml_record_function(name) ||
+                           aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) || aml_model_function(name) || aml_record_function(name) || aml_transport_function(name) ||
                            aml_array_scalar_function(name) ||
                            aml_value_function(e->ctx, name))) {
                 AML_Var result = {0};
@@ -5236,7 +5805,7 @@ static int aml_eval_value(AML_ExecCtx* ctx, const char* text, AML_Var* out) {
         }
         if (*p == '(' && (aml_text_function(name) || aml_list_function(name) ||
                           aml_map_function(name) || aml_scalar_intrinsic_function(name) ||
-                          aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) || aml_model_function(name) || aml_record_function(name) ||
+                          aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) || aml_model_function(name) || aml_record_function(name) || aml_transport_function(name) ||
                           aml_array_scalar_function(name) ||
                           aml_value_function(ctx, name))) {
             const char* close = aml_value_close(p);
@@ -6936,7 +7505,8 @@ static int aml_reserved_function(const char* name) {
         "model_tokenizer_identity", "model_info", "model_encode", "model_forward",
         "model_mix_forward", "model_piece",
         "record_new", "record_set", "record_get", "record_has", "record_keys", "record_kind",
-        "record_clone", "record_equal", "record_replace", "record_swap", "checkpoint_save", "checkpoint_load", "file_exists"
+        "record_clone", "record_equal", "record_replace", "record_swap", "checkpoint_save", "checkpoint_load", "file_exists",
+        "text_hash_sha256", "file_hash_sha256", "file_append_line", "process_run"
     };
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (strcasecmp(name, names[i]) == 0) return 1;
@@ -8689,7 +9259,7 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
         if (n && n < AML_MAX_NAME && *p == '(' &&
             (aml_value_function(ctx, name) || aml_text_function(name) || aml_list_function(name) ||
              aml_map_function(name) || aml_scalar_intrinsic_function(name) ||
-             aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) || aml_model_function(name) || aml_record_function(name) ||
+             aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) || aml_model_function(name) || aml_record_function(name) || aml_transport_function(name) ||
              aml_array_scalar_function(name))) {
             AML_Var value = {0};
             aml_eval_value(ctx, text, &value);

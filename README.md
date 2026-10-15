@@ -663,6 +663,15 @@ Precommit failure preserves the previous file. `file_exists` distinguishes an
 absent regular-file path from an I/O error. See [records](docs/RECORDS.md) for
 ownership, wire format, limits and all failure guarantees.
 
+### Hashes, journals and processes
+
+`text_hash_sha256(text)` and `file_hash_sha256(path)` return lowercase SHA-256
+hex. `file_append_line(path, text)` appends one LF-terminated line, refuses
+text containing LF before opening the file and returns 1 after fsync (2 when
+written but unsynchronized). `process_run(argv, env, timeout)` runs a string
+list without a shell and returns `{status, stdout, stderr}`; a timeout reports
+status -256. See [transport](docs/TRANSPORT.md).
+
 ### Owned sampling
 
 ```aml

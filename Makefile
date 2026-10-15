@@ -123,6 +123,10 @@ test-utc-day: all
 test-workers: all
 	bash tests/test_aml_workers.sh
 
+.PHONY: test-transport
+test-transport: all
+	bash tests/test_aml_transport.sh
+
 test-imports: all
 	bash tests/test_aml_imports.sh
 
