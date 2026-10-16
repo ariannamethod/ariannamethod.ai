@@ -38,7 +38,8 @@ static void count_free(void* p) { if (p) g_live--; free(p); }
 #undef malloc
 
 static int fail(const char* why) { fprintf(stderr, "    %s\n", why); return 1; }
-static int next_fd(void) { int fd = open("/dev/null", O_RDONLY); close(fd); return fd; }
+// Counts open descriptors; a lowest-free probe misses a leak above a descriptor freed meanwhile.
+static int open_fds(void) { int n = 0; for (int fd = 0; fd < 1024; fd++) n += fcntl(fd, F_GETFD) != -1; return n; }
 
 static int g_q1 = -1, g_q2 = -1;
 static void quiet(int on) {
@@ -121,12 +122,12 @@ static int load_captured(TrainConfig* cfg, const char* path) {
 
 static int ckpt_refused(TrainConfig* cfg, const char* path, const char* want) {
     long live = g_live;
-    int fd = next_fd();
+    int fds = open_fds();
     int rc = load_captured(cfg, path);
     if (rc != -1) return fail("load_checkpoint accepted the file");
     if (!strstr(g_out, want)) { fprintf(stderr, "    want \"%s\" in:\n%s", want, g_out); return 1; }
     if (g_live != live) return fail("allocation left behind");
-    if (next_fd() != fd) return fail("descriptor left behind");
+    if (open_fds() != fds) return fail("descriptor left behind");
     return 0;
 }
 
@@ -146,12 +147,12 @@ static int ckpt_roundtrip(void) {
     }
     TrainConfig c = tiny_cfg();
     long live = g_live;
-    int fd = next_fd();
+    int fds = open_fds();
     int rc = load_captured(&c, "janus_ckpt_step7.bin");
     if (rc != 7) { fprintf(stderr, "    rc %d:\n%s", rc, g_out); return 1; }
     if (c.vocab_size != TOK_BASE) return fail("vocab not taken from the header");
     if (g_live != live) return fail("allocation left behind");
-    if (next_fd() != fd) return fail("descriptor left behind");
+    if (open_fds() != fds) return fail("descriptor left behind");
     for (int i = 0; i < 10; i++) {
         int len = 0;
         const float* d = am_get_var_array(names[i], &len);
@@ -237,11 +238,11 @@ static int ckpt_every_prefix(void) {
     write_file("bad.bin", g_ck, g_ck_len);
     quiet(1);
     long live = g_live;
-    int fd = next_fd();
+    int fds = open_fds();
     for (size_t n = g_ck_len; n-- > 0; ) {
         if (truncate("bad.bin", (off_t)n) != 0) { quiet(0); return fail("truncate"); }
         int rc = load_checkpoint(&c, "bad.bin");
-        if (rc != -1 || g_live != live || next_fd() != fd) {
+        if (rc != -1 || g_live != live || open_fds() != fds) {
             quiet(0);
             fprintf(stderr, "    prefix %zu: rc %d live %+ld\n", n, rc, g_live - live);
             return 1;
@@ -289,12 +290,12 @@ static int tok_refused(const char* path) {
     memset(t, 0x5A, sizeof(*t));
     memcpy(before, t, sizeof(*t));
     long live = g_live;
-    int fd = next_fd();
+    int fds = open_fds();
     int rc = tok_load(t, path);
     int bad = rc != -1 ? fail("tok_load accepted the file")
             : memcmp(t, before, sizeof(*t)) ? fail("tokenizer changed by a refused file")
             : g_live != live ? fail("allocation left behind")
-            : next_fd() != fd ? fail("descriptor left behind") : 0;
+            : open_fds() != fds ? fail("descriptor left behind") : 0;
     free(t);
     free(before);
     return bad;
@@ -314,10 +315,10 @@ static int tok_roundtrip(void) {
     EvolvingTokenizer* t = malloc(sizeof(*t));
     memset(t, 0x5A, sizeof(*t));
     long live = g_live;
-    int fd = next_fd();
+    int fds = open_fds();
     if (tok_load(t, "a.tok") != 0) return fail("valid tokenizer refused");
     if (g_live != live) return fail("allocation left behind");
-    if (next_fd() != fd) return fail("descriptor left behind");
+    if (open_fds() != fds) return fail("descriptor left behind");
     if (t->vocab_size != g_tok->vocab_size || t->n_merges != g_tok->n_merges ||
         t->bpe_enabled != g_tok->bpe_enabled || t->trained_chars != g_tok->trained_chars ||
         t->merges_per_round != g_tok->merges_per_round)
