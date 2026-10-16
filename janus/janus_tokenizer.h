@@ -252,30 +252,42 @@ static int tok_save(EvolvingTokenizer* t, const char* path) {
     return 0;
 }
 
+// Decodes into a scratch tokenizer; t is written only after every field passed.
 static int tok_load(EvolvingTokenizer* t, const char* path) {
     FILE* f = fopen(path, "rb");
     if (!f) return -1;
-    int hdr[8];
-    if (fread(hdr, sizeof(int), 8, f) != 8 || hdr[0] != TOK_MAGIC) { fclose(f); return -1; }
-    tok_init(t, 0, hdr[6], 0);
-    t->bpe_enabled = hdr[3];
-    t->trained_chars = ((long)hdr[4] << 32) | (unsigned)hdr[5];
-    int sv = hdr[1], sm = hdr[2];
+    EvolvingTokenizer* n = (EvolvingTokenizer*)malloc(sizeof(*n));
+    int hdr[8], sv, sm, rc = -1;
+    if (!n || fread(hdr, sizeof(int), 8, f) != 8 || hdr[0] != TOK_MAGIC) goto done;
+    sv = hdr[1]; sm = hdr[2];
+    if (sv < TOK_BASE || sv > TOK_MAX_VOCAB) goto done;
+    // tok_train_bpe appends merges[n_merges] in step with vocab_size
+    if (sm < 0 || sm > sv - TOK_BASE) goto done;
+    tok_init(n, 0, hdr[6], 0);
+    n->bpe_enabled = hdr[3];
+    n->trained_chars = (long)(((unsigned long long)(unsigned)hdr[4] << 32) | (unsigned)hdr[5]);
     for (int i = TOK_BASE; i < sv; i++) {
         int bl;
-        if (fread(&bl, sizeof(int), 1, f) != 1) { fclose(f); return -1; }
-        t->tokens[i].byte_len = bl;
-        if (fread(t->tokens[i].bytes, 1, bl, f) != (size_t)bl) { fclose(f); return -1; }
+        if (fread(&bl, sizeof(int), 1, f) != 1) goto done;
+        if (bl < 1 || bl > (int)sizeof(n->tokens[i].bytes)) goto done;
+        n->tokens[i].byte_len = bl;
+        if (fread(n->tokens[i].bytes, 1, bl, f) != (size_t)bl) goto done;
     }
-    t->vocab_size = sv;
+    n->vocab_size = sv;
     for (int i = 0; i < sm; i++) {
         int m[3];
-        if (fread(m, sizeof(int), 3, f) != 3) { fclose(f); return -1; }
-        t->merges[i] = (Merge){m[0], m[1], m[2]};
+        if (fread(m, sizeof(int), 3, f) != 3) goto done;
+        if (m[2] < TOK_BASE || m[2] >= sv) goto done;
+        if (m[0] < 0 || m[0] >= m[2] || m[1] < 0 || m[1] >= m[2]) goto done;
+        n->merges[i] = (Merge){m[0], m[1], m[2]};
     }
-    t->n_merges = sm;
+    n->n_merges = sm;
+    *t = *n;
+    rc = 0;
+done:
     fclose(f);
-    return 0;
+    free(n);
+    return rc;
 }
 
 // ── Expand AML embeddings when vocab grows ───────────────────────

@@ -341,6 +341,15 @@ static int parse_aml(const char *path, Parsed *out) {
             strncpy(l, q, MAX_ARG_LEN - 1);
             l[MAX_ARG_LEN - 1] = 0;
             rtrim(l);
+            /* The value reaches system() unquoted: only bytes without shell meaning pass. */
+            size_t ok = strspn(l, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                                  "0123456789 _+.,=/:@%-");
+            if (l[ok]) {
+                fprintf(stderr, "amlc: line %d: invalid input: BLOOD LINK byte 0x%02x "
+                        "outside [A-Za-z0-9 _+.,=/:@%%-]\n", line_no, (unsigned char)l[ok]);
+                fclose(f);
+                return 1;
+            }
             continue;
         }
 
@@ -674,6 +683,15 @@ int main(int argc, char **argv) {
                     sizeof(default_out) - strlen(default_out) - 1);
         }
         outfile = default_out;
+    }
+
+    /* The cc command carries these inside '...' (as -I source dir, .c, -o, prefix libs). */
+    const char *quoted[] = {infile, outfile, prefix_dir()};
+    for (int qi = 0; qi < 3; qi++) {
+        if (strchr(quoted[qi], '\'')) {
+            fprintf(stderr, "amlc: invalid input: path contains a single quote: %s\n", quoted[qi]);
+            return 1;
+        }
     }
 
     char cpath[1100];
