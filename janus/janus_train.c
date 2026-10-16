@@ -458,6 +458,34 @@ static void save_checkpoint(TrainConfig* cfg, int step, EvolvingTokenizer* tok) 
     }
 }
 
+// One record: int len, then len floats, installed as name[rows x cols].
+static int load_tensor(FILE* f, const char* name, int rows, int cols) {
+    int len;
+    if (fread(&len, sizeof(int), 1, f) != 1) {
+        fprintf(stderr, "ERROR: checkpoint ends before tensor %s\n", name); return -1;
+    }
+    if ((unsigned long long)len != (unsigned long long)rows * (unsigned long long)cols) {
+        fprintf(stderr, "ERROR: checkpoint tensor %s has %d floats, expected %d x %d\n",
+                name, len, rows, cols);
+        return -1;
+    }
+    float* buf = (float*)calloc((size_t)len, sizeof(float));
+    if (!buf) {
+        fprintf(stderr, "ERROR: checkpoint tensor %s: cannot allocate %d floats\n", name, len);
+        return -1;
+    }
+    int rc = -1;
+    if (fread(buf, sizeof(float), (size_t)len, f) != (size_t)len)
+        fprintf(stderr, "ERROR: checkpoint tensor %s is truncated\n", name);
+    else if (am_set_var_matrix(name, buf, rows, cols) != 0)
+        fprintf(stderr, "ERROR: checkpoint tensor %s (%d x %d) refused by the runtime\n",
+                name, rows, cols);
+    else
+        rc = 0;
+    free(buf);
+    return rc;
+}
+
 static int load_checkpoint(TrainConfig* cfg, const char* path) {
     FILE* f = fopen(path, "rb");
     if (!f) { fprintf(stderr, "ERROR: cannot open %s\n", path); return -1; }
@@ -466,8 +494,21 @@ static int load_checkpoint(TrainConfig* cfg, const char* path) {
         fprintf(stderr, "ERROR: bad checkpoint\n"); fclose(f); return -1;
     }
     int ckpt_step = header[6];
-    cfg->vocab_size = header[1];
     int ckpt_hidden = header[7];  // 0 for old checkpoints (square FFN)
+    if (header[1] <= 0 || header[1] > TOK_MAX_VOCAB) {
+        fprintf(stderr, "ERROR: checkpoint vocab %d outside 1..%d\n", header[1], TOK_MAX_VOCAB);
+        fclose(f); return -1;
+    }
+    if (header[2] != cfg->n_embd || header[3] != cfg->n_heads || header[4] != cfg->n_layers) {
+        fprintf(stderr, "ERROR: checkpoint D=%d H=%d L=%d differs from config D=%d H=%d L=%d\n",
+                header[2], header[3], header[4], cfg->n_embd, cfg->n_heads, cfg->n_layers);
+        fclose(f); return -1;
+    }
+    if (ckpt_hidden < 0 || ckpt_hidden > 16LL * cfg->n_embd) {
+        fprintf(stderr, "ERROR: checkpoint hidden %d outside 0..16*%d\n", ckpt_hidden, cfg->n_embd);
+        fclose(f); return -1;
+    }
+    cfg->vocab_size = header[1];
     
     printf("Loading checkpoint: step %d (V=%d D=%d H=%d L=%d hidden=%d)\n",
            ckpt_step, header[1], header[2], header[3], header[4],
@@ -478,58 +519,33 @@ static int load_checkpoint(TrainConfig* cfg, const char* path) {
         {"wpe",     cfg->seq_len,    cfg->n_embd},
         {"lm_head", cfg->vocab_size, cfg->n_embd},
     };
-    for (int i = 0; i < 3; i++) {
-        int len; fread(&len, sizeof(int), 1, f);
-        float* buf = (float*)malloc(len * sizeof(float));
-        fread(buf, sizeof(float), len, f);
-        am_set_var_matrix(globals[i].name, buf, globals[i].rows, globals[i].cols);
-        free(buf);
-    }
+    int rc = 0;
+    for (int i = 0; rc == 0 && i < 3; i++)
+        rc = load_tensor(f, globals[i].name, globals[i].rows, globals[i].cols);
     
     // Per-layer weights: attention are always [n_embd, n_embd]
     // FFN depends on checkpoint format (old=square, new=proper hidden_dim)
     int ffn_hidden = ckpt_hidden > 0 ? ckpt_hidden : cfg->n_embd;
     
-    for (int l = 0; l < cfg->n_layers; l++) {
+    for (int l = 0; rc == 0 && l < cfg->n_layers; l++) {
         // Attention weights: wq, wk, wv, wo — always [n_embd, n_embd]
         const char* attn_sfx[] = {"wq", "wk", "wv", "wo", NULL};
-        for (int s = 0; attn_sfx[s]; s++) {
+        for (int s = 0; rc == 0 && attn_sfx[s]; s++) {
             char name[32];
             snprintf(name, sizeof(name), "%s%d", attn_sfx[s], l);
-            int len; fread(&len, sizeof(int), 1, f);
-            float* buf = (float*)malloc(len * sizeof(float));
-            fread(buf, sizeof(float), len, f);
-            am_set_var_matrix(name, buf, cfg->n_embd, cfg->n_embd);
-            free(buf);
+            rc = load_tensor(f, name, cfg->n_embd, cfg->n_embd);
         }
         // FFN weights: w1_[hidden,embd], w3_[hidden,embd], w2_[embd,hidden]
-        {
-            char name[32];
-            int len; float* buf;
-            
-            snprintf(name, 32, "w1_%d", l);
-            fread(&len, sizeof(int), 1, f);
-            buf = (float*)malloc(len * sizeof(float));
-            fread(buf, sizeof(float), len, f);
-            am_set_var_matrix(name, buf, ffn_hidden, cfg->n_embd);
-            free(buf);
-            
-            snprintf(name, 32, "w3_%d", l);
-            fread(&len, sizeof(int), 1, f);
-            buf = (float*)malloc(len * sizeof(float));
-            fread(buf, sizeof(float), len, f);
-            am_set_var_matrix(name, buf, ffn_hidden, cfg->n_embd);
-            free(buf);
-            
-            snprintf(name, 32, "w2_%d", l);
-            fread(&len, sizeof(int), 1, f);
-            buf = (float*)malloc(len * sizeof(float));
-            fread(buf, sizeof(float), len, f);
-            am_set_var_matrix(name, buf, cfg->n_embd, ffn_hidden);
-            free(buf);
-        }
+        char name[32];
+        snprintf(name, 32, "w1_%d", l);
+        if (rc == 0) rc = load_tensor(f, name, ffn_hidden, cfg->n_embd);
+        snprintf(name, 32, "w3_%d", l);
+        if (rc == 0) rc = load_tensor(f, name, ffn_hidden, cfg->n_embd);
+        snprintf(name, 32, "w2_%d", l);
+        if (rc == 0) rc = load_tensor(f, name, cfg->n_embd, ffn_hidden);
     }
     fclose(f);
+    if (rc != 0) return -1;
     printf("Loaded: %d weights from step %d\n", 3 + cfg->n_layers * 7, ckpt_step);
     return ckpt_step;
 }

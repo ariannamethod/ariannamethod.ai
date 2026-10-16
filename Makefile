@@ -110,6 +110,7 @@ test: core/test_aml
 
 test-amlc: all
 	bash tests/test_amlc.sh
+	bash tests/test_amlc_link.sh
 	bash tests/test_amlc_runtime.sh
 	bash tests/test_amlc_includes.sh
 
@@ -193,6 +194,10 @@ test-janus: janus/libjanus.dylib janus/test_janus_c.c
 
 # Full test: AML + Janus basic
 test-all: test test-janus
+
+.PHONY: test-janus-loaders
+test-janus-loaders: libaml.a
+	bash tests/test_janus_loaders.sh
 
 # ═══ Clean ═══
 clean:
