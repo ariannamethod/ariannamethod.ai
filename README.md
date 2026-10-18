@@ -15,7 +15,7 @@
 
 > **Read the [Arianna Method Manifesto](ARIANNA_METHOD_MANIFESTO.md) first.** This repository is governed by it; every instruction here, `CLAUDE.md` included, is subordinate to it.
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ariannamethod/ariannamethod.ai)
+<a href="https://deepwiki.com/ariannamethod/ariannamethod.ai"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
   
 **v5.13.0** · pure-C core · LGPL-3.0
 
