@@ -12,6 +12,34 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-10-20 — the field organ: exact word identity on a float32 substrate (`0db4861`, branch `fable/field-organ`)
+
+Five intrinsics enter the language: `field_project`, `field_normalize`,
+`field_dot`, `exp`, `log`. The field organ reproduces WOLFE's lexical
+field (the C router vendored in LALO): FNV-1a 64 over a word's exact
+UTF-8 bytes, three taps of the LCG `h*6364136223846793005+1`, sign from
+bit 20 — exact unsigned 64-bit arithmetic a float32 scalar cannot carry,
+so it lives inside the organ. The language sees float32 arrays; double
+accumulation rounds once per touched unit. `exp`/`log` evaluate once in
+double with explicit refusals; before this commit both names fell
+through to the unknown-function zero in scalar expressions — a program
+could call `log(1+exp(x))` and silently get 0.
+
+Measured before built: an honest float32 shadow of C-WOLFE
+(`[[:<:]]double[[:>:]]`→float, capacity 921136→850696) flips **zero of
+68 decisions** at a thinnest margin of 2.05e-4, contract deltas ≤ 1e-6 —
+accumulation precision is not load-bearing; identity precision is.
+Downstream proof lives in LALO (`fable/wolfe-aml`): `aml/wolfe.aml`
+reproduces the C oracle's decisions 68/68, 64/68 output lines
+byte-identical, red run on one attention constant fails 67/68.
+
+`make test-field`: **3501 C/runtime checks**, a golden fixture agreeing
+in all five execution paths, 24 invalid programs refused in all five,
+seven organ mutations (sign bit, FNV prime, per-tap rounding, norm
+floor, float dot, `expf`, `logf`) each caught at a named check. Spec
+§1.4 + README + [docs/FIELD.md](docs/FIELD.md) updated. Branch pushed,
+**not merged** — awaits Oleg's word.
+
 ## 2026-10-15 — a journal reads back by byte offset
 
 Two stateless transport organs read a regular file back. `file_size(path)`
