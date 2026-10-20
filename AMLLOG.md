@@ -12,6 +12,59 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-10-20 — Scalar math and failed calls must produce a result or an error
+
+Fable traced Haiku's zero immune-consensus term to missing scalar `exp` and
+`log`. Reproduction on `9f3cc1b674b9704bc2eab84d0f033913bb7f98c6` returned
+zero for `exp(0)`, `log(2)`, `tanh(0.3)` and `log(1 + exp(0))`. The scalar
+parser silently accepted an unresolved function. Haiku's reference test also
+used the missing `tanh`, so its expected value carried the same defect.
+
+`exp`, natural `log` and `tanh` are now case-insensitive reserved scalar
+intrinsics backed by `expf`, `logf` and `tanhf`. Each requires exactly one
+finite scalar. Logarithms require positive input; nonfinite results fail,
+while exponential underflow to zero is a valid float32 result. Arguments use
+the existing owned typed dispatcher and are evaluated once.
+
+Unresolved calls now report an error in expressions and standalone statements,
+including calls with whitespace before `(`. Known scalar calls retain both
+spellings. A known array call that produces no result also fails explicitly;
+bytecode's direct add/mul/silu paths apply the same rule. Failed assignments
+retain their destinations and stop later AML and compiled C-main effects.
+The existing eager evaluation of preceding arguments and statements remains.
+
+Removing the silent fallback exposed four defective baseline fixtures:
+
+- The sequence-loss tape fixture used a four-row output matrix with an
+  eight-token vocabulary. Its matrix is now `8 x 4`, and its loss must exist,
+  be finite and be positive before backward.
+- Two post-training forwards used local variables from an already-finished
+  `am_exec`. They now execute in the same scope as their thirty training
+  steps and check the resulting loss.
+- The single-head/multi-head comparison used an unsupported nested `scale`
+  argument to `add`, then checked only return status. Its intermediate now
+  has a name; output shapes and squared numerical difference are asserted.
+
+The old expression fixture that explicitly expected an unknown call to yield
+zero now preserves only the separate undefined-variable behavior. Independent
+decimal math references and named failure cases live in
+`tests/test_aml_scalar_math.c`, exercised by `make test-scalar-math` through
+interpreter, resumable host, bytecode, runner and compiled execution. The new
+numeric fixture failed against the pristine runtime at `exp(0) == 1` before
+the implementation changed.
+
+Proof on Linux x86_64 / GCC 13.3.0, scalar build:
+
+- `make test-scalar-math`: **877** host checks and **39** invalid-call
+  fixtures; reference values and stopped effects pass through all five paths.
+  The same numeric fixture fails at `exp(0) == 1` in all five pristine paths;
+  the pristine runner accepts the unknown-call fixture and prints its forbidden
+  continuation marker.
+- `make test-expressions`: **1,201** host checks and **48** invalid syntax
+  fixtures, with value/error parity through all five paths.
+- Rebuilt `core/test_aml`: **550/550**, including the four repaired fixtures.
+- `make test-amlc`: all four compiler, linking, runtime and include suites pass.
+
 ## 2026-10-15 — a journal reads back by byte offset
 
 Two stateless transport organs read a regular file back. `file_size(path)`
