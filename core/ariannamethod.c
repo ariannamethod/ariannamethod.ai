@@ -3827,6 +3827,11 @@ static int aml_scalar_intrinsic_function(const char* name) {
            strcasecmp(name, "tanh") == 0;
 }
 
+static int aml_field_function(const char* name) {
+    return !strcasecmp(name, "field_project") || !strcasecmp(name, "field_normalize") ||
+           !strcasecmp(name, "field_dot");
+}
+
 static int aml_sampling_function(const char* name) {
     static const char* names[] = {"rng_new", "rng_uniform", "rng_index",
         "rng_categorical", "categorical_at"};
@@ -5542,6 +5547,90 @@ static int aml_array_scalar_dispatch(AML_ExecCtx* ctx, const char* name,
     return 0;
 }
 
+static int aml_field_array(AML_ExecCtx* ctx, const AML_Var* value, AM_Array** out) {
+    if (value->type != AML_TYPE_ARRAY || !value->array || value->array->len < 1) {
+        set_error(ctx, "field operation requires a nonempty numeric array"); return 1;
+    }
+#ifdef USE_CUDA
+    ensure_cpu(value->array);
+#endif
+    for (int i = 0; i < value->array->len; i++) {
+        if (!isfinite(value->array->data[i])) {
+            set_error(ctx, "field operation requires finite array values"); return 1;
+        }
+    }
+    *out = value->array;
+    return 0;
+}
+
+// The field organ: a word excites three signed units of a dense array through
+// FNV-1a 64 and a 64-bit LCG (sign = bit 20, unit = hash mod length), exactly
+// as WOLFE's project(). Sums run in double; each touched unit, each norm and
+// each dot product rounds once to float32. Arguments remain unchanged.
+static int aml_field_dispatch(AML_ExecCtx* ctx, const char* name,
+                              AML_Var* args, int nargs, AML_Var* out) {
+    int is_project = !strcasecmp(name, "field_project");
+    int is_dot = !strcasecmp(name, "field_dot");
+    int need = is_project ? 3 : is_dot ? 2 : 1;
+    if (nargs != need) { set_error(ctx, "wrong number of field arguments"); return 1; }
+    AM_Array* a;
+    if (aml_field_array(ctx, &args[0], &a)) return 1;
+    if (is_dot) {
+        AM_Array* b;
+        if (aml_field_array(ctx, &args[1], &b)) return 1;
+        if (a->len != b->len) { set_error(ctx, "field_dot requires arrays of equal length"); return 1; }
+        double z = 0;
+        for (int i = 0; i < a->len; i++) z += (double)a->data[i] * (double)b->data[i];
+        if (!isfinite((float)z)) { set_error(ctx, "field_dot exceeds the float32 range"); return 1; }
+        out->value = (float)z;
+        return 0;
+    }
+    if (is_project) {
+        if (args[1].type != AML_TYPE_STRING || !args[1].string) {
+            set_error(ctx, "field_project word must be a string"); return 1;
+        }
+        if (args[2].type != AML_TYPE_FLOAT || !isfinite(args[2].value)) {
+            set_error(ctx, "field_project scale must be a finite scalar"); return 1;
+        }
+    }
+    AM_Array* result = am_array_clone(a);
+    if (!result) { set_error(ctx, "field array allocation failed"); return 1; }
+    if (is_project) {
+        const AM_String* word = args[1].string;
+        uint64_t h = UINT64_C(1469598103934665603);
+        for (int i = 0; i < word->byte_len; i++) {
+            h ^= (unsigned char)word->data[i];
+            h *= UINT64_C(1099511628211);
+        }
+        double scale = args[2].value, sum[3];
+        int unit[3], taps = 0;
+        for (int t = 0; t < 3; t++) {
+            int k = (int)(h % (uint64_t)a->len), j = 0;
+            while (j < taps && unit[j] != k) j++;
+            if (j == taps) { unit[taps] = k; sum[taps++] = a->data[k]; }
+            sum[j] += ((h >> 20) & 1) ? scale : -scale;
+            h = h * UINT64_C(6364136223846793005) + 1;
+        }
+        for (int j = 0; j < taps; j++) {
+            float v = (float)sum[j];
+            if (!isfinite(v)) {
+                am_array_free(result);
+                set_error(ctx, "field_project exceeds the float32 range"); return 1;
+            }
+            result->data[unit[j]] = v;
+        }
+    } else {
+        double z = 0;
+        for (int i = 0; i < a->len; i++) z += (double)a->data[i] * (double)a->data[i];
+        z = sqrt(z);
+        if (z > 1e-12)
+            for (int i = 0; i < a->len; i++) result->data[i] = (float)((double)a->data[i] / z);
+    }
+    out->array = result;
+    out->type = AML_TYPE_ARRAY;
+    return 0;
+}
+
 // Parse mixed arguments without splitting commas/parentheses inside strings.
 // cursor starts at '(' and advances past the matching ')'.
 static int aml_invoke_value(AML_ExecCtx* ctx, const char* name,
@@ -5593,6 +5682,7 @@ static int aml_invoke_value(AML_ExecCtx* ctx, const char* name,
     else if (aml_tokenizer_function(name)) rc = aml_tokenizer_dispatch(ctx, name, args, nargs, out);
     else if (aml_model_function(name)) rc = aml_model_dispatch(ctx, name, args, nargs, out);
     else if (aml_array_scalar_function(name)) rc = aml_array_scalar_dispatch(ctx, name, args, nargs, out);
+    else if (aml_field_function(name)) rc = aml_field_dispatch(ctx, name, args, nargs, out);
     else {
         AML_Func* f = aml_value_function(ctx, name);
         if (f) rc = aml_call_value(ctx, f, args, nargs, 0, out);
@@ -5697,7 +5787,7 @@ static float expr_primary(AML_Expr* e) {
             if (e->ctx && (aml_text_function(name) || aml_list_function(name) ||
                            aml_map_function(name) || aml_scalar_intrinsic_function(name) ||
                            aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) || aml_model_function(name) || aml_record_function(name) || aml_transport_function(name) ||
-                           aml_array_scalar_function(name) ||
+                           aml_array_scalar_function(name) || aml_field_function(name) ||
                            aml_value_function(e->ctx, name))) {
                 AML_Var result = {0};
                 if (aml_invoke_value(e->ctx, name, &e->p, &result)) {
@@ -5960,7 +6050,7 @@ static int aml_eval_value(AML_ExecCtx* ctx, const char* text, AML_Var* out) {
         if (*p == '(' && (aml_text_function(name) || aml_list_function(name) ||
                           aml_map_function(name) || aml_scalar_intrinsic_function(name) ||
                           aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) || aml_model_function(name) || aml_record_function(name) || aml_transport_function(name) ||
-                          aml_array_scalar_function(name) ||
+                          aml_array_scalar_function(name) || aml_field_function(name) ||
                           aml_value_function(ctx, name))) {
             const char* close = aml_value_close(p);
             if (close == expr + len - 1) return aml_invoke_value(ctx, name, &p, out);
@@ -7673,7 +7763,7 @@ static int aml_reserved_function(const char* name) {
         "record_new", "record_set", "record_get", "record_has", "record_keys", "record_kind",
         "record_clone", "record_equal", "record_replace", "record_swap", "checkpoint_save", "checkpoint_load", "file_exists",
         "text_hash_sha256", "file_hash_sha256", "file_append_line", "process_run",
-        "file_size", "file_read_slice"
+        "file_size", "file_read_slice", "exp", "log", "field_project", "field_normalize", "field_dot"
     };
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (strcasecmp(name, names[i]) == 0) return 1;
@@ -9430,7 +9520,7 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
              aml_array_function(name) ||
              aml_map_function(name) || aml_scalar_intrinsic_function(name) ||
              aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) || aml_model_function(name) || aml_record_function(name) || aml_transport_function(name) ||
-             aml_array_scalar_function(name))) {
+             aml_array_scalar_function(name) || aml_field_function(name))) {
             AML_Var value = {0};
             aml_eval_value(ctx, text, &value);
             aml_value_clear(&value);

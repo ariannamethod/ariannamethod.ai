@@ -136,6 +136,19 @@ scaled integer. Conversion uses integer arithmetic and preserves the caller's
 locale, rounding mode and floating-point exception flags. Invalid arguments or
 allocation failure stop execution without replacing the destination value.
 [TEXT_FIXED.md](../docs/TEXT_FIXED.md) defines the bit-level contract and tests.
+
+The three field intrinsics are `field_project`, `field_normalize` and
+`field_dot`. A field is a numeric array in which words leave signed traces:
+`field_project(vec, word, scale)` hashes the word's exact UTF-8 bytes with
+FNV-1a 64 and advances a 64-bit LCG — arithmetic a float32 scalar cannot
+carry, so it stays inside the organ — then moves three hash-chosen units by
+`±scale`. `field_normalize` and `field_dot` accumulate in double precision
+and round once to float32; `field_dot` refuses arrays of different lengths.
+The scalar `exp`, `log` and `tanh` these formulas lean on are ordinary scalar
+intrinsics of the language, not part of the organ.
+[FIELD.md](../docs/FIELD.md) defines the exact hash, rounding and refusal
+contract.
+
 The shared function table holds 512 slots: 17 registered builtins and 495 user
 definitions. Intrinsics do not consume slots. Excess definitions fail during
 preparation before any statement executes.
