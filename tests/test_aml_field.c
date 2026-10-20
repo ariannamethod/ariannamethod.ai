@@ -218,32 +218,6 @@ static void test_norm_and_dot(int mode) {
     am_persistent_clear();
 }
 
-static void test_exp_log(int mode) {
-    /* The trailing inputs are where float-only expf/logf differ from one double evaluation. */
-    static const float inputs[] = {-100, -40, -1, 0, 0.5f, 1, 2.5f, 10, 88,
-        -50.0004807f, -3.00021005f, 0.750004828f, 7.00004816f, 42.0013504f, 80.0000763f};
-    static const float positives[] = {1e-45f, 1e-20f, 0.5f, 1, 2, 10, 1e30f,
-        1.05675456e-30f, 0.00100162032f, 0.600014567f, 3.02069426f, 1002.59387f, 1.05304099e+20f};
-    for (size_t i = 0; i < sizeof(inputs) / sizeof(inputs[0]); i++) {
-        char source[128];
-        snprintf(source, sizeof(source), "y = exp(%.9g)\n", (double)inputs[i]);
-        prepare();
-        CHECK(run(mode, source) == 0);
-        float got = am_get_var_float("y"), want = (float)exp((double)inputs[i]);
-        CHECK(!memcmp(&got, &want, sizeof got));
-        am_persistent_clear();
-    }
-    for (size_t i = 0; i < sizeof(positives) / sizeof(positives[0]); i++) {
-        char source[128];
-        snprintf(source, sizeof(source), "y = log(%.9g)\n", (double)positives[i]);
-        prepare();
-        CHECK(run(mode, source) == 0);
-        float got = am_get_var_float("y"), want = (float)log((double)positives[i]);
-        CHECK(!memcmp(&got, &want, sizeof got));
-        am_persistent_clear();
-    }
-}
-
 static void test_errors(int mode) {
     for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
         char source[1024];
@@ -298,7 +272,6 @@ int main(int argc, char** argv) {
         test_golden(mode);
         test_projection_contract(mode);
         test_norm_and_dot(mode);
-        test_exp_log(mode);
         test_errors(mode);
     }
     printf("PASS field: %d C/runtime checks\n", checks);

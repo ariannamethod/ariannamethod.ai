@@ -72,6 +72,37 @@ Proof on Linux x86_64 / GCC 13.3.0, scalar build:
   fixtures, with value/error parity through all five paths.
 - Rebuilt `core/test_aml`: **550/550**, including the four repaired fixtures.
 - `make test-amlc`: all four compiler, linking, runtime and include suites pass.
+## 2026-10-20 — the field organ: exact word identity on a float32 substrate (`0db4861`, branch `fable/field-organ`)
+
+Three intrinsics enter the language: `field_project`, `field_normalize`,
+`field_dot`. The field organ reproduces WOLFE's lexical
+field (the C router vendored in LALO): FNV-1a 64 over a word's exact
+UTF-8 bytes, three taps of the LCG `h*6364136223846793005+1`, sign from
+bit 20 — exact unsigned 64-bit arithmetic a float32 scalar cannot carry,
+so it lives inside the organ. The language sees float32 arrays; double
+accumulation rounds once per touched unit. The branch originally also
+carried scalar `exp`/`log`; the scalar-math release (#46, `a97abc5`)
+brought `exp`/`log`/`tanh` into the core with loud nonfinite refusals,
+so the 2026-10-27 rebase dropped the organ's duplicates — the organ
+adds no scalar math of its own.
+
+Measured before built: an honest float32 shadow of C-WOLFE
+(`[[:<:]]double[[:>:]]`→float, capacity 921136→850696) flips **zero of
+68 decisions** at a thinnest margin of 2.05e-4, contract deltas ≤ 1e-6 —
+accumulation precision is not load-bearing; identity precision is.
+Downstream proof lives in LALO (`fable/wolfe-aml`): `aml/wolfe.aml`
+reproduces the C oracle's decisions 68/68, 64/68 output lines
+byte-identical, red run on one attention constant fails 67/68.
+
+`make test-field`: **3333 C/runtime checks** (3501 before the rebase cut
+the organ's own exp/log value block), a golden fixture agreeing
+in all five execution paths, 24 invalid programs refused in all five,
+five organ mutations (sign bit, FNV prime, per-tap rounding, norm
+floor, float dot) each caught at a named check — the original `expf`/`logf`
+mutations died with the duplicates in the rebase. Spec
+§1.4 + [docs/FIELD.md](docs/FIELD.md) updated; the README line moved here
+with the 2026-10-27 surgery. Branch pushed,
+**not merged** — awaits Oleg's word.
 
 ## 2026-10-15 — a journal reads back by byte offset
 
