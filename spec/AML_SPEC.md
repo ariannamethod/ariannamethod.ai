@@ -1,6 +1,6 @@
 # AML — Arianna Method Language
 
-**Version:** 5.13.0 (Explicit UTC civil day values)
+**Version:** 5.13.1 (Checked scalar math and unknown-call errors)
 **Extension:** `.aml`
 **Status:** Living specification
 
@@ -73,13 +73,26 @@ boundaries: for example, `TENSION` evaluates one whole expression, while
 `TAPE ADAMW` consumes its separate positional numeric arguments. Expression
 evaluation remains eager; earlier statements and evaluated arguments keep their
 effects when a later expression fails. `%` is unsupported; express a remainder
-as `x - floor(x / divisor) * divisor`.
+as `x - floor(x / divisor) * divisor`. Unknown function calls are errors that
+name the missing function, in expressions and standalone calls. Undefined
+variables retain their existing zero value.
+Recognized array calls that return no result are errors naming that operation,
+including missing operands, refused dimensions and allocation failures. They
+leave the assignment destination unchanged in interpreter and bytecode paths.
 
 **Note on indentation:** AML Level 2 uses Python-style indentation for blocks. This is deliberate — transformer attention weights respond strongly to indented code-like structures (see TRIPD research). The indentation IS the syntax, not decoration.
 
 ---
 
 ### 1.4 Shared modules and typed values
+
+`exp(x)`, `log(x)` and `tanh(x)` are case-insensitive reserved scalar intrinsics.
+Each requires exactly one finite scalar and returns the float32 result of the
+corresponding C `expf`, `logf` (natural logarithm) or `tanhf` operation. `log`
+requires `x > 0`. Nonfinite results are errors; `exp` underflow to zero is valid.
+A failed call leaves the assignment destination unchanged and stops later
+statements. Arguments are evaluated once, in order, before dispatch. These
+intrinsics consume no user function slots.
 
 `IMPORT "path"` expands a canonical source once into the current program's
 function/global scope before execution. It preserves the originating directory

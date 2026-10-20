@@ -58,7 +58,7 @@ static const char* valid =
     "counter = [0]\n"
     "total = bump(counter) + bump(counter)\n"
     "assert(total == 3 and counter[0] == 2, 'one evaluation per call')\n"
-    "legacy = undefined_name + unknown_scalar(3)\n"
+    "legacy = undefined_name\n"
     "assert(legacy == 0, 'legacy undefined values')\n"
     "PRINT value\n"
     "PRINT 'BOUNDARIES_OK'\n";

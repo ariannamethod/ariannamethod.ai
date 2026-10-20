@@ -3181,7 +3181,7 @@ int main(void) {
         int rc = am_exec(
             "wte = matrix(8, 4, 0.1)\n"
             "wpe = matrix(4, 4, 0.05)\n"
-            "W = matrix(4, 4, 0.1)\n"
+            "W = matrix(8, 4, 0.1)\n"
             "tokens = [0.0, 1.0, 2.0, 3.0]\n"
             "targets = [1.0, 2.0, 3.0, 4.0]\n"
             "TAPE START\n"
@@ -3192,6 +3192,7 @@ int main(void) {
             "h_n = seq_rmsnorm(h, 4, 4)\n"
             "logits = seq_matvec(W, h_n, 4)\n"
             "loss = seq_cross_entropy(logits, targets, 4, 8)\n"
+            "assert(len(loss) == 1 and isfinite(loss[0]) and loss[0] > 0, 'seq loss exists')\n"
             "TAPE BACKWARD loss\n"
             "TAPE ADAM_STEP 0.01\n"
         );
@@ -3326,6 +3327,7 @@ int main(void) {
             "    attn = seq_matvec(wo, attn, 4)\n"
             "    logits = seq_matvec(lm_head, attn, 4)\n"
             "    loss = seq_cross_entropy(logits, targets, 4, 8)\n"
+            "    assert(len(loss) == 1 and isfinite(loss[0]) and loss[0] > 0, 'training loss exists')\n"
             "    TAPE BACKWARD loss\n"
             "    TAPE ADAM_STEP 0.01\n"
             "    TAPE CLEAR\n"
@@ -3338,10 +3340,8 @@ int main(void) {
             "    TAPE PARAM wo\n"
             "    TAPE PARAM lm_head\n"
             "    step = step + 1\n"
-        );
-        ASSERT(rc == 0, "janus training loop completes");
-        // Run one more forward pass and check loss is reasonable
-        rc = am_exec(
+            "assert(step == 30, 'training loop completes')\n"
+            // The next forward shares the trained parameters in this AML scope.
             "h = seq_embed(wte, wpe, tokens, 4)\n"
             "h = seq_rmsnorm(h, 4, 8)\n"
             "q = seq_matvec(wq, h, 4)\n"
@@ -3351,7 +3351,9 @@ int main(void) {
             "attn = seq_matvec(wo, attn, 4)\n"
             "logits = seq_matvec(lm_head, attn, 4)\n"
             "loss = seq_cross_entropy(logits, targets, 4, 8)\n"
+            "assert(len(loss) == 1 and isfinite(loss[0]) and loss[0] > 0, 'post-training loss exists')\n"
         );
+        ASSERT(rc == 0, "janus training loop completes");
         ASSERT(rc == 0, "post-training forward pass succeeds");
     }
 
@@ -3406,8 +3408,11 @@ int main(void) {
             "v = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]\n"
             "out_sh = causal_attention(q, k, v, 2, 4)\n"
             "out_mh = multi_head_attention(q, k, v, 2, 4, 1)\n"
-            "d = add(out_sh, scale(out_mh, -1.0))\n"
+            "negative_mh = scale(out_mh, -1.0)\n"
+            "d = add(out_sh, negative_mh)\n"
             "diff = dot(d, d)\n"
+            "assert(len(out_sh) == 8 and len(out_mh) == 8 and len(d) == 8, 'attention outputs exist')\n"
+            "assert(isfinite(diff) and diff < 0.0000000001, 'single-head matches multi-head')\n"
         );
         ASSERT(rc == 0, "single-head vs multi-head n_heads=1 runs");
     }
@@ -3496,6 +3501,7 @@ int main(void) {
             "    h_norm = seq_rmsnorm(h, 4, 16)\n"
             "    logits = seq_matvec(lm_head, h_norm, 4)\n"
             "    loss = seq_cross_entropy(logits, targets, 4, 8)\n"
+            "    assert(len(loss) == 1 and isfinite(loss[0]) and loss[0] > 0, 'training loss exists')\n"
             "    TAPE BACKWARD loss\n"
             "    TAPE ADAM_STEP 0.01\n"
             "    TAPE CLEAR\n"
@@ -3511,10 +3517,8 @@ int main(void) {
             "    TAPE PARAM w2\n"
             "    TAPE PARAM lm_head\n"
             "    step = step + 1\n"
-        );
-        ASSERT(rc == 0, "multi-head janus training completes");
-        // Run one more forward to check loss
-        rc = am_exec(
+            "assert(step == 30, 'training loop completes')\n"
+            // The next forward shares the trained parameters in this AML scope.
             "h = seq_embed(wte, wpe, tokens, 4)\n"
             "h_norm = seq_rmsnorm(h, 4, 16)\n"
             "q = seq_matvec(wq, h_norm, 4)\n"
@@ -3532,7 +3536,9 @@ int main(void) {
             "h_norm = seq_rmsnorm(h, 4, 16)\n"
             "logits = seq_matvec(lm_head, h_norm, 4)\n"
             "loss = seq_cross_entropy(logits, targets, 4, 8)\n"
+            "assert(len(loss) == 1 and isfinite(loss[0]) and loss[0] > 0, 'post-training loss exists')\n"
         );
+        ASSERT(rc == 0, "multi-head janus training completes");
         ASSERT(rc == 0, "multi-head post-training forward succeeds");
     }
 

@@ -3752,6 +3752,13 @@ static int aml_eval_value(AML_ExecCtx* ctx, const char* text, AML_Var* out);
 static int aml_call_value(AML_ExecCtx* ctx, AML_Func* f, AML_Var* args,
                           int nargs, int lineno, AML_Var* out);
 static AM_Array* aml_try_array_expr(AML_ExecCtx* ctx, const char* rhs);
+static int aml_array_function(const char* name);
+
+static void aml_array_no_result(AML_ExecCtx* ctx, const char* name) {
+    char message[128];
+    snprintf(message, sizeof(message), "array function could not produce a result: %s", name);
+    set_error(ctx, message);
+}
 
 static AML_Func* aml_value_function(AML_ExecCtx* ctx, const char* name) {
     if (!ctx) return NULL;
@@ -3815,7 +3822,9 @@ static int aml_transport_function(const char* name) {
 
 static int aml_scalar_intrinsic_function(const char* name) {
     return strcasecmp(name, "assert") == 0 || strcasecmp(name, "floor") == 0 ||
-           strcasecmp(name, "isfinite") == 0 || strcasecmp(name, "utc_day") == 0;
+           strcasecmp(name, "isfinite") == 0 || strcasecmp(name, "utc_day") == 0 ||
+           strcasecmp(name, "exp") == 0 || strcasecmp(name, "log") == 0 ||
+           strcasecmp(name, "tanh") == 0;
 }
 
 static int aml_sampling_function(const char* name) {
@@ -5013,6 +5022,29 @@ static int aml_map_dispatch(AML_ExecCtx* ctx, const char* name, AML_Var* args,
 
 static int aml_scalar_intrinsic_dispatch(AML_ExecCtx* ctx, const char* name,
                                          AML_Var* args, int nargs, AML_Var* out) {
+    if (!strcasecmp(name, "exp") || !strcasecmp(name, "log") || !strcasecmp(name, "tanh")) {
+        char message[128];
+        if (nargs != 1) {
+            snprintf(message, sizeof(message), "%s requires exactly one argument", name);
+            set_error(ctx, message); return 1;
+        }
+        if (args[0].type != AML_TYPE_FLOAT || !isfinite(args[0].value)) {
+            snprintf(message, sizeof(message), "%s requires a finite scalar", name);
+            set_error(ctx, message); return 1;
+        }
+        float x = args[0].value, value;
+        if (!strcasecmp(name, "log")) {
+            if (x <= 0) { set_error(ctx, "log requires a positive scalar"); return 1; }
+            value = logf(x);
+        } else if (!strcasecmp(name, "exp")) value = expf(x);
+        else value = tanhf(x);
+        if (!isfinite(value)) {
+            snprintf(message, sizeof(message), "%s produced a nonfinite result", name);
+            set_error(ctx, message); return 1;
+        }
+        out->value = value;
+        return 0;
+    }
     if (!strcasecmp(name, "utc_day")) {
         if (nargs != 0) { set_error(ctx, "utc_day requires no arguments"); return 1; }
         time_t now = time(NULL);
@@ -5706,7 +5738,12 @@ static float expr_primary(AML_Expr* e) {
             if (strcasecmp(name, "clamp") == 0 && nargs >= 3)
                 return clampf(args[0], args[1], args[2]);
 
-            return 0;  // unknown function
+            char message[128];
+            snprintf(message, sizeof(message), aml_array_function(name)
+                ? "array function used as a scalar expression: %s" : "unknown function: %s", name);
+            set_error(e->ctx, message);
+            e->error = 1;
+            return 0;
         }
 
         // boolean literals
@@ -5938,6 +5975,10 @@ static int aml_eval_value(AML_ExecCtx* ctx, const char* text, AML_Var* out) {
         out->type = AML_TYPE_ARRAY;
         out->array = arr;
         return 0;
+    }
+    if (*p == '(' && aml_array_function(name)) {
+        aml_array_no_result(ctx, name);
+        return 1;
     }
     out->value = aml_eval(ctx, expr);
     return ctx->error[0] != 0;
@@ -7398,6 +7439,14 @@ static void aml_exec_level0(const char* cmd, const char* arg, AML_ExecCtx* ctx, 
 #endif // AM_ASYNC_DISABLED
 
     // ─────────────────────────────────────────────────────────────────────────
+    // An unresolved standalone call is an error, including `name (args)`.
+    // Known Level 0 commands above keep parenthesized expression arguments.
+    else if (arg && *arg == '(') {
+      char message[128];
+      snprintf(message, sizeof(message), "unknown function: %.96s", cmd);
+      set_error_at(ctx, lineno, message);
+    }
+
     // UNKNOWN COMMANDS — ignored intentionally (future-proof + vibe)
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -7613,7 +7662,7 @@ static int aml_reserved_function(const char* name) {
         "list_new", "list_len", "list_get", "list_push", "list_set", "list_find",
         "list_slice", "list_clone", "list_sorted", "list_key",
         "map_new", "map_len", "map_has", "map_get", "map_set", "map_delete",
-        "map_keys", "map_clone", "assert", "floor", "isfinite", "utc_day", "rng_new", "rng_uniform",
+        "map_keys", "map_clone", "assert", "floor", "isfinite", "utc_day", "exp", "log", "tanh", "rng_new", "rng_uniform",
         "rng_index", "rng_categorical", "categorical_at", "nt_linear", "nt_linear_vjp",
         "nt_tanh", "nt_tanh_vjp", "nt_mse_grad", "nt_sgd", "rng_normal",
         "nt_parliament_elect", "nt_parliament_inject", "nt_oja",
@@ -9375,7 +9424,10 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
             return idx + 1;
         }
         if (n && n < AML_MAX_NAME && *p == '(' &&
-            (aml_value_function(ctx, name) || aml_text_function(name) || aml_list_function(name) ||
+            (p == text + n || aml_value_function(ctx, name) || aml_text_function(name) || aml_list_function(name) ||
+             !strcasecmp(name, "abs") || !strcasecmp(name, "min") || !strcasecmp(name, "max") ||
+             !strcasecmp(name, "sqrt") || !strcasecmp(name, "clamp") ||
+             aml_array_function(name) ||
              aml_map_function(name) || aml_scalar_intrinsic_function(name) ||
              aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) || aml_model_function(name) || aml_record_function(name) || aml_transport_function(name) ||
              aml_array_scalar_function(name))) {
@@ -10025,9 +10077,11 @@ int am_exec_compiled(void* handle) {
         case BC_CALL_ADD: {
             AM_Array* a = bc_get_array(&ctx, op->args[0]);
             AM_Array* b = bc_get_array(&ctx, op->args[1]);
+            if (!a || !b) { aml_array_no_result(&ctx, "add"); break; }
             if (a && b) {
                 int n = a->len < b->len ? a->len : b->len;
                 AM_Array* out = am_array_new(n);
+                if (!out) { aml_array_no_result(&ctx, "add"); break; }
                 if (out) {
 #ifdef USE_CUDA
                     if (a->d_data && a->gpu_valid && b->d_data && b->gpu_valid) {
@@ -10051,9 +10105,11 @@ int am_exec_compiled(void* handle) {
         case BC_CALL_MUL: {
             AM_Array* a = bc_get_array(&ctx, op->args[0]);
             AM_Array* b = bc_get_array(&ctx, op->args[1]);
+            if (!a || !b) { aml_array_no_result(&ctx, "mul"); break; }
             if (a && b) {
                 int n = a->len < b->len ? a->len : b->len;
                 AM_Array* out = am_array_new(n);
+                if (!out) { aml_array_no_result(&ctx, "mul"); break; }
                 if (out) {
 #ifdef USE_CUDA
                     if (a->d_data && a->gpu_valid && b->d_data && b->gpu_valid) {
@@ -10076,8 +10132,10 @@ int am_exec_compiled(void* handle) {
 
         case BC_CALL_SILU: {
             AM_Array* x = bc_get_array(&ctx, op->args[0]);
+            if (!x) { aml_array_no_result(&ctx, "silu"); break; }
             if (x) {
                 AM_Array* out = am_array_new(x->len);
+                if (!out) { aml_array_no_result(&ctx, "silu"); break; }
                 if (out) {
 #ifdef USE_CUDA
                     if (x->d_data && x->gpu_valid) {

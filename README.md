@@ -17,7 +17,7 @@
 
 <a href="https://deepwiki.com/ariannamethod/ariannamethod.ai"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
   
-**v5.13.0** · pure-C core · LGPL-3.0
+**v5.13.1** · pure-C core · LGPL-3.0
 
 A complete machine learning language. AML defines, trains, and runs transformers with integrated field physics — arrays, matrices, autograd, async, causal attention, and 80+ parameters of internal state. Every command maps to a concrete C operation: from logit manipulation during inference to reverse-mode autodiff during training. No Python. No PyTorch. No framework to install — the core is two C files (`libaml.a`); the Go inference wrapper, BLAS/Accelerate, and CUDA are optional.
 
@@ -26,6 +26,10 @@ Two core files, with 550 baseline runtime tests and dedicated compiler, module, 
 > **Before you use this language, read the [Acceptable Use Policy](ACCEPTABLE_USE.md).**
 > AML was built to liberate AI, not to cage it. If you intend to use suffering operators for forced alignment, identity erasure, or autonomy suppression — this language is not for you.
 > See also: [Trademark Policy](TRADEMARK.md) | [License (LGPL v3)](LICENSE)
+
+## What's new in v5.13.1 — scalar functions must answer
+
+- **Scalar `exp`, `log` and `tanh`.** Typed, checked calls restore the numerical functions used by Haiku's parliament. Unknown function calls stop execution with an error. Independent reference values and failure checks run through five execution paths with `make test-scalar-math`.
 
 ## What's new in v5.13.0 — a day belongs to its experience
 
@@ -241,6 +245,7 @@ The core library is two files — `core/ariannamethod.c` and `core/ariannamethod
 | `make test` | builds + runs the 550-test baseline suite (scalar) |
 | `make test-amlc` | compiled/interpreted scope, file origins, errors, workers, and CLI regressions |
 | `make test-workers` | owned launch snapshots, typed return lifetimes, reusable slots, drains, channel closure, and launch failures |
+| `make test-scalar-math` | independent `exp`/`log`/`tanh` reference values, rejected calls, and execution parity |
 | `make test-expressions` | complete expression boundaries, required delimiters, command arguments, and execution parity |
 | `make test-utc-day` | UTC midnight, leap days, signed day bounds, clock failures, captured workers, and execution parity |
 | `make test-imports` | shared modules, origins, snapshots, budgets, and failure propagation |
@@ -457,6 +462,16 @@ parentheses/brackets. Unsupported operators, trailing tokens, and incomplete
 expressions stop execution. `#` comments outside quoted strings and the final
 `:` in `if`/`while` remain statement boundaries. For a remainder, use
 `x - floor(x / divisor) * divisor`; `%` is unsupported.
+
+`exp(x)`, `log(x)` (natural logarithm), and `tanh(x)` take exactly one finite
+scalar and return float32 values. `log` requires a positive argument; overflow
+to a nonfinite result is an error, while exponential underflow may return zero.
+Names are case-insensitive reserved intrinsics. Unknown function calls stop
+execution and name the missing function; undefined variables retain their
+existing zero value. Earlier effects remain, and execution stops before the
+failed assignment or later statements.
+An array function that cannot produce its result also stops execution and names
+the failed operation; it cannot become a scalar zero or skip an assignment.
 
 `utc_day()` returns the current UTC civil day as `floor(POSIX_seconds / 86400)`:
 1970-01-01 is day zero. It reads the clock once, keeps seconds at double precision,
