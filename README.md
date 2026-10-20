@@ -64,6 +64,7 @@ Two core files, with 550 baseline runtime tests and dedicated compiler, module, 
 
 - **Numerical values through NoTorch.** Linear layers, tanh, explicit reverse derivatives, mean squared error, plain SGD, and owned normal draws operate on ordinary AML arrays. AML composes the learning rule and owns publication; the optional bridge calls canonical NoTorch kernels without entering either runtime's global tape. See [numerical values](docs/NUMERICAL_VALUES.md).
 - **Unicode lowercase.** `text_lower` implements Unicode 15 default lowercase, including expanding `İ` and contextual Greek sigma. `isfinite` lets an AML organ handle nonfinite scalar observations explicitly. See [lowercase](docs/TEXT_LOWER.md).
+- **The lexical field.** `field_project` / `field_normalize` / `field_dot` grow WOLFE's hash-projected word field inside AML: exact 64-bit FNV-1a/LCG identity and double accumulation live in the organ, float32 arrays face the language. Scalar `exp` and `log` arrive with it — expressions that silently fell to the unknown-function zero now compute. See [field](docs/FIELD.md).
 
 ## What's new in v5.5.0 — each voice keeps its own chance
 

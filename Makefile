@@ -119,6 +119,10 @@ test-expressions: all
 test-utc-day: all
 	bash tests/test_aml_utc_day.sh
 
+.PHONY: test-field
+test-field: all
+	bash tests/test_aml_field.sh
+
 .PHONY: test-workers
 test-workers: all
 	bash tests/test_aml_workers.sh
