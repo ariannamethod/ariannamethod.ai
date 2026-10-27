@@ -12,6 +12,14 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-10-27 — The README returns to its essence
+
+Sixteen "What's new" sections (v4.8.0 → v5.13.1, 90 lines) moved out of README.md
+into the **Version history** section at the bottom of this log. The README was 1648
+lines and 123 headers — a changelog wearing a front page. Oleg's word, the Method's
+own law: the README is the essence, the log is the work. No content line was lost:
+the move is pure transplantation, verified by line accounting in the commit.
+
 ## 2026-10-20 — Scalar math and failed calls must produce a result or an error
 
 Fable traced Haiku's zero immune-consensus term to missing scalar `exp` and
@@ -1386,3 +1394,96 @@ independently in both, and had to be found + fixed separately.
   the load-bearing feature for on-the-fly LoRA synthesis from `.aml`.
 - Cross-port LoRA from notorch v2.4.0 only if/when needed at the language
   level (per Oleg: "не всё надо тащить в язык").
+
+# Version history (What's new — moved from README, 2026-10-27)
+
+## What's new in v5.13.1 — scalar functions must answer
+
+- **Scalar `exp`, `log` and `tanh`.** Typed, checked calls restore the numerical functions used by Haiku's parliament. Unknown function calls stop execution with an error. Independent reference values and failure checks run through five execution paths with `make test-scalar-math`.
+
+## What's new in v5.13.0 — a day belongs to its experience
+
+- **Explicit UTC civil days.** `utc_day()` samples the system clock once and returns an exact day ordinal from 1970-01-01. An organism can capture that value in a request and carry it into workers and checkpoints. UTC midnight defines the boundary; the global field stays unchanged. See [UTC day values](docs/UTC_DAY.md).
+
+## What's new in v5.12.0 — immutable bodies enter the language
+
+- **Owned inference models through NoTorch.** `model_try_load` carries quiet load outcomes, exact model/BPE identities and immutable weights through assignments, functions and workers. Canonical PEN7 BPE, fresh logits, contextual representations and complete parameter mixtures are ordinary typed operations. See [models](docs/MODELS.md).
+- **Room for complete experience.** Programs admit 8,192 expanded lines and sixteen arguments per function. Flat records hold 512 fields, enough for a completed organism and its exact pre-work receipt in one owned result. Source, argument and record limits have exact-capacity and overflow gates; checkpoint encoding stays unchanged.
+
+## What's new in v5.11.0 — work returns to its owner
+
+- **Owned workers and typed results.** `SPAWN` captures prepared helpers and visible launch values; `AWAIT name INTO value` transfers a completed record or any other AML value. Joined slots are reusable, program exit drains children, and channel failures reach their caller. See [workers](docs/WORKERS.md).
+- **Exact record comparison.** `record_equal(left, right)` checks complete ordered contents, types, matrix shapes, text bytes and float32 bits without allocating. An organism can bind a completed job to its complete prepared experience. See [records](docs/RECORDS.md).
+- **Parliament numerical values through NoTorch.** `nt_parliament_elect`, `nt_parliament_inject` and `nt_oja` operate on caller-owned arrays through a separate optional backend table, preserving the original numerical C ABI. See [parliament values](docs/PARLIAMENT_VALUES.md).
+
+## What's new in v5.10.0 — memory names its states
+
+- **Exact fixed decimal text.** `text_fixed(value, digits)` gives finite float32 values stable decimal identities with 0–9 fractional places, nearest/ties-even rounding and preserved negative zero. Formatting is independent of locale and the process rounding mode. See [fixed text](docs/TEXT_FIXED.md).
+- **Room for growing organs.** Shared programs admit 256 function slots, including the 17 registered builtins: 239 user definitions. Exact-capacity and worker gates cover the enlarged table; preparation still rejects overflow before execution.
+
+## What's new in v5.9.0 — words keep their order
+
+- **Stable lexical list copies.** `list_sorted(words)` returns an independent container in ascending UTF-8 byte order, retaining duplicates and their original order. Haiku uses the primitive to carry its word-cloud rings in their original lexical order. See [lists](docs/LISTS.md).
+- **Complete expression boundaries.** Scalar expressions require closing delimiters and consume their whole argument. Unsupported operators and trailing syntax stop execution; comments and command argument boundaries retain their existing meaning.
+
+## What's new in v5.8.0 — experience survives the process
+
+- **Explicit records and portable checkpoints.** Flat typed records group independent mutable owners; detached load, staged replacement and allocation-free swap let AML validate an organism before publishing its state. Versioned, checksummed files preserve exact float32 bits, shapes and order through atomic rename. See [records and checkpoints](docs/RECORDS.md).
+- **Loaded model identity.** `tokenizer_identity(model)` returns the SHA-256 of the exact bytes consumed by NoTorch, so an organism can verify its hearing before resuming saved experience.
+
+## What's new in v5.7.0 — words reach the organism
+
+- **Immutable tokenizers through NoTorch.** `tokenizer_load` and `tokenizer_pieces` carry owned models through functions, persistent globals and workers, with source-relative loading and ordinary UTF-8 piece lists. NoTorch supplies deterministic SentencePiece Unigram inference. See [tokenizers](docs/TOKENIZER.md).
+- **Live text input and Unicode word boundaries.** `read_line` distinguishes blank input from EOF and exposes prompts before waiting. `codepoint_isalnum` supplies exact Unicode 15 Letter/Number membership for AML word-building modules. See [text input](docs/TEXT_INPUT.md).
+
+## What's new in v5.6.0 — experience reaches the weights
+
+- **Numerical values through NoTorch.** Linear layers, tanh, explicit reverse derivatives, mean squared error, plain SGD, and owned normal draws operate on ordinary AML arrays. AML composes the learning rule and owns publication; the optional bridge calls canonical NoTorch kernels without entering either runtime's global tape. See [numerical values](docs/NUMERICAL_VALUES.md).
+- **Unicode lowercase.** `text_lower` implements Unicode 15 default lowercase, including expanding `İ` and contextual Greek sigma. `isfinite` lets an AML organ handle nonfinite scalar observations explicitly. See [lowercase](docs/TEXT_LOWER.md).
+
+## What's new in v5.5.0 — each voice keeps its own chance
+
+- **Owned sampling through NoTorch.** `rng_new`, `rng_uniform`, `rng_index`, and `rng_categorical` carry a replayable stream in an ordinary numeric map. Copies, persistent globals, and worker snapshots retain their own state. `categorical_at` replays an explicit draw; positive-temperature weighting stays finite at extreme temperatures. The optional bridge calls canonical NoTorch arithmetic. See [sampling](docs/SAMPLING.md).
+- **Room for the organism.** Shared programs now admit 128 function slots and 4,096 expanded lines, enough for Haiku's combined memory, English form, and generator modules. Exceeded budgets still fail during preparation.
+
+## What's new in v5.4.0 — words carry their own weight
+
+- **Native numeric maps.** Ordered UTF-8 keys carry finite scalar values through typed calls, copied assignment, persistent globals, and worker snapshots. Eight `map_*` intrinsics provide hashed lookup, mutation, deletion, and ordered keys. `list_key` preserves exact composite identity; `assert` and `floor` give AML organs explicit preconditions and integer checks. Haiku uses them for growing word weights and transition counts. See [maps](docs/MAPS.md).
+
+## What's new in v5.3.0 — words gather into flocks
+
+- **Native string lists.** Eight `list_*` intrinsics collect UTF-8 values, preserve order and duplicates, and support exact lookup, checked indexing, mutation, and slicing. Assignment copies the container; function parameters share it. Workers and persistent globals receive independent containers with retained immutable text. `PRINT` emits JSON string arrays. See [lists](docs/LISTS.md).
+
+## What's new in v5.2.0 — the owl finds words
+
+- **Native shared modules.** `IMPORT "organs/pulse.aml"` prepares functions and globals in one program, deduplicates source files, and retains each module's origin. Missing sources, cycles, collisions, and source-budget failures stop preparation before effects. See [modules](docs/IMPORT.md).
+- **UTF-8 text values.** Immutable strings pass through variables, function arguments, returns, and the persistent host API. Eight text intrinsics provide codepoint operations; `PRINT` emits evaluated values. See [text](docs/TEXT.md).
+- **Worker ownership.** Spawned programs receive a snapshot of globals and release their own persistent store on exit. String references are atomic; a 12-worker stress gate covers 120,000 alias rebindings.
+- **Execution parity.** Bytecode skips compound bodies already executed by its interpreter fallback. Function arity and exhausted loop budgets fail explicitly. Haiku exercises these additions with 282 text reference values alongside its 130 numerical values.
+
+## What's new in v5.1.1 — Haiku finds its neighbours
+
+- **Compiled programs retain their source directory.** Relative and quoted `INCLUDE` paths resolve from the original AML file, including nested files and spawned blocks. A failing include stops its caller before C `main()`. Nested worker blocks keep their indentation.
+- **`amlc --scalar` keeps AML/NoTorch available without BLAS.** `--run` preserves literal arguments and returns the program's exit status; C compilation failures return failure too. See [AMLLOG](AMLLOG.md) for the regression checks.
+
+## What's new in v5.0.0 — Janus
+
+v5.0.0 makes the field physics real in compiled binaries and pays down the language's prophetic debts.
+
+- **Top-level directives now execute when compiled.** `amlc` used to silently skip top-level `PROPHECY` / `DESTINY` / `VELOCITY` / `FIELD` / `RESONANCE` / `LOAD` / `SAVE`, so a compiled `.aml` applied none of the field physics it declared. It now lowers them to `am_exec()` calls in a constructor, identical to the `aml` runner — every AML command maps to a concrete C operation again.
+- **`FIELD` and `RESONANCE` documented** — implemented in core but missing from the spec; now in §2.17, with the directive-lowering rule in §2.0.
+- **Honest claims** — the README no longer overstates "zero dependencies" (the core is pure C; Go inference, BLAS and CUDA are optional), and the "directives are no-ops without Janus" note is split — field directives apply standalone, only the model directives need the Janus backend.
+- **Portable `make janus`** — `janus/go.mod` no longer hardcodes a personal path; the `yent` Go engine resolves from its published module, and the standalone trainer/test stay out of the c-shared build.
+- **Janus is a family** — [`janus/README.md`](janus/README.md) frames Janus as an architecture *type* (DoE, Janus-R, Yent are kin), not a single model.
+
+509/509 tests green.
+
+## What's new in v4.8.0
+
+v4.8.0 is the documentation-unification release. This README now follows a fixed section skeleton — the standard for the repo — and the [C API](#c-api) block is verified line-for-line against `core/ariannamethod.h`. Code changes bundled since v4.7.2:
+
+- **Field persistence** — `am_field_save` / `am_field_load` and the top-level `LOAD` / `SAVE` AML directives. The whole `AM_State` is dumped to a binary `.soma` file (magic `AMSO`, version-checked), so inference organisms keep chambers, scars, prophecy debt, and calendar snapshots across runs. See [Field persistence](#field-persistence--load--save).
+- **CUDA install targets** — `make cuda` builds `libariannamethod_cuda.a`; `make install-cuda` places it system-wide so notorch, metaharmonix, and other organisms share one GPU-primitive backend instead of duplicating their own.
+- **GPU/CPU mirror correctness** — a backward-pass audit fixed 16 ops that read a stale CPU mirror after a GPU forward. The CUDA backend now passes the full suite.
+- **Termux edition** — `termux-edition/` carries the aarch64 setup and a BLAS pkg-config patch; AML builds and runs on Android phones via Termux.
+
