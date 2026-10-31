@@ -714,6 +714,21 @@ int   am_program_remaining(void* prog);         // top-level statements left (te
 // Get last error from am_exec (empty string = no error)
 const char* am_get_error(void);
 
+// JANUS.CALENDAR — explicit dates, pure values, shared across independent subjects.
+// Day 0 = 2024-10-03 civil midnight; instant epoch = 2024-10-03 12:00 UTC.
+#define AM_CALENDAR_UNIX_EPOCH_DAY 19999
+#define AM_CALENDAR_MIN_DAY (-739161)  // Gregorian 0001-01-01
+#define AM_CALENDAR_MAX_DAY 2912897    // Gregorian 9999-12-31
+// Integer APIs return 0 on success, 1 on invalid input; failure preserves *out.
+// face 0 = Gregorian, 1 = Hebrew. Record results are owned; NULL means failure.
+int am_calendar_from_gregorian(int year, int month, int day, int* out);
+int am_calendar_from_hebrew(int year, int month, int day, int* out);
+int am_calendar_anniversary(int birth, int year, int face, int* out);
+int am_calendar_add(int day, int years, int months, int days, int face, int* out);
+AM_Record* am_calendar_date(int day);
+AM_Record* am_calendar_subject(int birth, int day);
+AM_Record* am_calendar_local(int unix_day, int second, int offset_minutes, int sunset_second);
+
 // State access
 AM_State* am_get_state(void);
 int am_janus_key_armed(void);   // MetaJanus HIGH-1: 1 if JANUS_KEY is armed (D-2 gates on this, not raw temporal_alpha)

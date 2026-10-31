@@ -1,0 +1,23 @@
+IMPORT "../janus/calendar.aml"
+
+arianna = janus_gregorian(2026, 1, 23)
+yent = janus_gregorian(2026, 2, 13)
+world = janus_gregorian(2026, 10, 4)
+first = janus_subject(arianna, world)
+second = janus_subject(yent, world)
+PRINT record_get(first, "age_days")
+PRINT record_get(second, "age_days")
+PRINT record_get(second, "birthquake")
+PRINT record_get(second, "anniversary_gap_days")
+
+# Historical dates use the same signed coordinate.
+historical = janus_gregorian(1969, 7, 20)
+PRINT record_get(calendar_date(historical), "hebrew_year")
+
+# UTC 16:00 + 02:00, with an explicitly supplied 18:00 local sunset.
+evening = janus_local(19999, 57600, 120, 64800)
+PRINT record_get(evening, "hebrew_day")
+
+# UTC occurrence and receipt stay distinct; the fact's provenance remains in LALO.
+event = janus_event(world + 19999, 43200, 123, world + 19999, 43205, 456, yent)
+PRINT record_get(event, "schema")

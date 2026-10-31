@@ -24,3 +24,6 @@ janus_ckpt_step*.bin
 *.fdb_latexmk
 *.fls
 PROJECT_LOG.md
+
+# JANUS.CALENDAR native adapter
+janus/calendar-bridge

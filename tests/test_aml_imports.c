@@ -400,7 +400,9 @@ static void test_bytecode_types(void) {
                 am_free_compiled(compiled);
             }
             CHECK(rc != 0);
-            CHECK(strstr(am_get_error(), "scalar expression") != NULL);
+            // Typed array rejection can be reported before scalar extraction.
+            CHECK(strstr(am_get_error(), "scalar expression") != NULL ||
+                  strstr(am_get_error(), "array function could not produce a result:") != NULL);
             tension_is(0.125f);
         }
     }

@@ -1,0 +1,63 @@
+# JANUS.CALENDAR / 1. Pure composition over the canonical C intrinsics.
+# Dates use midnight civil ordinals; instant coordinates retain the noon epoch.
+
+def janus_today():
+    return calendar_date(utc_day() - 19999)
+
+def janus_gregorian(year, month, day):
+    return calendar_gregorian(year, month, day)
+
+def janus_hebrew(year, month, day):
+    return calendar_hebrew(year, month, day)
+
+def janus_subject(birth, day):
+    return calendar_subject(birth, day)
+
+def janus_distance(first, second):
+    calendar_date(first)
+    calendar_date(second)
+    return second - first
+
+def janus_compare(first, second):
+    delta = janus_distance(first, second)
+    if delta < 0:
+        return 1
+    if delta > 0:
+        return -1
+    return 0
+
+def janus_interval(first, last):
+    span = janus_distance(first, last)
+    assert(span >= 0, "interval end precedes start")
+    result = record_new()
+    record_set(result, "schema", "janus.interval/1")
+    record_set(result, "start_day", first)
+    record_set(result, "end_day", last)
+    record_set(result, "duration_days", span)
+    return result
+
+def janus_add(day, years, months, days, face):
+    return calendar_add(day, years, months, days, face)
+
+def janus_anniversary(birth, year, face):
+    return calendar_anniversary(birth, year, face)
+
+def janus_local(unix_day, second, offset, sunset):
+    return calendar_local(unix_day, second, offset, sunset)
+
+# Temporal annotation attached alongside a LALO assertion, with both clocks.
+# Seconds and milliseconds remain separate exact integers in AML.
+def janus_event(occur_day, occur_sec, occur_ms, known_day, known_sec, known_ms, birth):
+    calendar_local(occur_day, occur_sec, 0, -1)
+    calendar_local(known_day, known_sec, 0, -1)
+    assert(occur_ms == floor(occur_ms) and occur_ms >= 0 and occur_ms < 1000, "occurrence millisecond")
+    assert(known_ms == floor(known_ms) and known_ms >= 0 and known_ms < 1000, "knowledge millisecond")
+    result = calendar_subject(birth, occur_day - 19999)
+    record_set(result, "schema", "janus.event/1")
+    record_set(result, "occurred_unix_day", occur_day)
+    record_set(result, "occurred_second", occur_sec)
+    record_set(result, "occurred_millisecond", occur_ms)
+    record_set(result, "known_unix_day", known_day)
+    record_set(result, "known_second", known_sec)
+    record_set(result, "known_millisecond", known_ms)
+    return result

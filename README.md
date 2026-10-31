@@ -17,7 +17,7 @@
 
 <a href="https://deepwiki.com/ariannamethod/ariannamethod.ai"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
   
-**v5.13.1** · pure-C core · LGPL-3.0
+**v5.14.0** · pure-C core · LGPL-3.0
 
 A complete machine learning language. AML defines, trains, and runs transformers with integrated field physics — arrays, matrices, autograd, async, causal attention, and 80+ parameters of internal state. Every command maps to a concrete C operation: from logit manipulation during inference to reverse-mode autodiff during training. No Python. No PyTorch. No framework to install — the core is two C files (`libaml.a`); the Go inference wrapper, BLAS/Accelerate, and CUDA are optional.
 
@@ -160,6 +160,8 @@ The core library is two files — `core/ariannamethod.c` and `core/ariannamethod
 | `make test-workers` | owned launch snapshots, typed return lifetimes, reusable slots, drains, channel closure, and launch failures |
 | `make test-scalar-math` | independent `exp`/`log`/`tanh` reference values, rejected calls, and execution parity |
 | `make test-expressions` | complete expression boundaries, required delimiters, command arguments, and execution parity |
+| `make test-calendar` | shared calendar values, independent ICU dates, origins, recurrence, sunset and C/AML/JavaScript parity |
+| `make calendar-bridge` | optional native calendar transport for Node/browser hosts |
 | `make test-utc-day` | UTC midnight, leap days, signed day bounds, clock failures, captured workers, and execution parity |
 | `make test-imports` | shared modules, origins, snapshots, budgets, and failure propagation |
 | `make test-text` | UTF-8 ownership, allocation failures, typed execution, and compiled output |
@@ -324,6 +326,25 @@ High calendar dissonance = thin barrier between timelines = wormholes open.
 CALENDAR_DRIFT 11.0        # Hebrew-Gregorian drift intensity
 LAW WORMHOLE_GATE 0.3      # activation threshold
 ```
+
+### JANUS.CALENDAR
+
+A shared temporal system inside AML: exact Gregorian/Hebrew coordinates,
+independent personal origins, anniversaries, historical dates, calendar shifts,
+and explicit UTC/local/sunset boundaries. Native C functions and an importable
+AML module share the existing calendar arithmetic. Versioned JavaScript
+adapters call the same core. Both the legacy Metonic model and exact Hebrew
+face travel with their model identities.
+
+```aml
+IMPORT "janus/calendar.aml"
+birth = janus_gregorian(2026, 2, 13)
+view = janus_subject(birth, janus_gregorian(2026, 10, 4))
+PRINT record_get(view, "birthquake")
+```
+
+[Calendar API and lineage](docs/JANUS_CALENDAR.md) ·
+[LALO / AMOS 2 contract](docs/JANUS_CONSUMERS.md) · `make test-calendar`
 
 ### MetaJanus — self-location
 
@@ -1446,6 +1467,22 @@ const AM_Model* am_get_var_model(const char* name);
 int          am_set_var_record(const char* name, const AM_Record* record);
 const AM_Record* am_get_var_record(const char* name);
 void         am_persistent_clear(void);
+
+// ─── JANUS.CALENDAR — pure temporal values ────────────────────────────────
+// JANUS.CALENDAR — explicit dates, pure values, shared across independent subjects.
+// Day 0 = 2024-10-03 civil midnight; instant epoch = 2024-10-03 12:00 UTC.
+#define AM_CALENDAR_UNIX_EPOCH_DAY 19999
+#define AM_CALENDAR_MIN_DAY (-739161)  // Gregorian 0001-01-01
+#define AM_CALENDAR_MAX_DAY 2912897    // Gregorian 9999-12-31
+// Integer APIs return 0 on success, 1 on invalid input; failure preserves *out.
+// face 0 = Gregorian, 1 = Hebrew. Record results are owned; NULL means failure.
+int am_calendar_from_gregorian(int year, int month, int day, int* out);
+int am_calendar_from_hebrew(int year, int month, int day, int* out);
+int am_calendar_anniversary(int birth, int year, int face, int* out);
+int am_calendar_add(int day, int years, int months, int days, int face, int* out);
+AM_Record* am_calendar_date(int day);
+AM_Record* am_calendar_subject(int birth, int day);
+AM_Record* am_calendar_local(int unix_day, int second, int offset_minutes, int sunset_second);
 
 // ─── Inline queries ───────────────────────────────────────────────────────
 float       am_get_temperature(void);

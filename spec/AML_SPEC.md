@@ -1145,7 +1145,51 @@ serialization retains indentation relative to the first body line.
 
 ---
 
-## 11. Calendar Conflict Physics
+## 11. JANUS.CALENDAR and Calendar Conflict Physics
+
+JANUS.CALENDAR adds seven case-insensitive reserved value intrinsics:
+`calendar_gregorian(y,m,d)`, `calendar_hebrew(y,m,d)`, `calendar_date(day)`,
+`calendar_subject(birth,day)`, `calendar_local(unix_day,second,offset,sunset)`,
+`calendar_add(day,years,months,days,face)` and
+`calendar_anniversary(birth,year,face)`. They use typed expression dispatch,
+consume no registered function slots and share the core's existing calendar
+arithmetic. `face` is 0 for Gregorian and 1 for Hebrew.
+
+Day zero is midnight civil 2024-10-03, Unix day 19999. The Janus instant epoch
+remains **2024-10-03 12:00 UTC**. `calendar_local` explicitly returns both
+midnight civil and signed floor noon-epoch coordinates. The date domain is
+Gregorian 0001-01-01 through 9999-12-31. Each scalar argument must be a finite
+exact integer. Invalid input, out-of-domain recurrences and allocation failure
+produce runtime errors and preserve the assignment destination.
+
+`IMPORT "janus/calendar.aml"` loads ordinary AML composition: date wrappers,
+signed distance, ordering, half-open intervals, recurrence, shifts and two-clock
+flat event annotations. Paths follow the existing source-relative import
+contract. Dates and subject views are owned records and follow existing worker
+snapshot and checkpoint rules.
+
+`calendar_subject` evaluates an explicit birth/day pair without reading or
+changing the clock, bound `BIRTH` or `AM_State`. Existing bound origins remain
+immovable. Views expose both exact anniversaries (`hebrew.dr/1`) and the
+original approximate model (`metonic.legacy-trunc/1`), their raw gap and the
+model's day-to-day birthquake transition. Results include model identity.
+
+Local conversion takes an explicit UTC offset in minutes. `sunset=-1` chooses
+midnight; 0..86399 supplies that local date's sunset second and advances the
+Hebrew face at or after the boundary. The host resolves named timezone/DST and
+sunset location/source. Subject anniversaries retain MetaJanus's midnight
+origin policy. Gregorian anniversary February 29 becomes March 1 in a common
+year; date shifts clamp month-end days. Hebrew anniversaries use the existing
+Reingold yahrzeit rules.
+
+The complete native API, field definitions, arithmetic conventions, error
+contract, independent verification and lineage are in
+[JANUS_CALENDAR.md](../docs/JANUS_CALENDAR.md). The versioned Node/browser
+adapter and LALO/AMOS ownership boundary are described in
+[JANUS_CONSUMERS.md](../docs/JANUS_CONSUMERS.md).
+
+### Existing field conflict
+
 
 Hebrew lunar year (354 days) vs Gregorian solar year (365.25 days). Annual drift: 11.25 days. Metonic cycle: 19 years, 7 leap years with Adar II (~30 days).
 
