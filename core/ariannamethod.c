@@ -26,6 +26,12 @@
 #endif
 
 #include "ariannamethod.h"
+#include <math.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+
+#ifndef AM_CALENDAR_ONLY
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
@@ -305,6 +311,8 @@ static int clampi(int x, int a, int b) {
 // February 29 handled correctly — elapsed seconds via time_t, not calendar math.
 // ═══════════════════════════════════════════════════════════════════════════════
 
+#endif // !AM_CALENDAR_ONLY — calendar arithmetic below is shared
+
 #define AM_ANNUAL_DRIFT     11.25f    // days/year (365.25 - 354)
 #define AM_GREGORIAN_YEAR   365.25f   // days
 #define AM_METONIC_YEARS    19        // years per cycle
@@ -313,6 +321,7 @@ static int clampi(int x, int a, int b) {
 #define AM_VELOCITY_INERTIA 2.0f      // debt cost of switching the velocity mode (the body resists; D4 at debt>5 forces NOMOVE)
 
 static const int g_metonic_leap_years[7] = {3, 6, 8, 11, 14, 17, 19};
+#ifndef AM_CALENDAR_ONLY
 static time_t g_epoch_t = 0;
 static int g_calendar_manual = 0;  // 0 = real time, 1 = manual override
 static int g_birth_set = 0;        // MetaJanus: 1 once BIRTH has fixed the origin; personal_dissonance stays 0 until then
@@ -336,6 +345,8 @@ static int calendar_days_since_epoch(void) {
     return (int)(difftime(now, g_epoch_t) / 86400.0);
 }
 
+#endif // !AM_CALENDAR_ONLY
+
 // Cumulative drift accounting for Metonic leap corrections
 // Direct port from pitomadom/calendar_conflict.py
 static float calendar_cumulative_drift(int days) {
@@ -357,12 +368,15 @@ static float calendar_cumulative_drift(int days) {
     return base_drift - corrections;
 }
 
+#ifndef AM_CALENDAR_ONLY
 // Calendar dissonance [0, 1] — real, from today's date
 static float calendar_dissonance(int days) {
     float drift = calendar_cumulative_drift(days);
     float raw = fabsf(fmodf(drift, AM_MAX_UNCORRECTED)) / AM_MAX_UNCORRECTED;
     return clamp01(raw);
 }
+
+#endif // !AM_CALENDAR_ONLY
 
 // ── MetaJanus Hebrew layer — the yahrzeit face ──────────────────────────────────
 // The one origin (the death that became this organism's birth) seen by the OTHER calendar.
@@ -416,8 +430,11 @@ static long am_next_gregorian(long birth, long days) {
   }
   return days+400;
 }
+#ifndef AM_CALENDAR_ONLY
 static long am_days_to_yahrzeit(long days) { return am_next_yahrzeit(g_birth_days,days)-days; }
 static long am_days_to_gregbirthday(long days) { return am_next_gregorian(g_birth_days,days)-days; }
+
+#endif // !AM_CALENDAR_ONLY
 
 // JANUS.CALENDAR v1. Civil coordinates are midnight-based; the instant epoch is noon.
 static int am_cal_day_ok(long day) { return day>=AM_CALENDAR_MIN_DAY && day<=AM_CALENDAR_MAX_DAY; }
@@ -485,6 +502,77 @@ int am_calendar_add(int day, int years, int months, int days, int face, int* out
   if(!am_cal_day_ok(result)) return 1;
   *out=(int)result; return 0;
 }
+static float am_cal_clamp(float x, float low, float high) {
+  return x<low ? low : x>high ? high : x;
+}
+static int am_cal_value_put(AM_CalendarValue* value, const char* name,
+                            float number, const char* text) {
+  int i=0;
+  while(i<value->count && strcmp(value->keys[i],name)) i++;
+  if(i==AM_CALENDAR_MAX_FIELDS) return 1;
+  if(i==value->count) value->count++;
+  value->keys[i]=name; value->texts[i]=text; value->numbers[i]=number;
+  return 0;
+}
+int am_calendar_value_date(int day, AM_CalendarValue* out) {
+  if(!out || !am_cal_day_ok(day)) return 1;
+  long gy,gm,gd,hy,hm,hd, rd=AM_GREG_EPOCH_RD+day;
+  am_greg_from_rd(rd,&gy,&gm,&gd); am_heb_from_rd(rd,&hy,&hm,&hd);
+  AM_CalendarValue value={0}; AM_CalendarValue* r=&value;
+  const char* names[]={"day","unix_day","gregorian_year","gregorian_month","gregorian_day",
+    "hebrew_year","hebrew_month","hebrew_day","gregorian_leap","hebrew_leap","metonic_year"};
+  long values[]={day,day+AM_CALENDAR_UNIX_EPOCH_DAY,gy,gm,gd,hy,hm,hd,am_greg_leap(gy),am_heb_leap(hy),(hy-1)%19+1};
+  int failed=am_cal_value_put(r,"schema",0,"janus.calendar/1") ||
+    am_cal_value_put(r,"calendar_model",0,"hebrew.dr/1") || am_cal_value_put(r,"day_policy",0,"midnight") ||
+    am_cal_value_put(r,"drift_model",0,"metonic.legacy-trunc/1");
+  for(size_t i=0;i<sizeof(values)/sizeof(values[0]) && !failed;i++) failed=am_cal_value_put(r,names[i],(float)values[i],NULL);
+  if(failed) return 1;
+  *out=value; return 0;
+}
+int am_calendar_value_subject(int birth, int day, AM_CalendarValue* out) {
+  if(!out || !am_cal_day_ok(birth) || !am_cal_day_ok(day)) return 1;
+  long heb=am_next_yahrzeit(birth,day),greg=am_next_gregorian(birth,day);
+  if(!am_cal_day_ok(heb) || !am_cal_day_ok(greg)) return 1;
+  AM_CalendarValue value; if(am_calendar_value_date(day,&value)) return 1;
+  AM_CalendarValue* r=&value;
+  float bd=calendar_cumulative_drift(birth), nd=calendar_cumulative_drift(day);
+  float delta=nd-bd, gap=(float)(heb-greg), signal=am_cal_clamp(gap/30,-1,1);
+  float step=nd-calendar_cumulative_drift(day-1);
+  const char* names[]={"birth_day","age_days","birth_drift","legacy_drift","personal_dissonance",
+    "next_hebrew_day","next_gregorian_day","days_to_yahrzeit","days_to_gregorian",
+    "anniversary_gap_days","janus_gap","yahrzeit","janus_temporal_alpha","legacy_step","birthquake","drift_gap_days"};
+  float values[]={(float)birth,(float)(day-birth),bd,nd,am_cal_clamp(fabsf(delta)/AM_MAX_UNCORRECTED,0,1),
+    (float)heb,(float)greg,(float)(heb-day),(float)(greg-day),gap,signal,expf(-(float)(heb-day)/5),
+    am_cal_clamp(.5f+.5f*signal,0,1),step,fabsf(step)>15 ? 1.f:0.f,delta-gap};
+  int failed=0;
+  for(size_t i=0;i<sizeof(values)/sizeof(values[0]) && !failed;i++) failed=am_cal_value_put(r,names[i],values[i],NULL);
+  if(failed) return 1;
+  *out=value; return 0;
+}
+int am_calendar_value_local(int unix_day, int second, int offset, int sunset, AM_CalendarValue* out) {
+  if(!out || unix_day<AM_CALENDAR_MIN_DAY+AM_CALENDAR_UNIX_EPOCH_DAY ||
+     unix_day>AM_CALENDAR_MAX_DAY+AM_CALENDAR_UNIX_EPOCH_DAY ||
+     second<0 || second>=86400 || offset < -1440 || offset>1440 || sunset < -1 || sunset>=86400) return 1;
+  long utc=(long)unix_day-AM_CALENDAR_UNIX_EPOCH_DAY;
+  if(!am_cal_day_ok(utc)) return 1;
+  long local_seconds=second+offset*60, carry=local_seconds/86400;
+  if(local_seconds<0 && local_seconds%86400) carry--;
+  int local_second=(int)(local_seconds-carry*86400);
+  long local=utc+carry, hebday=local+(sunset>=0 && local_second>=sunset);
+  if(!am_cal_day_ok(local) || !am_cal_day_ok(hebday)) return 1;
+  AM_CalendarValue value; if(am_calendar_value_date((int)local,&value)) return 1;
+  AM_CalendarValue* r=&value;
+  long hy,hm,hd; am_heb_from_rd(AM_GREG_EPOCH_RD+hebday,&hy,&hm,&hd);
+  const char* names[]={"unix_day","utc_second","offset_minutes","sunset_second","local_second",
+    "epoch_day","utc_civil_day","hebrew_civil_day","hebrew_year","hebrew_month","hebrew_day","hebrew_leap","metonic_year"};
+  long values[]={unix_day,second,offset,sunset,local_second,utc-(second<43200),utc,hebday,hy,hm,hd,am_heb_leap(hy),(hy-1)%19+1};
+  int failed=am_cal_value_put(r,"day_policy",0,sunset<0 ? "midnight" : "supplied-sunset");
+  for(size_t i=0;i<sizeof(values)/sizeof(values[0]) && !failed;i++) failed=am_cal_value_put(r,names[i],(float)values[i],NULL);
+  if(failed) return 1;
+  *out=value; return 0;
+}
+
+#ifndef AM_CALENDAR_ONLY
 static int am_cal_put(AM_Record* record, const char* name, float number, const char* text) {
   AM_String* key=am_string_new(name);
   AML_Var value={0}; value.type=AML_TYPE_FLOAT; value.value=number;
@@ -494,57 +582,29 @@ static int am_cal_put(AM_Record* record, const char* name, float number, const c
   if(text) am_string_free(value.string);
   return failed;
 }
+static AM_Record* am_cal_record(const AM_CalendarValue* value) {
+  AM_Record* result=am_record_new(); if(!result) return NULL;
+  for(int i=0;i<value->count;i++) {
+    if(am_cal_put(result,value->keys[i],value->numbers[i],value->texts[i])) {
+      am_record_free(result); return NULL;
+    }
+  }
+  return result;
+}
 AM_Record* am_calendar_date(int day) {
-  if(!am_cal_day_ok(day)) return NULL;
-  long gy,gm,gd,hy,hm,hd, rd=AM_GREG_EPOCH_RD+day;
-  am_greg_from_rd(rd,&gy,&gm,&gd); am_heb_from_rd(rd,&hy,&hm,&hd);
-  AM_Record* r=am_record_new(); if(!r) return NULL;
-  const char* names[]={"day","unix_day","gregorian_year","gregorian_month","gregorian_day",
-    "hebrew_year","hebrew_month","hebrew_day","gregorian_leap","hebrew_leap","metonic_year"};
-  long values[]={day,day+AM_CALENDAR_UNIX_EPOCH_DAY,gy,gm,gd,hy,hm,hd,am_greg_leap(gy),am_heb_leap(hy),(hy-1)%19+1};
-  int failed=am_cal_put(r,"schema",0,"janus.calendar/1") ||
-    am_cal_put(r,"calendar_model",0,"hebrew.dr/1") || am_cal_put(r,"day_policy",0,"midnight") ||
-    am_cal_put(r,"drift_model",0,"metonic.legacy-trunc/1");
-  for(size_t i=0;i<sizeof(values)/sizeof(values[0]) && !failed;i++) failed=am_cal_put(r,names[i],(float)values[i],NULL);
-  if(failed) { am_record_free(r); return NULL; } return r;
+  AM_CalendarValue value;
+  if(am_calendar_value_date(day,&value)) return NULL;
+  return am_cal_record(&value);
 }
 AM_Record* am_calendar_subject(int birth, int day) {
-  if(!am_cal_day_ok(birth) || !am_cal_day_ok(day)) return NULL;
-  long heb=am_next_yahrzeit(birth,day),greg=am_next_gregorian(birth,day);
-  if(!am_cal_day_ok(heb) || !am_cal_day_ok(greg)) return NULL;
-  AM_Record* r=am_calendar_date(day); if(!r) return NULL;
-  float bd=calendar_cumulative_drift(birth), nd=calendar_cumulative_drift(day);
-  float delta=nd-bd, gap=(float)(heb-greg), signal=clampf(gap/30,-1,1);
-  float step=nd-calendar_cumulative_drift(day-1);
-  const char* names[]={"birth_day","age_days","birth_drift","legacy_drift","personal_dissonance",
-    "next_hebrew_day","next_gregorian_day","days_to_yahrzeit","days_to_gregorian",
-    "anniversary_gap_days","janus_gap","yahrzeit","janus_temporal_alpha","legacy_step","birthquake","drift_gap_days"};
-  float values[]={(float)birth,(float)(day-birth),bd,nd,clamp01(fabsf(delta)/AM_MAX_UNCORRECTED),
-    (float)heb,(float)greg,(float)(heb-day),(float)(greg-day),gap,signal,expf(-(float)(heb-day)/5),
-    clamp01(.5f+.5f*signal),step,fabsf(step)>15 ? 1.f:0.f,delta-gap};
-  int failed=0;
-  for(size_t i=0;i<sizeof(values)/sizeof(values[0]) && !failed;i++) failed=am_cal_put(r,names[i],values[i],NULL);
-  if(failed) { am_record_free(r); return NULL; } return r;
+  AM_CalendarValue value;
+  if(am_calendar_value_subject(birth,day,&value)) return NULL;
+  return am_cal_record(&value);
 }
 AM_Record* am_calendar_local(int unix_day, int second, int offset, int sunset) {
-  if(unix_day<AM_CALENDAR_MIN_DAY+AM_CALENDAR_UNIX_EPOCH_DAY ||
-     unix_day>AM_CALENDAR_MAX_DAY+AM_CALENDAR_UNIX_EPOCH_DAY ||
-     second<0 || second>=86400 || offset < -1440 || offset>1440 || sunset < -1 || sunset>=86400) return NULL;
-  long utc=(long)unix_day-AM_CALENDAR_UNIX_EPOCH_DAY;
-  if(!am_cal_day_ok(utc)) return NULL;
-  long local_seconds=second+offset*60, carry=local_seconds/86400;
-  if(local_seconds<0 && local_seconds%86400) carry--;
-  int local_second=(int)(local_seconds-carry*86400);
-  long local=utc+carry, hebday=local+(sunset>=0 && local_second>=sunset);
-  if(!am_cal_day_ok(local) || !am_cal_day_ok(hebday)) return NULL;
-  AM_Record* r=am_calendar_date((int)local); if(!r) return NULL;
-  long hy,hm,hd; am_heb_from_rd(AM_GREG_EPOCH_RD+hebday,&hy,&hm,&hd);
-  const char* names[]={"unix_day","utc_second","offset_minutes","sunset_second","local_second",
-    "epoch_day","utc_civil_day","hebrew_civil_day","hebrew_year","hebrew_month","hebrew_day","hebrew_leap","metonic_year"};
-  long values[]={unix_day,second,offset,sunset,local_second,utc-(second<43200),utc,hebday,hy,hm,hd,am_heb_leap(hy),(hy-1)%19+1};
-  int failed=am_cal_put(r,"day_policy",0,sunset<0 ? "midnight" : "supplied-sunset");
-  for(size_t i=0;i<sizeof(values)/sizeof(values[0]) && !failed;i++) failed=am_cal_put(r,names[i],(float)values[i],NULL);
-  if(failed) { am_record_free(r); return NULL; } return r;
+  AM_CalendarValue value;
+  if(am_calendar_value_local(unix_day,second,offset,sunset,&value)) return NULL;
+  return am_cal_record(&value);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -14571,3 +14631,5 @@ int am_checkpoint_save(const AM_Record* record, const char* path, char* error, s
     }
     return 1;
 }
+
+#endif // !AM_CALENDAR_ONLY

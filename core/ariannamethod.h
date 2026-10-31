@@ -18,6 +18,35 @@
 #ifndef ARIANNAMETHOD_H
 #define ARIANNAMETHOD_H
 
+// Shared allocation-free calendar boundary, also available to AM_CALENDAR_ONLY.
+#define AM_CALENDAR_UNIX_EPOCH_DAY 19999
+#define AM_CALENDAR_MIN_DAY (-739161)  // Gregorian 0001-01-01
+#define AM_CALENDAR_MAX_DAY 2912897    // Gregorian 9999-12-31
+#define AM_CALENDAR_MAX_FIELDS 40
+typedef struct {
+    int count;
+    const char* keys[AM_CALENDAR_MAX_FIELDS];
+    const char* texts[AM_CALENDAR_MAX_FIELDS]; // NULL selects the numeric leaf
+    float numbers[AM_CALENDAR_MAX_FIELDS];
+} AM_CalendarValue;
+#ifdef __cplusplus
+extern "C" {
+#endif
+int am_calendar_from_gregorian(int year, int month, int day, int* out);
+int am_calendar_from_hebrew(int year, int month, int day, int* out);
+int am_calendar_anniversary(int birth, int year, int face, int* out);
+int am_calendar_add(int day, int years, int months, int days, int face, int* out);
+// Borrowed static keys/text; the caller owns the struct. Failure preserves *out.
+int am_calendar_value_date(int day, AM_CalendarValue* out);
+int am_calendar_value_subject(int birth, int day, AM_CalendarValue* out);
+int am_calendar_value_local(int unix_day, int second, int offset, int sunset,
+                            AM_CalendarValue* out);
+#ifdef __cplusplus
+}
+#endif
+
+#ifndef AM_CALENDAR_ONLY
+
 #include <stdlib.h>  // for rand(), RAND_MAX
 #include <stdint.h>  // for ordered-map hashes
 #include <stdio.h>   // for checked UTF-8 line input
@@ -716,15 +745,8 @@ const char* am_get_error(void);
 
 // JANUS.CALENDAR — explicit dates, pure values, shared across independent subjects.
 // Day 0 = 2024-10-03 civil midnight; instant epoch = 2024-10-03 12:00 UTC.
-#define AM_CALENDAR_UNIX_EPOCH_DAY 19999
-#define AM_CALENDAR_MIN_DAY (-739161)  // Gregorian 0001-01-01
-#define AM_CALENDAR_MAX_DAY 2912897    // Gregorian 9999-12-31
 // Integer APIs return 0 on success, 1 on invalid input; failure preserves *out.
 // face 0 = Gregorian, 1 = Hebrew. Record results are owned; NULL means failure.
-int am_calendar_from_gregorian(int year, int month, int day, int* out);
-int am_calendar_from_hebrew(int year, int month, int day, int* out);
-int am_calendar_anniversary(int birth, int year, int face, int* out);
-int am_calendar_add(int day, int years, int months, int days, int face, int* out);
 AM_Record* am_calendar_date(int day);
 AM_Record* am_calendar_subject(int birth, int day);
 AM_Record* am_calendar_local(int unix_day, int second, int offset_minutes, int sunset_second);
@@ -1481,5 +1503,7 @@ void am_persistent_clear(void);
 
 // Compiled script execution — parse once, execute many
 
+
+#endif // !AM_CALENDAR_ONLY
 
 #endif // ARIANNAMETHOD_H

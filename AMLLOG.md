@@ -12,6 +12,49 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-11-01 — JANUS.CALENDAR runs autonomously in the browser (v5.14.1)
+
+Audit baseline: `80c33a9`, the merged calendar implementation. The browser
+adapter used a native/HTTP host; calendar result construction was coupled to
+owned AML record allocation. Calendar arithmetic itself was already pure.
+
+Add an allocation-free `AM_CalendarValue` boundary to the existing two-file C
+kernel. Gregorian/Hebrew conversion, shifts, anniversaries, legacy drift and
+MetaJanus values retain one implementation. The ordinary AML record constructors
+copy those shared values; `AM_CALENDAR_ONLY` builds the same calendar section
+without the language runtime's system functions. BIRTH, result fields and the
+seven language intrinsics retain their contracts.
+
+A thin version-1 WASM bridge exposes per-instance results. The canonical C
+calendar compiles to **7,363 bytes**, with **zero host imports** and fixed
+**128 KiB** memory. `janus/calendar_browser.mjs` embeds it in a **15,236-byte**
+module; `janus/calendar-offline.html` is a complete **16,714-byte** local-file
+example. `bundledCalendar()` supplies the existing async calendar interface.
+The transport preserves the native nine-digit/ties-to-even JSON number values,
+including decimal midpoint cases encountered by the parity fixtures.
+
+`make calendar-wasm` uses the official WASI SDK; SDK 34.0 / clang 23.1.0 was
+verified. Source and WASM SHA-256 identities travel in the bundle. A second
+build reproduced all three generated files byte-for-byte. `make install`
+includes the browser module, source adapter and self-contained HTML.
+
+Verification: `make test-calendar-wasm` passes both 18-check pure-value C builds,
+6,587 native Gregorian/ICU witnesses through WASM, 337 exact full-value/native
+comparisons across all seven operations, invalid-call recovery, independent
+instances and 25,000 calls without memory growth. Seven JS gates include
+execution of the complete inline HTML module with network and clock functions
+disabled, changed date inputs and invalid-date feedback. `make test-calendar`
+passes 55,180 C checks and 174 allocation failure/success boundaries with zero
+retained allocations. The allocation-free API also passes AddressSanitizer and
+UndefinedBehaviorSanitizer (`detect_leaks=0`). The 550 baseline tests and full
+imports, UTC-day, records/checkpoints, expressions, workers and amlc suites pass.
+Installed browser files match their sources.
+
+Direct visual opening of the local HTML was blocked by the cloud browser's
+file-URL policy. The complete inline-module test above records the executable
+offline result; a live browser rendering is unverified in this environment.
+
+
 ## 2026-11-01 — JANUS.CALENDAR / 1 (v5.14.0)
 
 Expose the existing Gregorian/Hebrew arithmetic through seven typed native

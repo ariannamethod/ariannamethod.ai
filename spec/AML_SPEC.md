@@ -1182,6 +1182,13 @@ origin policy. Gregorian anniversary February 29 becomes March 1 in a common
 year; date shifts clamp month-end days. Hebrew anniversaries use the existing
 Reingold yahrzeit rules.
 
+The same calendar calculations compile with `AM_CALENDAR_ONLY` into an
+allocation-free native or standalone WebAssembly component. Ordinary record
+constructors and the WASM bridge share `AM_CalendarValue` results.
+`janus/calendar_browser.mjs` embeds the binary and exposes `bundledCalendar()`
+for fully local browser execution; the seven AML intrinsics keep their existing
+names and behavior. This adds a deployment path to JANUS.CALENDAR.
+
 The complete native API, field definitions, arithmetic conventions, error
 contract, independent verification and lineage are in
 [JANUS_CALENDAR.md](../docs/JANUS_CALENDAR.md). The versioned Node/browser
