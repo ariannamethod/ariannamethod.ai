@@ -90,6 +90,7 @@ install: all
 	install -m 0755 tools/amlc $(PREFIX)/bin/amlc
 	install -d $(PREFIX)/share/ariannamethod/janus
 	install -m 0644 janus/calendar.aml $(PREFIX)/share/ariannamethod/janus/calendar.aml
+	install -m 0644 janus/calendar.mjs janus/calendar_wasm.mjs janus/calendar_browser.mjs janus/calendar-offline.html $(PREFIX)/share/ariannamethod/janus/
 	install -m 0644 libaml.a $(PREFIX)/lib/libaml.a
 	install -m 0644 core/ariannamethod.h $(PREFIX)/include/ariannamethod/ariannamethod.h
 
@@ -130,6 +131,13 @@ janus/calendar-bridge: janus/calendar_bridge.c libaml.a core/ariannamethod.h
 
 test-calendar: all calendar-bridge
 	bash tests/test_aml_calendar.sh
+
+.PHONY: calendar-wasm test-calendar-wasm
+calendar-wasm:
+	node tools/build_calendar_wasm.mjs
+
+test-calendar-wasm: all calendar-bridge
+	bash tests/test_aml_calendar_wasm.sh
 
 test-utc-day: all
 	bash tests/test_aml_utc_day.sh
@@ -220,4 +228,4 @@ test-janus-loaders: libaml.a
 # ═══ Clean ═══
 clean:
 	rm -f core/*.o core/test_aml core/test_aml_blas libaml.a libaml_notorch.a runner/aml runner/aml-notorch tools/amlc
-	rm -f janus/calendar-bridge janus/libjanus.dylib janus/libjanus.h janus/test_janus_c
+	rm -f janus/calendar.wasm janus/calendar-bridge janus/libjanus.dylib janus/libjanus.h janus/test_janus_c

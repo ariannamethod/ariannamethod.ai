@@ -27,3 +27,6 @@ PROJECT_LOG.md
 
 # JANUS.CALENDAR native adapter
 janus/calendar-bridge
+
+# Regenerable standalone WASM; the browser bundle embeds these same bytes.
+janus/calendar.wasm

@@ -168,6 +168,59 @@ Record operations return an owned `AM_Record*` or NULL; release with
 `am_record_free`. The functions require no `am_init`, model backend or clock.
 They share the same calendar helpers used by the bound MetaJanus fields.
 
+### Autonomous C/WASM browser calendar
+
+`janus/calendar_browser.mjs` is a ready-to-use module containing the calendar
+binary and its adapter. Its `bundledCalendar()` creates a calendar with the
+same seven operations as the native transport:
+
+```js
+import { bundledCalendar } from './janus/calendar_browser.mjs';
+const calendar = await bundledCalendar();
+const view = await calendar.subject(498, 731);
+```
+
+The complete module can be embedded in an inline HTML module script. The
+ready-made `janus/calendar-offline.html` demonstrates that form: one local
+file, including the binary, with no external requests. The shipped bundle
+requires no compiler, model, server, filesystem or clock at execution time.
+
+`AM_CALENDAR_ONLY` compiles the shared calendar section of
+`core/ariannamethod.c`. Its allocation-free C boundary is `AM_CalendarValue`
+and `am_calendar_value_date/subject/local`. Keys and text borrow static C
+strings; each caller owns its fixed-size result struct. Failed calls preserve
+the output. The ordinary AML record constructors convert the same values into
+owned records. All existing language function names, result field order and
+model identities remain available.
+
+The thin `calendar_wasm.c` bridge provides ABI version 1 and a per-instance
+request/result slot. Its 7,363-byte binary has **zero WebAssembly imports** and
+fixed 128 KiB memory. The JS transport copies every returned leaf before the
+next request and publishes the native transport's nine-significant-digit,
+round-to-nearest/ties-to-even number representation. Each calendar instance
+owns its own WASM instance.
+
+Rebuild with the official [WASI SDK](https://github.com/WebAssembly/wasi-sdk):
+
+```sh
+WASI_SDK_PATH=/path/to/wasi-sdk make calendar-wasm
+make test-calendar-wasm
+```
+
+The verified toolchain is WASI SDK 34.0, clang 23.1.0. `WASM_CC` may select a
+compatible compiler with a WASI sysroot. Build flags select `wasm32-wasip1`,
+`-Oz`, disabled floating-point contraction and a fixed memory bound. The build
+rejects a module with host imports. Generated modules carry source and binary
+SHA-256 identities; the tests reject stale source stamps. A second build with
+the same SDK reproduces the binary, module and HTML bytes. `make install`
+includes the source module, WASM adapter, embedded browser bundle and HTML.
+
+The source adapter `calendar_wasm.mjs` also accepts supplied bytes or an already
+compiled `WebAssembly.Module` through `wasmCalendar(bytes)` and
+`wasmTransport(bytes)`. `bundledBytes()` exposes the shipped binary.
+
+### Optional native and HTTP transports
+
 ```sh
 make calendar-bridge
 ./janus/calendar-bridge subject 498 731
@@ -180,9 +233,9 @@ that executable. The optional HTTP handler mounts at `/calendar` on the
 consumer's origin; the standalone command binds to 127.0.0.1. Browser
 `calendar.mjs` calls the handler through `httpTransport`. A host can inject
 its own transport into `createCalendar` with the same versioned response.
-Calendar algorithms remain in the AML kernel. The browser adapter requires
-an explicitly provided host transport. Existing standalone consumer execution
-continues under the consumer's integration contract.
+Calendar algorithms remain in the AML kernel. The HTTP adapter uses an
+explicit host transport; `bundledCalendar()` runs the same calculations locally
+through the embedded WASM. Consumer integration follows its own contract.
 
 ```js
 import { nativeCalendar } from './janus/calendar_native.mjs';
@@ -199,7 +252,7 @@ const view = await calendar.subject(498, 731);
 
 ## Verification
 
-`make test-calendar` runs 55,180 C checks and 190 allocation failure/success
+`make test-calendar` runs 55,180 C checks and 174 allocation failure/success
 boundaries with zero retained allocations; compares 6,587 date pairs with
 ECMAScript UTC Gregorian arithmetic and ICU's independent Hebrew calendar;
 checks all yahrzeit rule branches against ICU date searches; exercises the
@@ -213,6 +266,15 @@ Epoch/birth values are independently calculated from UTC dates: day 0,
 Arianna day 477, Yent day 498, and Fable's 730→731 transition. At world day
 731, independent ICU search puts Yent's next Hebrew anniversary on day **853**;
 its Gregorian counterpart is day **863**. The raw gap is **−10 days**.
+
+`make test-calendar-wasm` additionally checks the allocation-free API in the
+full and calendar-only C builds, all 6,587 independent date witnesses through
+WASM, 337 full-value comparisons over all seven native/WASM operations,
+rejection/recovery, independent instance ownership and 25,000 calls with fixed
+memory. The standalone HTML contains the complete bundle and no external
+scripts. The complete inline module is executed in an isolated JavaScript context
+with network and clock functions disabled. Direct visual opening of the local
+HTML was blocked by the cloud browser's file-URL policy.
 
 ## Lineage and source receipts
 

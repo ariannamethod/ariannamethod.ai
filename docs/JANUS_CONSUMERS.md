@@ -52,13 +52,18 @@ acquired memory, glyph identities, recurrent states, forecasts, random streams
 and historical receipts. Calendar fields arrive as structured observations;
 the consumer's acquired learning determines what they mean to the subject.
 
-The browser adapter is `janus/calendar.mjs`. Its `createCalendar(transport)`
-contract is asynchronous and versioned. A host may provide the same-origin
-HTTP handler from `calendar_native.mjs`, or inject another transport to the
-canonical C API. The current browser path requires that explicit host. A
-standalone AMOS file continues without temporal enrichment when the adapter
-is unavailable. Preserve any already acquired temporal observations across
-that continuation.
+The browser entry is `janus/calendar_browser.mjs`. `await bundledCalendar()`
+provides the versioned, asynchronous calendar API locally from embedded C/WASM.
+To keep AMOS as one HTML file, embed this complete generated module into its
+inline module script, as demonstrated by `janus/calendar-offline.html`. Retain
+its source/binary identities with the integration. Calendar computation then
+needs no server, model, network request or extra file at execution time.
+
+`calendar.mjs` still supplies `createCalendar(transport)`. Hosts may also use
+the native or same-origin HTTP transport from `calendar_native.mjs`, or supply
+WASM bytes to `calendar_wasm.mjs`. The calendar API is shared across those
+transports. A standalone AMOS file retains its acquired temporal observations
+when an optional adapter is disabled or unavailable.
 
 Proposed consumer verification: unchanged disabled behavior; same fact read
 with distinct subject origins; correction and historical-query receipts;

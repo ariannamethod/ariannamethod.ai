@@ -17,7 +17,7 @@
 
 <a href="https://deepwiki.com/ariannamethod/ariannamethod.ai"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
   
-**v5.14.0** · pure-C core · LGPL-3.0
+**v5.14.1** · pure-C core · LGPL-3.0
 
 A complete machine learning language. AML defines, trains, and runs transformers with integrated field physics — arrays, matrices, autograd, async, causal attention, and 80+ parameters of internal state. Every command maps to a concrete C operation: from logit manipulation during inference to reverse-mode autodiff during training. No Python. No PyTorch. No framework to install — the core is two C files (`libaml.a`); the Go inference wrapper, BLAS/Accelerate, and CUDA are optional.
 
@@ -161,6 +161,8 @@ The core library is two files — `core/ariannamethod.c` and `core/ariannamethod
 | `make test-scalar-math` | independent `exp`/`log`/`tanh` reference values, rejected calls, and execution parity |
 | `make test-expressions` | complete expression boundaries, required delimiters, command arguments, and execution parity |
 | `make test-calendar` | shared calendar values, independent ICU dates, origins, recurrence, sunset and C/AML/JavaScript parity |
+| `make calendar-wasm` | rebuild the standalone C/WASM browser bundle (WASI SDK) |
+| `make test-calendar-wasm` | native/WASM parity, closed ABI, independent dates, ownership and embedded HTML |
 | `make calendar-bridge` | optional native calendar transport for Node/browser hosts |
 | `make test-utc-day` | UTC midnight, leap days, signed day bounds, clock failures, captured workers, and execution parity |
 | `make test-imports` | shared modules, origins, snapshots, budgets, and failure propagation |
@@ -335,6 +337,10 @@ and explicit UTC/local/sunset boundaries. Native C functions and an importable
 AML module share the existing calendar arithmetic. Versioned JavaScript
 adapters call the same core. Both the legacy Metonic model and exact Hebrew
 face travel with their model identities.
+The [browser bundle](janus/calendar_browser.mjs) embeds the canonical calendar
+as **7,363 bytes of WASM with zero host imports**. Open
+[calendar-offline.html](janus/calendar-offline.html) as one local file, or call
+`bundledCalendar()` from the module. Calendar computation runs entirely locally.
 
 ```aml
 IMPORT "janus/calendar.aml"
@@ -1480,6 +1486,10 @@ int am_calendar_from_gregorian(int year, int month, int day, int* out);
 int am_calendar_from_hebrew(int year, int month, int day, int* out);
 int am_calendar_anniversary(int birth, int year, int face, int* out);
 int am_calendar_add(int day, int years, int months, int days, int face, int* out);
+int am_calendar_value_date(int day, AM_CalendarValue* out);
+int am_calendar_value_subject(int birth, int day, AM_CalendarValue* out);
+int am_calendar_value_local(int unix_day, int second, int offset, int sunset,
+                            AM_CalendarValue* out);
 AM_Record* am_calendar_date(int day);
 AM_Record* am_calendar_subject(int birth, int day);
 AM_Record* am_calendar_local(int unix_day, int second, int offset_minutes, int sunset_second);
