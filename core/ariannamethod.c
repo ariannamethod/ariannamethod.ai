@@ -371,7 +371,7 @@ static float calendar_dissonance(int days) {
 #define AM_GREG_EPOCH_RD  739162L      // RD of 2024-10-03 (the kernel calendar epoch, noon)
 static int  am_heb_leap(long y){ return ((7*y+1)%19) < 7; }
 static long am_heb_last_month(long y){ return am_heb_leap(y) ? 13 : 12; }
-static long am_heb_elapsed(long y){ long mo=(235*y-234)/19; long pa=12084+13753*mo; long d=29*mo+pa/25920; if((3*(d+1))%7<3) d++; return d; }
+static long am_heb_elapsed(long y){ long mo=(235*y-234)/19; int64_t pa=12084+INT64_C(13753)*mo; long d=29*mo+(long)(pa/25920); if((3*(d+1))%7<3) d++; return d; }
 static long am_heb_corr(long y){ long a=am_heb_elapsed(y-1),b=am_heb_elapsed(y),c=am_heb_elapsed(y+1); if(c-b==356) return 2; if(b-a==382) return 1; return 0; }
 static long am_heb_new_year(long y){ return AM_HEB_EPOCH + am_heb_elapsed(y) + am_heb_corr(y); }
 static long am_heb_year_days(long y){ return am_heb_new_year(y+1) - am_heb_new_year(y); }
@@ -395,10 +395,157 @@ static long am_yahrzeit_rd(long bY, long bM, long bD, long hyear){
     return am_heb_to_rd(hyear, 11, 30);
   return am_heb_to_rd(hyear, bM, bD);                     // default: same (month,day); day-30 in a short month overflows to the 1st next, per the book
 }
-// days from `days` (since epoch) to the next yahrzeit of the origin (g_birth_days) at-or-after `days`.
-static long am_days_to_yahrzeit(long days){ long brd=AM_GREG_EPOCH_RD+g_birth_days; long bY,bM,bD; am_heb_from_rd(brd,&bY,&bM,&bD); long rd=AM_GREG_EPOCH_RD+days; long nY,nM,nD; am_heb_from_rd(rd,&nY,&nM,&nD); (void)nM;(void)nD; for(long i=-1;i<=2;i++){ long a=am_yahrzeit_rd(bY,bM,bD,nY+i); if(a>=rd) return a-rd; } return 400; }
-// days from `days` to the next Gregorian (month,day) of the origin. Feb-29 origin -> Mar 1 in common years.
-static long am_days_to_gregbirthday(long days){ long brd=AM_GREG_EPOCH_RD+g_birth_days; long bY,bM,bD; am_greg_from_rd(brd,&bY,&bM,&bD); long rd=AM_GREG_EPOCH_RD+days; long nY,nM,nD; am_greg_from_rd(rd,&nY,&nM,&nD); (void)nM;(void)nD; for(long i=0;i<=1;i++){ long a=am_greg_to_rd(nY+i,bM,bD); if(a>=rd) return a-rd; } return 400; }
+// The origin is explicit so independent subjects share the same calendar arithmetic.
+static long am_next_yahrzeit(long birth, long days) {
+  long bY,bM,bD,nY,nM,nD, rd=AM_GREG_EPOCH_RD+days;
+  am_heb_from_rd(AM_GREG_EPOCH_RD+birth,&bY,&bM,&bD);
+  am_heb_from_rd(rd,&nY,&nM,&nD);
+  for (long i=-1;i<=2;i++) {
+    long a=am_yahrzeit_rd(bY,bM,bD,nY+i);
+    if(a>=rd) return a-AM_GREG_EPOCH_RD;
+  }
+  return days+400;
+}
+static long am_next_gregorian(long birth, long days) {
+  long bY,bM,bD,nY,nM,nD, rd=AM_GREG_EPOCH_RD+days;
+  am_greg_from_rd(AM_GREG_EPOCH_RD+birth,&bY,&bM,&bD);
+  am_greg_from_rd(rd,&nY,&nM,&nD);
+  for (long i=0;i<=1;i++) {
+    long a=am_greg_to_rd(nY+i,bM,bD);
+    if(a>=rd) return a-AM_GREG_EPOCH_RD;
+  }
+  return days+400;
+}
+static long am_days_to_yahrzeit(long days) { return am_next_yahrzeit(g_birth_days,days)-days; }
+static long am_days_to_gregbirthday(long days) { return am_next_gregorian(g_birth_days,days)-days; }
+
+// JANUS.CALENDAR v1. Civil coordinates are midnight-based; the instant epoch is noon.
+static int am_cal_day_ok(long day) { return day>=AM_CALENDAR_MIN_DAY && day<=AM_CALENDAR_MAX_DAY; }
+static int am_cal_greg_month(long y, long m) {
+  static const int lengths[]={31,28,31,30,31,30,31,31,30,31,30,31};
+  return lengths[m-1]+(m==2 && am_greg_leap(y));
+}
+int am_calendar_from_gregorian(int y, int m, int d, int* out) {
+  if(!out || y<1 || y>9999 || m<1 || m>12 || d<1 || d>am_cal_greg_month(y,m)) return 1;
+  *out=(int)(am_greg_to_rd(y,m,d)-AM_GREG_EPOCH_RD); return 0;
+}
+int am_calendar_from_hebrew(int y, int m, int d, int* out) {
+  if(!out || y<1 || y>13761 || m<1 || m>am_heb_last_month(y) || d<1 || d>am_heb_last_day(y,m)) return 1;
+  long day=am_heb_to_rd(y,m,d)-AM_GREG_EPOCH_RD;
+  if(!am_cal_day_ok(day)) return 1;
+  *out=(int)day; return 0;
+}
+int am_calendar_anniversary(int birth, int year, int face, int* out) {
+  if(!out || !am_cal_day_ok(birth) || (face!=0 && face!=1)) return 1;
+  long y,m,d,rd;
+  if(face==0) {
+    if(year<1 || year>9999) return 1;
+    am_greg_from_rd(AM_GREG_EPOCH_RD+birth,&y,&m,&d);
+    rd=am_greg_to_rd(year,m,d); // Feb 29 overflows to March 1 in a common year.
+  } else {
+    if(year<1 || year>13761) return 1;
+    am_heb_from_rd(AM_GREG_EPOCH_RD+birth,&y,&m,&d);
+    rd=am_yahrzeit_rd(y,m,d,year);
+  }
+  long day=rd-AM_GREG_EPOCH_RD;
+  if(!am_cal_day_ok(day)) return 1;
+  *out=(int)day; return 0;
+}
+int am_calendar_add(int day, int years, int months, int days, int face, int* out) {
+  if(!out || !am_cal_day_ok(day) || years < -9999 || years>9999 ||
+     months < -120000 || months>120000 || days < -4000000 || days>4000000 || (face!=0 && face!=1)) return 1;
+  long y,m,d;
+  if(face==0) {
+    am_greg_from_rd(AM_GREG_EPOCH_RD+day,&y,&m,&d);
+    long index=(y-1+years)*12+(m-1)+months;
+    if(index<0 || index>=9999*12) return 1;
+    y=index/12+1; m=index%12+1;
+    if(d>am_cal_greg_month(y,m)) d=am_cal_greg_month(y,m);
+    day=(int)(am_greg_to_rd(y,m,d)-AM_GREG_EPOCH_RD);
+  } else {
+    am_heb_from_rd(AM_GREG_EPOCH_RD+day,&y,&m,&d);
+    y+=years;
+    if(y<1 || y>13761) return 1;
+    if(m>am_heb_last_month(y)) m=am_heb_last_month(y);
+    // Chronological month order is Tishrei..Adar, Nisan..Elul.
+    long index=(235*y-234)/19+(m>=7 ? m-7 : am_heb_last_month(y)-6+m-1)+months;
+    if(index<0 || index>170300) return 1;
+    y=index/13+1;
+    while((235*(y+1)-234)/19<=index) y++;
+    while((235*y-234)/19>index) y--;
+    long position=index-(235*y-234)/19;
+    m=7+position;
+    if(m>am_heb_last_month(y)) m-=am_heb_last_month(y);
+    if(d>am_heb_last_day(y,m)) d=am_heb_last_day(y,m);
+    long result=am_heb_to_rd(y,m,d)-AM_GREG_EPOCH_RD;
+    if(!am_cal_day_ok(result)) return 1;
+    day=(int)result;
+  }
+  long result=(long)day+days;
+  if(!am_cal_day_ok(result)) return 1;
+  *out=(int)result; return 0;
+}
+static int am_cal_put(AM_Record* record, const char* name, float number, const char* text) {
+  AM_String* key=am_string_new(name);
+  AML_Var value={0}; value.type=AML_TYPE_FLOAT; value.value=number;
+  if(text) { value.type=AML_TYPE_STRING; value.string=am_string_new(text); }
+  int failed=!key || (text && !value.string) || am_record_set(record,key,&value);
+  am_string_free(key);
+  if(text) am_string_free(value.string);
+  return failed;
+}
+AM_Record* am_calendar_date(int day) {
+  if(!am_cal_day_ok(day)) return NULL;
+  long gy,gm,gd,hy,hm,hd, rd=AM_GREG_EPOCH_RD+day;
+  am_greg_from_rd(rd,&gy,&gm,&gd); am_heb_from_rd(rd,&hy,&hm,&hd);
+  AM_Record* r=am_record_new(); if(!r) return NULL;
+  const char* names[]={"day","unix_day","gregorian_year","gregorian_month","gregorian_day",
+    "hebrew_year","hebrew_month","hebrew_day","gregorian_leap","hebrew_leap","metonic_year"};
+  long values[]={day,day+AM_CALENDAR_UNIX_EPOCH_DAY,gy,gm,gd,hy,hm,hd,am_greg_leap(gy),am_heb_leap(hy),(hy-1)%19+1};
+  int failed=am_cal_put(r,"schema",0,"janus.calendar/1") ||
+    am_cal_put(r,"calendar_model",0,"hebrew.dr/1") || am_cal_put(r,"day_policy",0,"midnight") ||
+    am_cal_put(r,"drift_model",0,"metonic.legacy-trunc/1");
+  for(size_t i=0;i<sizeof(values)/sizeof(values[0]) && !failed;i++) failed=am_cal_put(r,names[i],(float)values[i],NULL);
+  if(failed) { am_record_free(r); return NULL; } return r;
+}
+AM_Record* am_calendar_subject(int birth, int day) {
+  if(!am_cal_day_ok(birth) || !am_cal_day_ok(day)) return NULL;
+  long heb=am_next_yahrzeit(birth,day),greg=am_next_gregorian(birth,day);
+  if(!am_cal_day_ok(heb) || !am_cal_day_ok(greg)) return NULL;
+  AM_Record* r=am_calendar_date(day); if(!r) return NULL;
+  float bd=calendar_cumulative_drift(birth), nd=calendar_cumulative_drift(day);
+  float delta=nd-bd, gap=(float)(heb-greg), signal=clampf(gap/30,-1,1);
+  float step=nd-calendar_cumulative_drift(day-1);
+  const char* names[]={"birth_day","age_days","birth_drift","legacy_drift","personal_dissonance",
+    "next_hebrew_day","next_gregorian_day","days_to_yahrzeit","days_to_gregorian",
+    "anniversary_gap_days","janus_gap","yahrzeit","janus_temporal_alpha","legacy_step","birthquake","drift_gap_days"};
+  float values[]={(float)birth,(float)(day-birth),bd,nd,clamp01(fabsf(delta)/AM_MAX_UNCORRECTED),
+    (float)heb,(float)greg,(float)(heb-day),(float)(greg-day),gap,signal,expf(-(float)(heb-day)/5),
+    clamp01(.5f+.5f*signal),step,fabsf(step)>15 ? 1.f:0.f,delta-gap};
+  int failed=0;
+  for(size_t i=0;i<sizeof(values)/sizeof(values[0]) && !failed;i++) failed=am_cal_put(r,names[i],values[i],NULL);
+  if(failed) { am_record_free(r); return NULL; } return r;
+}
+AM_Record* am_calendar_local(int unix_day, int second, int offset, int sunset) {
+  if(unix_day<AM_CALENDAR_MIN_DAY+AM_CALENDAR_UNIX_EPOCH_DAY ||
+     unix_day>AM_CALENDAR_MAX_DAY+AM_CALENDAR_UNIX_EPOCH_DAY ||
+     second<0 || second>=86400 || offset < -1440 || offset>1440 || sunset < -1 || sunset>=86400) return NULL;
+  long utc=(long)unix_day-AM_CALENDAR_UNIX_EPOCH_DAY;
+  if(!am_cal_day_ok(utc)) return NULL;
+  long local_seconds=second+offset*60, carry=local_seconds/86400;
+  if(local_seconds<0 && local_seconds%86400) carry--;
+  int local_second=(int)(local_seconds-carry*86400);
+  long local=utc+carry, hebday=local+(sunset>=0 && local_second>=sunset);
+  if(!am_cal_day_ok(local) || !am_cal_day_ok(hebday)) return NULL;
+  AM_Record* r=am_calendar_date((int)local); if(!r) return NULL;
+  long hy,hm,hd; am_heb_from_rd(AM_GREG_EPOCH_RD+hebday,&hy,&hm,&hd);
+  const char* names[]={"unix_day","utc_second","offset_minutes","sunset_second","local_second",
+    "epoch_day","utc_civil_day","hebrew_civil_day","hebrew_year","hebrew_month","hebrew_day","hebrew_leap","metonic_year"};
+  long values[]={unix_day,second,offset,sunset,local_second,utc-(second<43200),utc,hebday,hy,hm,hd,am_heb_leap(hy),(hy-1)%19+1};
+  int failed=am_cal_put(r,"day_policy",0,sunset<0 ? "midnight" : "supplied-sunset");
+  for(size_t i=0;i<sizeof(values)/sizeof(values[0]) && !failed;i++) failed=am_cal_put(r,names[i],(float)values[i],NULL);
+  if(failed) { am_record_free(r); return NULL; } return r;
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SCHUMANN RESONANCE — Earth-ionosphere coupling
@@ -3820,6 +3967,13 @@ static int aml_transport_function(const char* name) {
            !strcasecmp(name, "file_size") || !strcasecmp(name, "file_read_slice");
 }
 
+static int aml_calendar_function(const char* name) {
+    static const char* names[]={"calendar_gregorian","calendar_hebrew","calendar_date",
+      "calendar_subject","calendar_local","calendar_add","calendar_anniversary"};
+    for(size_t i=0;i<sizeof(names)/sizeof(names[0]);i++) if(!strcasecmp(name,names[i])) return 1;
+    return 0;
+}
+
 static int aml_scalar_intrinsic_function(const char* name) {
     return strcasecmp(name, "assert") == 0 || strcasecmp(name, "floor") == 0 ||
            strcasecmp(name, "isfinite") == 0 || strcasecmp(name, "utc_day") == 0 ||
@@ -5025,6 +5179,38 @@ static int aml_map_dispatch(AML_ExecCtx* ctx, const char* name, AML_Var* args,
     return 0;
 }
 
+static int aml_calendar_dispatch(AML_ExecCtx* ctx, const char* name,
+                                  AML_Var* args, int nargs, AML_Var* out) {
+    int need=3;
+    if(!strcasecmp(name,"calendar_date")) need=1;
+    else if(!strcasecmp(name,"calendar_subject")) need=2;
+    else if(!strcasecmp(name,"calendar_local")) need=4;
+    else if(!strcasecmp(name,"calendar_add")) need=5;
+    if(nargs!=need) { set_error(ctx,"wrong number of calendar arguments"); return 1; }
+    int a[5]={0};
+    for(int i=0;i<nargs;i++) {
+      if(args[i].type!=AML_TYPE_FLOAT || !isfinite(args[i].value) ||
+         fabsf(args[i].value)>16777216 || truncf(args[i].value)!=args[i].value) {
+        set_error(ctx,"calendar arguments must be exact scalar integers"); return 1;
+      }
+      a[i]=(int)args[i].value;
+    }
+    int result=0,rc=0;
+    if(!strcasecmp(name,"calendar_gregorian")) rc=am_calendar_from_gregorian(a[0],a[1],a[2],&result);
+    else if(!strcasecmp(name,"calendar_hebrew")) rc=am_calendar_from_hebrew(a[0],a[1],a[2],&result);
+    else if(!strcasecmp(name,"calendar_add")) rc=am_calendar_add(a[0],a[1],a[2],a[3],a[4],&result);
+    else if(!strcasecmp(name,"calendar_anniversary")) rc=am_calendar_anniversary(a[0],a[1],a[2],&result);
+    else {
+      if(!strcasecmp(name,"calendar_date")) out->record=am_calendar_date(a[0]);
+      else if(!strcasecmp(name,"calendar_subject")) out->record=am_calendar_subject(a[0],a[1]);
+      else out->record=am_calendar_local(a[0],a[1],a[2],a[3]);
+      if(out->record) { out->type=AML_TYPE_RECORD; return 0; }
+      rc=1;
+    }
+    if(rc) { set_error(ctx,"calendar date, recurrence or allocation outside contract"); return 1; }
+    out->value=(float)result; return 0;
+}
+
 static int aml_scalar_intrinsic_dispatch(AML_ExecCtx* ctx, const char* name,
                                          AML_Var* args, int nargs, AML_Var* out) {
     if (!strcasecmp(name, "exp") || !strcasecmp(name, "log") || !strcasecmp(name, "tanh")) {
@@ -5676,6 +5862,7 @@ static int aml_invoke_value(AML_ExecCtx* ctx, const char* name,
     else if (aml_map_function(name)) rc = aml_map_dispatch(ctx, name, args, nargs, out);
     else if (aml_record_function(name)) rc = aml_record_dispatch(ctx, name, args, nargs, out);
     else if (aml_transport_function(name)) rc = aml_transport_dispatch(ctx, name, args, nargs, out);
+    else if (aml_calendar_function(name)) rc = aml_calendar_dispatch(ctx, name, args, nargs, out);
     else if (aml_scalar_intrinsic_function(name)) rc = aml_scalar_intrinsic_dispatch(ctx, name, args, nargs, out);
     else if (aml_sampling_function(name)) rc = aml_sampling_dispatch(ctx, name, args, nargs, out);
     else if (aml_numerical_function(name)) rc = aml_numerical_dispatch(ctx, name, args, nargs, out);
@@ -5785,7 +5972,7 @@ static float expr_primary(AML_Expr* e) {
         // function call
         if (*e->p == '(') {
             if (e->ctx && (aml_text_function(name) || aml_list_function(name) ||
-                           aml_map_function(name) || aml_scalar_intrinsic_function(name) ||
+                           aml_map_function(name) || aml_calendar_function(name) || aml_scalar_intrinsic_function(name) ||
                            aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) || aml_model_function(name) || aml_record_function(name) || aml_transport_function(name) ||
                            aml_array_scalar_function(name) || aml_field_function(name) ||
                            aml_value_function(e->ctx, name))) {
@@ -6048,7 +6235,7 @@ static int aml_eval_value(AML_ExecCtx* ctx, const char* text, AML_Var* out) {
             }
         }
         if (*p == '(' && (aml_text_function(name) || aml_list_function(name) ||
-                          aml_map_function(name) || aml_scalar_intrinsic_function(name) ||
+                          aml_map_function(name) || aml_calendar_function(name) || aml_scalar_intrinsic_function(name) ||
                           aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) || aml_model_function(name) || aml_record_function(name) || aml_transport_function(name) ||
                           aml_array_scalar_function(name) || aml_field_function(name) ||
                           aml_value_function(ctx, name))) {
@@ -7740,6 +7927,7 @@ static int aml_find_block_end(AML_Line* lines, int nlines, int start) {
 static int aml_exec_block(AML_ExecCtx* ctx, int start, int end);
 
 static int aml_reserved_function(const char* name) {
+    if(aml_calendar_function(name)) return 1;
     static const char* names[] = {
         "abs", "min", "max", "sqrt", "clamp", "len", "sum", "dot", "rows", "cols",
         "zeros", "randn", "add", "mul", "scale", "matrix", "matrix_zeros", "matvec",
@@ -9518,7 +9706,7 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
              !strcasecmp(name, "abs") || !strcasecmp(name, "min") || !strcasecmp(name, "max") ||
              !strcasecmp(name, "sqrt") || !strcasecmp(name, "clamp") ||
              aml_array_function(name) ||
-             aml_map_function(name) || aml_scalar_intrinsic_function(name) ||
+             aml_map_function(name) || aml_calendar_function(name) || aml_scalar_intrinsic_function(name) ||
              aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) || aml_model_function(name) || aml_record_function(name) || aml_transport_function(name) ||
              aml_array_scalar_function(name) || aml_field_function(name))) {
             AML_Var value = {0};

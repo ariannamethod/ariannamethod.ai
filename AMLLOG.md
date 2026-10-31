@@ -12,6 +12,42 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-11-01 — JANUS.CALENDAR / 1 (v5.14.0)
+
+Expose the existing Gregorian/Hebrew arithmetic through seven typed native
+intrinsics and `janus/calendar.aml`. Independent origins, historical signed
+coordinates, calendar shifts, anniversaries, explicit UTC/noon/local/sunset
+boundaries and two-clock event annotations now share the AML kernel. Preserve
+the original Metonic model with its own identity, raw anniversary gap,
+birthquake transition and named difference. The bound BIRTH and AM_State layout
+remain intact. Parameterize the existing anniversary helpers by birth so bound
+fields and pure views use one implementation; widen Hebrew molad-part
+intermediates for the complete checked date domain on 32-bit-long hosts.
+
+Add native and HTTP JavaScript transports, a runnable AML example, focused
+specification and consumer/lineage documents. `make install` includes the AML
+module. Consumer repositories remain untouched.
+
+Verification: `make test-calendar` passes 55,180 C checks, 6,587 independent
+Gregorian/ICU date witnesses, 71 imported AML reference samples through the
+interpreter/prepared/bytecode/compiled paths, worker/checkpoint replay, three
+host timezones and seven JavaScript adapter/recurrence tests. ICU independently
+finds Yent's next Hebrew anniversary after day 731 on day 853, Gregorian on
+863; their raw gap is −10. Epoch 0, origins 477/498 and the 730→731 birthquake
+are independently date-verified. The allocation ledger covers 190 construction
+failure/success boundaries with zero retained owners. AddressSanitizer and
+UndefinedBehaviorSanitizer pass with `ASAN_OPTIONS=detect_leaks=0`; ownership is
+checked by the allocation ledger. LeakSanitizer itself cannot inspect this
+host's process tasks.
+
+Regression checks: 550 baseline tests, UTC day, records/checkpoints, expressions,
+workers and amlc pass. The import suite's stale typed-array diagnostic
+expectation also failed on unmodified `b932a09`; update that assertion to accept
+the existing array-result error as well as scalar-extraction errors, retaining
+its refusal and no-later-effects checks. The full import suite then passes.
+See `docs/JANUS_CALENDAR.md` for the audit.
+
+
 ## 2026-10-27 — The README returns to its essence
 
 Sixteen "What's new" sections (v4.8.0 → v5.13.1, 90 lines) moved out of README.md
