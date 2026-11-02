@@ -3,12 +3,12 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
-import { createCalendar, validateRequest } from './calendar.mjs';
+import { createCalendar, validateRequest, encodeRequest } from './calendar.mjs';
 const execute = promisify(execFile);
 export function nativeTransport(binary = fileURLToPath(new URL('./calendar-bridge', import.meta.url))) {
   return async request => {
-    validateRequest(request);
-    const { stdout } = await execute(binary, [request.op, ...request.args.map(String)], {
+    const encoded=encodeRequest(request);
+    const { stdout } = await execute(binary, [request.op, ...encoded.args.map(String)], {
       timeout:5000, maxBuffer:65536, encoding:'utf8',
     });
     return JSON.parse(stdout);

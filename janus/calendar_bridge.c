@@ -15,49 +15,37 @@ static void json_string(const char* s) {
     }
     putchar('"');
 }
-static int json_record(AM_Record* r) {
-    AM_List* keys=am_record_keys(r); if(!keys) return 1;
+static void json_value(const AM_CalendarValue* value) {
     putchar('{');
-    for(int i=0;i<keys->len;i++) {
+    for(int i=0;i<value->count;i++) {
         if(i) putchar(',');
-        json_string(keys->items[i]->data); putchar(':');
-        const AML_Var* v=am_record_get(r,keys->items[i]);
-        if(v->type==AML_TYPE_STRING) json_string(v->string->data);
-        else printf("%.9g",v->value);
+        json_string(value->keys[i]);putchar(':');
+        if(value->texts[i]) json_string(value->texts[i]);
+        else printf("%.9g",value->numbers[i]);
     }
-    putchar('}'); am_list_free(keys); return 0;
+    putchar('}');
 }
-int main(int argc, char** argv) {
+int main(int argc,char** argv) {
+    static const char* names[]={"gregorian","hebrew","date","subject","local","add","anniversary",
+      "instant","compare","duration","duration_new","shift","span","contains","overlaps","intersection"};
     if(argc<2) return 2;
-    int a[5]={0},n=argc-2,need=-1;
-    const char* op=argv[1];
-    if(!strcmp(op,"gregorian") || !strcmp(op,"hebrew") || !strcmp(op,"anniversary")) need=3;
-    else if(!strcmp(op,"date")) need=1;
-    else if(!strcmp(op,"subject")) need=2;
-    else if(!strcmp(op,"local")) need=4;
-    else if(!strcmp(op,"add")) need=5;
-    if(n!=need) { fputs("invalid calendar operation or arity\n",stderr); return 2; }
+    int op=-1,a[AM_CALENDAR_MAX_ARGS]={0},n=argc-2;
+    for(int i=0;i<AM_CAL_OPERATION_COUNT;i++) if(!strcmp(argv[1],names[i]))op=i;
+    if(n!=am_calendar_argument_count(op) || n<0 || n>AM_CALENDAR_MAX_ARGS) {
+        fputs("invalid calendar operation or arity\n",stderr);return 2;
+    }
     for(int i=0;i<n;i++) {
-        char* end; errno=0; long v=strtol(argv[i+2],&end,10);
-        if(errno || !argv[i+2][0] || *end || v < -16777216 || v>16777216) {
-            fputs("calendar arguments must be exact integers\n",stderr); return 2;
+        char* end;errno=0;long value=strtol(argv[i+2],&end,10);
+        if(errno || !argv[i+2][0] || *end || value < -16777216 || value>16777216) {
+            fputs("calendar arguments must be exact integers\n",stderr);return 2;
         }
-        a[i]=(int)v;
+        a[i]=(int)value;
     }
-    AM_Record* r=NULL; int value=0,rc=0,record=0;
-    if(!strcmp(op,"gregorian")) rc=am_calendar_from_gregorian(a[0],a[1],a[2],&value);
-    else if(!strcmp(op,"hebrew")) rc=am_calendar_from_hebrew(a[0],a[1],a[2],&value);
-    else if(!strcmp(op,"anniversary")) rc=am_calendar_anniversary(a[0],a[1],a[2],&value);
-    else if(!strcmp(op,"add")) rc=am_calendar_add(a[0],a[1],a[2],a[3],a[4],&value);
-    else {
-        record=1;
-        if(!strcmp(op,"date")) r=am_calendar_date(a[0]);
-        else if(!strcmp(op,"subject")) r=am_calendar_subject(a[0],a[1]);
-        else r=am_calendar_local(a[0],a[1],a[2],a[3]);
-        rc=!r;
+    AM_CalendarReply reply;
+    if(am_calendar_query(op,a,n,&reply)) {
+        fputs("calendar date, moment or interval outside contract\n",stderr);return 2;
     }
-    if(rc) { fputs("calendar date, recurrence or allocation outside contract\n",stderr); return 2; }
     fputs("{\"api\":\"janus.calendar/1\",\"value\":",stdout);
-    rc=record ? json_record(r) : (printf("%d",value),0);
-    fputs("}\n",stdout); am_record_free(r); return rc;
+    if(reply.kind==1) printf("%d",reply.scalar);else json_value(&reply.value);
+    fputs("}\n",stdout);return 0;
 }

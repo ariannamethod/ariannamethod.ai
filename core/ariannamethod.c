@@ -572,6 +572,129 @@ int am_calendar_value_local(int unix_day, int second, int offset, int sunset, AM
   *out=value; return 0;
 }
 
+// Exact POSIX moments. Large totals stay inside C int64_t; AML sees split values.
+#define AM_CAL_DAY_MS INT64_C(86400000)
+static int am_cal_instant_ok(const int* a) {
+  return a[0]>=AM_CALENDAR_MIN_DAY+AM_CALENDAR_UNIX_EPOCH_DAY &&
+         a[0]<=AM_CALENDAR_MAX_DAY+AM_CALENDAR_UNIX_EPOCH_DAY &&
+         a[1]>=0 && a[1]<86400 && a[2]>=0 && a[2]<1000;
+}
+static int64_t am_cal_milliseconds(const int* a) {
+  return (int64_t)a[0]*AM_CAL_DAY_MS+(int64_t)a[1]*1000+a[2];
+}
+static int am_cal_duration_ok(const int* a) {
+  if(a[1]<0 || a[1]>AM_CALENDAR_MAX_DAY-AM_CALENDAR_MIN_DAY ||
+     a[2]<0 || a[2]>=86400 || a[3]<0 || a[3]>=1000) return 0;
+  return (a[1] || a[2] || a[3]) ? (a[0]==-1 || a[0]==1) : a[0]==0;
+}
+static int am_cal_span_ok(const int* a) {
+  return am_cal_instant_ok(a) && am_cal_instant_ok(a+3) &&
+    am_cal_milliseconds(a)<=am_cal_milliseconds(a+3);
+}
+static int am_cal_instant_value(const int* a, AM_CalendarValue* out) {
+  if(!am_cal_instant_ok(a)) return 1;
+  AM_CalendarValue v={0};
+  int failed=am_cal_value_put(&v,"schema",0,"janus.instant/1") ||
+    am_cal_value_put(&v,"time_scale",0,"posix") ||
+    am_cal_value_put(&v,"unix_day",(float)a[0],NULL) ||
+    am_cal_value_put(&v,"second",(float)a[1],NULL) ||
+    am_cal_value_put(&v,"millisecond",(float)a[2],NULL);
+  if(failed) return 1;
+  *out=v; return 0;
+}
+static int am_cal_duration_value(int64_t delta, AM_CalendarValue* out) {
+  int sign=delta<0 ? -1 : delta>0 ? 1 : 0;
+  int64_t magnitude=delta<0 ? -delta : delta;
+  AM_CalendarValue v={0};
+  int failed=am_cal_value_put(&v,"schema",0,"janus.duration/1") ||
+    am_cal_value_put(&v,"time_scale",0,"posix") ||
+    am_cal_value_put(&v,"sign",(float)sign,NULL) ||
+    am_cal_value_put(&v,"days",(float)(magnitude/AM_CAL_DAY_MS),NULL) ||
+    am_cal_value_put(&v,"seconds",(float)((magnitude%AM_CAL_DAY_MS)/1000),NULL) ||
+    am_cal_value_put(&v,"milliseconds",(float)(magnitude%1000),NULL);
+  if(failed) return 1;
+  *out=v; return 0;
+}
+static int am_cal_span_value(const int* a, AM_CalendarValue* out) {
+  if(!am_cal_span_ok(a)) return 1;
+  AM_CalendarValue v={0};
+  static const char* keys[]={"start_unix_day","start_second","start_millisecond",
+    "end_unix_day","end_second","end_millisecond"};
+  int failed=am_cal_value_put(&v,"schema",0,"janus.span/1") ||
+    am_cal_value_put(&v,"time_scale",0,"posix");
+  for(int i=0;i<6 && !failed;i++) failed=am_cal_value_put(&v,keys[i],(float)a[i],NULL);
+  if(failed) return 1;
+  *out=v; return 0;
+}
+int am_calendar_argument_count(int operation) {
+  static const int counts[]={3,3,1,2,4,5,3,3,6,6,4,7,6,9,12,12};
+  return operation>=0 && operation<AM_CAL_OPERATION_COUNT ? counts[operation] : -1;
+}
+int am_calendar_query(int operation, const int* args, int count, AM_CalendarReply* out) {
+  if(!args || !out || count!=am_calendar_argument_count(operation) || count<0) return 1;
+  for(int i=0;i<count;i++) if(args[i]<-16777216 || args[i]>16777216) return 1;
+  AM_CalendarReply reply={0}; reply.kind=2;
+  int rc=1;
+  switch(operation) {
+  case AM_CAL_GREGORIAN:
+    reply.kind=1;rc=am_calendar_from_gregorian(args[0],args[1],args[2],&reply.scalar);break;
+  case AM_CAL_HEBREW:
+    reply.kind=1;rc=am_calendar_from_hebrew(args[0],args[1],args[2],&reply.scalar);break;
+  case AM_CAL_DATE: rc=am_calendar_value_date(args[0],&reply.value);break;
+  case AM_CAL_SUBJECT: rc=am_calendar_value_subject(args[0],args[1],&reply.value);break;
+  case AM_CAL_LOCAL: rc=am_calendar_value_local(args[0],args[1],args[2],args[3],&reply.value);break;
+  case AM_CAL_ADD:
+    reply.kind=1;rc=am_calendar_add(args[0],args[1],args[2],args[3],args[4],&reply.scalar);break;
+  case AM_CAL_ANNIVERSARY:
+    reply.kind=1;rc=am_calendar_anniversary(args[0],args[1],args[2],&reply.scalar);break;
+  case AM_CAL_INSTANT: rc=am_cal_instant_value(args,&reply.value);break;
+  case AM_CAL_DURATION_NEW:
+    if(!am_cal_duration_ok(args)) return 1;
+    rc=am_cal_duration_value(args[0]*((int64_t)args[1]*AM_CAL_DAY_MS+(int64_t)args[2]*1000+args[3]),&reply.value);break;
+  case AM_CAL_COMPARE:
+  case AM_CAL_DURATION: {
+    if(!am_cal_instant_ok(args) || !am_cal_instant_ok(args+3)) return 1;
+    int64_t first=am_cal_milliseconds(args),last=am_cal_milliseconds(args+3);
+    if(operation==AM_CAL_COMPARE) {
+      reply.kind=1;reply.scalar=first<last ? -1 : first>last ? 1 : 0;rc=0;
+    } else rc=am_cal_duration_value(last-first,&reply.value);
+    break;
+  }
+  case AM_CAL_SHIFT: {
+    if(!am_cal_instant_ok(args) || !am_cal_duration_ok(args+3)) return 1;
+    int64_t delta=args[3]*((int64_t)args[4]*AM_CAL_DAY_MS+(int64_t)args[5]*1000+args[6]);
+    int64_t total=am_cal_milliseconds(args)+delta, day=total/AM_CAL_DAY_MS, remainder=total%AM_CAL_DAY_MS;
+    if(remainder<0) { day--;remainder+=AM_CAL_DAY_MS; }
+    if(day<AM_CALENDAR_MIN_DAY+AM_CALENDAR_UNIX_EPOCH_DAY || day>AM_CALENDAR_MAX_DAY+AM_CALENDAR_UNIX_EPOCH_DAY) return 1;
+    int shifted[]={(int)day,(int)(remainder/1000),(int)(remainder%1000)};
+    rc=am_cal_instant_value(shifted,&reply.value);break;
+  }
+  case AM_CAL_SPAN: rc=am_cal_span_value(args,&reply.value);break;
+  case AM_CAL_CONTAINS:
+    if(!am_cal_span_ok(args) || !am_cal_instant_ok(args+6)) return 1;
+    reply.kind=1;reply.scalar=am_cal_milliseconds(args)<=am_cal_milliseconds(args+6) &&
+      am_cal_milliseconds(args+6)<am_cal_milliseconds(args+3);rc=0;break;
+  case AM_CAL_OVERLAPS:
+  case AM_CAL_INTERSECTION: {
+    if(!am_cal_span_ok(args) || !am_cal_span_ok(args+6)) return 1;
+    int64_t a=am_cal_milliseconds(args),b=am_cal_milliseconds(args+3),
+      c=am_cal_milliseconds(args+6),d=am_cal_milliseconds(args+9);
+    int overlap=a<b && c<d && a<d && c<b;
+    if(operation==AM_CAL_OVERLAPS) { reply.kind=1;reply.scalar=overlap;rc=0; }
+    else {
+      int span[6];
+      const int* start=a>=c ? args : args+6;
+      const int* end=overlap ? (b<=d ? args+3 : args+9) : start;
+      for(int i=0;i<3;i++) { span[i]=start[i];span[i+3]=end[i]; }
+      rc=am_cal_span_value(span,&reply.value);
+    }
+    break;
+  }
+  }
+  if(rc) return 1;
+  *out=reply;return 0;
+}
+
 #ifndef AM_CALENDAR_ONLY
 static int am_cal_put(AM_Record* record, const char* name, float number, const char* text) {
   AM_String* key=am_string_new(name);
@@ -4027,12 +4150,15 @@ static int aml_transport_function(const char* name) {
            !strcasecmp(name, "file_size") || !strcasecmp(name, "file_read_slice");
 }
 
-static int aml_calendar_function(const char* name) {
+static int aml_calendar_operation(const char* name) {
     static const char* names[]={"calendar_gregorian","calendar_hebrew","calendar_date",
-      "calendar_subject","calendar_local","calendar_add","calendar_anniversary"};
-    for(size_t i=0;i<sizeof(names)/sizeof(names[0]);i++) if(!strcasecmp(name,names[i])) return 1;
-    return 0;
+      "calendar_subject","calendar_local","calendar_add","calendar_anniversary",
+      "calendar_instant","calendar_compare","calendar_duration","calendar_duration_new",
+      "calendar_shift","calendar_span","calendar_contains","calendar_overlaps","calendar_intersection"};
+    for(int i=0;i<AM_CAL_OPERATION_COUNT;i++) if(!strcasecmp(name,names[i])) return i;
+    return -1;
 }
+static int aml_calendar_function(const char* name) { return aml_calendar_operation(name)>=0; }
 
 static int aml_scalar_intrinsic_function(const char* name) {
     return strcasecmp(name, "assert") == 0 || strcasecmp(name, "floor") == 0 ||
@@ -5239,36 +5365,60 @@ static int aml_map_dispatch(AML_ExecCtx* ctx, const char* name, AML_Var* args,
     return 0;
 }
 
+static const AML_Var* aml_calendar_leaf(const AM_Record* record, const char* key) {
+    for(int i=0;i<record->len;i++) if(!strcmp(record->entries[i].key->data,key)) return &record->entries[i].value;
+    return NULL;
+}
+static int aml_calendar_integer(const AML_Var* arg, int* out) {
+    if(!arg || arg->type!=AML_TYPE_FLOAT || !isfinite(arg->value) ||
+       fabsf(arg->value)>16777216 || truncf(arg->value)!=arg->value) return 1;
+    *out=(int)arg->value;return 0;
+}
+static int aml_calendar_record(const AML_Var* arg, const char* schema,
+                                const char* const* fields, int count, int* out) {
+    if(arg->type!=AML_TYPE_RECORD || !arg->record) return 1;
+    const AML_Var* identity=aml_calendar_leaf(arg->record,"schema");
+    const AML_Var* scale=aml_calendar_leaf(arg->record,"time_scale");
+    if(!identity || identity->type!=AML_TYPE_STRING || !identity->string || strcmp(identity->string->data,schema) ||
+       !scale || scale->type!=AML_TYPE_STRING || !scale->string || strcmp(scale->string->data,"posix")) return 1;
+    for(int i=0;i<count;i++) if(aml_calendar_integer(aml_calendar_leaf(arg->record,fields[i]),&out[i])) return 1;
+    return 0;
+}
 static int aml_calendar_dispatch(AML_ExecCtx* ctx, const char* name,
                                   AML_Var* args, int nargs, AML_Var* out) {
-    int need=3;
-    if(!strcasecmp(name,"calendar_date")) need=1;
-    else if(!strcasecmp(name,"calendar_subject")) need=2;
-    else if(!strcasecmp(name,"calendar_local")) need=4;
-    else if(!strcasecmp(name,"calendar_add")) need=5;
-    if(nargs!=need) { set_error(ctx,"wrong number of calendar arguments"); return 1; }
-    int a[5]={0};
-    for(int i=0;i<nargs;i++) {
-      if(args[i].type!=AML_TYPE_FLOAT || !isfinite(args[i].value) ||
-         fabsf(args[i].value)>16777216 || truncf(args[i].value)!=args[i].value) {
-        set_error(ctx,"calendar arguments must be exact scalar integers"); return 1;
+    static const char* const instant[]={"unix_day","second","millisecond"};
+    static const char* const duration[]={"sign","days","seconds","milliseconds"};
+    static const char* const span[]={"start_unix_day","start_second","start_millisecond",
+      "end_unix_day","end_second","end_millisecond"};
+    int op=aml_calendar_operation(name),a[AM_CALENDAR_MAX_ARGS]={0},count=am_calendar_argument_count(op);
+    int typed=op==AM_CAL_COMPARE || op==AM_CAL_DURATION || op>=AM_CAL_SHIFT;
+    int need=typed ? 2 : count;
+    if(nargs!=need) { set_error(ctx,"wrong number of calendar arguments");return 1; }
+    if(!typed) {
+      for(int i=0;i<count;i++) if(aml_calendar_integer(&args[i],&a[i])) {
+        set_error(ctx,"calendar arguments must be exact scalar integers");return 1;
       }
-      a[i]=(int)args[i].value;
+    } else {
+      int first_span=op>=AM_CAL_CONTAINS;
+      const char* schema=first_span ? "janus.span/1" : "janus.instant/1";
+      int used=first_span ? 6 : 3;
+      if(aml_calendar_record(&args[0],schema,first_span?span:instant,used,a)) {
+        set_error(ctx,"calendar record violates its schema or integer contract");return 1;
+      }
+      int second_span=op>=AM_CAL_OVERLAPS,second_duration=op==AM_CAL_SHIFT;
+      const char* second_schema=second_span ? "janus.span/1" : second_duration ? "janus.duration/1" : "janus.instant/1";
+      const char* const* fields=second_span ? span : second_duration ? duration : instant;
+      int n=second_span ? 6 : second_duration ? 4 : 3;
+      if(aml_calendar_record(&args[1],second_schema,fields,n,a+used)) {
+        set_error(ctx,"calendar record violates its schema or integer contract");return 1;
+      }
     }
-    int result=0,rc=0;
-    if(!strcasecmp(name,"calendar_gregorian")) rc=am_calendar_from_gregorian(a[0],a[1],a[2],&result);
-    else if(!strcasecmp(name,"calendar_hebrew")) rc=am_calendar_from_hebrew(a[0],a[1],a[2],&result);
-    else if(!strcasecmp(name,"calendar_add")) rc=am_calendar_add(a[0],a[1],a[2],a[3],a[4],&result);
-    else if(!strcasecmp(name,"calendar_anniversary")) rc=am_calendar_anniversary(a[0],a[1],a[2],&result);
-    else {
-      if(!strcasecmp(name,"calendar_date")) out->record=am_calendar_date(a[0]);
-      else if(!strcasecmp(name,"calendar_subject")) out->record=am_calendar_subject(a[0],a[1]);
-      else out->record=am_calendar_local(a[0],a[1],a[2],a[3]);
-      if(out->record) { out->type=AML_TYPE_RECORD; return 0; }
-      rc=1;
-    }
-    if(rc) { set_error(ctx,"calendar date, recurrence or allocation outside contract"); return 1; }
-    out->value=(float)result; return 0;
+    AM_CalendarReply reply;
+    if(am_calendar_query(op,a,count,&reply)) { set_error(ctx,"calendar date, moment or interval outside contract");return 1; }
+    if(reply.kind==1) { out->value=(float)reply.scalar;return 0; }
+    out->record=am_cal_record(&reply.value);
+    if(!out->record) { set_error(ctx,"calendar record allocation failed");return 1; }
+    out->type=AML_TYPE_RECORD;return 0;
 }
 
 static int aml_scalar_intrinsic_dispatch(AML_ExecCtx* ctx, const char* name,
