@@ -1182,6 +1182,22 @@ origin policy. Gregorian anniversary February 29 becomes March 1 in a common
 year; date shifts clamp month-end days. Hebrew anniversaries use the existing
 Reingold yahrzeit rules.
 
+Nine additional reserved intrinsics operate on full POSIX moments:
+`calendar_instant`, `calendar_compare`, `calendar_duration`,
+`calendar_duration_new`, `calendar_shift`, `calendar_span`,
+`calendar_contains`, `calendar_overlaps` and `calendar_intersection`.
+Instant records store Unix day, second and millisecond; duration records store
+sign, nonnegative days/seconds/milliseconds; spans store ordered start/end
+instant components. All carry their versioned schema and `time_scale=posix`.
+Components remain exact scalar integers; aggregate arithmetic uses native
+`int64_t`. Intervals are half-open, and empty spans are valid. Empty
+intersections have equal endpoints at the later input start.
+Typed input/schema/unit/range failures and shift overflow stop execution while
+preserving the assignment destination. Original civil-day operations retain
+their behavior. The importable module converts both existing event clocks with
+`janus_event_instant` and `janus_known_instant`. [JANUS_MOMENTS.md](../docs/JANUS_MOMENTS.md)
+defines signatures, record fields, domains and the independent BigInt witnesses.
+
 The same calendar calculations compile with `AM_CALENDAR_ONLY` into an
 allocation-free native or standalone WebAssembly component. Ordinary record
 constructors and the WASM bridge share `AM_CalendarValue` results.

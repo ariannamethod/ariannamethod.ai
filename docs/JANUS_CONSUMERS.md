@@ -32,6 +32,21 @@ The returned annotation is an ordinary AML record. It can be captured by a
 worker or checkpointed with the existing ownership/wire contract. Several
 subjects can view the same source assertion by supplying distinct birth days.
 
+## Exact event-clock relations
+
+Import `janus/calendar.aml` and use `janus_event_instant(annotation)` and
+`janus_known_instant(annotation)` to obtain exact occurrence and knowledge
+moments. `calendar_duration` preserves signed elapsed milliseconds across
+those clocks. `calendar_span`, `calendar_contains`, `calendar_overlaps` and
+`calendar_intersection` relate event intervals while retaining LALO's original
+validity/knowledge history and source assertions. The [moments contract](JANUS_MOMENTS.md)
+defines schemas, units, boundaries and failure behavior.
+
+A moment record carries Unix day, second and millisecond. Split a LALO integer
+Unix-millisecond value with `splitUnixMilliseconds`, then call
+`calendar.instant(parts.unixDay, parts.second, parts.millisecond)`. The native,
+HTTP and embedded WASM clients share the same typed method interface.
+
 ## AMOS 2 integration points
 
 Inspection baseline: `ariannamethod/amos` at

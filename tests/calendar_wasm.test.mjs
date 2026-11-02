@@ -101,6 +101,11 @@ test('complete inline HTML module runs with network and clock functions disabled
   await script.evaluate();
   assert.equal(document.documentElement.dataset.ready,'true');
   assert.deepEqual(JSON.parse(rendered),await native.subject(498,731));
+  const offline=await script.namespace.bundledCalendar();
+  const first=await offline.instant(-1,86399,999),last=await offline.instant(0,0,0);
+  assert.equal((await offline.duration(first,last)).milliseconds,1);
+  assert.equal(await offline.contains(await offline.span(first,last),last),0);
+
   for(const [year,month,day,expected] of [['2024','10','3',0],['2023','2','29',null]]) {
     form.elements.year.value=year;form.elements.month.value=month;form.elements.day.value=day;
     const next=new Promise(resolve=>{changed=resolve;});

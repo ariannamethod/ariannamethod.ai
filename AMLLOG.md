@@ -12,6 +12,49 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-11-02 — Exact moments, durations and interval relations (v5.15.0)
+
+Audit baseline `5e893f9`: events already retained seconds and milliseconds;
+the public comparison/distance/interval helpers operated on civil days. Add
+explicit `janus.instant/1`, `janus.duration/1` and `janus.span/1` records, with
+split integer components and a POSIX time-scale identity. Native `int64_t`
+arithmetic preserves adjacent milliseconds across the entire year 1..9999
+domain; the full-range duration is 315537897599999 ms. The nine new reserved
+intrinsics compare, measure, shift, construct intervals, test containment/
+overlap and intersect them. Empty spans and touching endpoints have explicit
+half-open semantics. Existing civil-day operations retain their behavior.
+
+`am_calendar_query` supplies one allocation-free C dispatcher for AML, the
+native CLI and WASM. The CLI now serializes its reply directly. JS encodes the
+same checked integer tuples from typed records. WASM ABI 2 provides twelve
+integer argument slots; operation IDs 0..6 and the high-level calendar/1
+transport retain their meanings. Existing embedded ABI-1 bundles keep their
+own paired adapter/binary. The updated component remains import-free with
+fixed 128 KiB memory: 9,966-byte WASM, 20,233-byte module, 21,711-byte HTML.
+
+The AML module converts either clock of an existing event using
+`janus_event_instant` and `janus_known_instant`. Record ownership, snapshots,
+checkpoint bytes, bound BIRTH and AM_State layouts remain intact. No consumer
+repository is changed. `docs/JANUS_MOMENTS.md` specifies schemas, units,
+intersection conventions, domains and errors; the consumer contract links it.
+
+Verification: `make test-calendar-moments` passes 174 full-runtime C checks,
+35 allocation-free C checks, 469 independent BigInt operations through all
+five execution paths in three host timezones, and seven JS gates. There are
+4,609 BigInt/WASM witnesses, 659 native witnesses and all nine operations
+through HTTP. Cases include the whole supported domain, negative epochs,
+adjacent milliseconds, signed addition round trips, empty/touching/nested/
+disjoint intervals, malformed records, rejected overflow, unchanged failed
+assignments, worker snapshots and checkpoints. The allocation-free boundary
+passes AddressSanitizer/UndefinedBehaviorSanitizer with detect_leaks=0.
+
+The existing 550 baseline tests and imports, calendar, WASM, UTC day,
+records/checkpoints, expressions, workers and amlc suites pass. The complete
+inline HTML module additionally calculates exact moments with network and
+clock functions disabled. Source/binary identities are regenerated with the
+canonical WASI SDK build.
+
+
 ## 2026-11-01 — JANUS.CALENDAR runs autonomously in the browser (v5.14.1)
 
 Audit baseline: `80c33a9`, the merged calendar implementation. The browser

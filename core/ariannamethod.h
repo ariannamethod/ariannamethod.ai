@@ -29,6 +29,20 @@ typedef struct {
     const char* texts[AM_CALENDAR_MAX_FIELDS]; // NULL selects the numeric leaf
     float numbers[AM_CALENDAR_MAX_FIELDS];
 } AM_CalendarValue;
+// Transport operation IDs 0..6 retain the original calendar ABI meanings.
+enum {
+    AM_CAL_GREGORIAN, AM_CAL_HEBREW, AM_CAL_DATE, AM_CAL_SUBJECT,
+    AM_CAL_LOCAL, AM_CAL_ADD, AM_CAL_ANNIVERSARY, AM_CAL_INSTANT,
+    AM_CAL_COMPARE, AM_CAL_DURATION, AM_CAL_DURATION_NEW, AM_CAL_SHIFT,
+    AM_CAL_SPAN, AM_CAL_CONTAINS, AM_CAL_OVERLAPS, AM_CAL_INTERSECTION,
+    AM_CAL_OPERATION_COUNT
+};
+#define AM_CALENDAR_MAX_ARGS 12
+typedef struct {
+    int kind; // 1 = scalar, 2 = flat record value
+    int scalar;
+    AM_CalendarValue value;
+} AM_CalendarReply;
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -41,6 +55,10 @@ int am_calendar_value_date(int day, AM_CalendarValue* out);
 int am_calendar_value_subject(int birth, int day, AM_CalendarValue* out);
 int am_calendar_value_local(int unix_day, int second, int offset, int sunset,
                             AM_CalendarValue* out);
+// Checked integer transport boundary. Failure preserves *out; no allocation/clock.
+int am_calendar_argument_count(int operation);
+int am_calendar_query(int operation, const int* args, int count,
+                       AM_CalendarReply* out);
 #ifdef __cplusplus
 }
 #endif

@@ -1,6 +1,5 @@
 // WASM transport for createCalendar. Each instance owns its request/result slot.
-import { API, createCalendar, validateRequest } from './calendar.mjs';
-const operations=Object.freeze({gregorian:0,hebrew:1,date:2,subject:3,local:4,add:5,anniversary:6});
+import { API, createCalendar, encodeRequest } from './calendar.mjs';
 // Match native %.9g, including exact halfway cases (ties to even).
 // This converts transport numbers; calendar arithmetic remains in C.
 function wireNumber(x) {
@@ -23,7 +22,7 @@ export async function wasmTransport(bytes) {
   const module=bytes instanceof WebAssembly.Module ? bytes : await WebAssembly.compile(bytes);
   if (WebAssembly.Module.imports(module).length) throw new TypeError('calendar WASM must be self-contained');
   const instance=await WebAssembly.instantiate(module,{}), w=instance.exports;
-  if (w.janus_abi()!==1) throw new TypeError('JANUS.CALENDAR WASM ABI mismatch');
+  if (w.janus_abi()!==2) throw new TypeError('JANUS.CALENDAR WASM ABI mismatch');
   const decoder=new TextDecoder('utf-8',{fatal:true});
   function text(pointer) {
     const memory=new Uint8Array(w.memory.buffer);
@@ -33,9 +32,9 @@ export async function wasmTransport(bytes) {
     return decoder.decode(memory.subarray(pointer,end));
   }
   return request=>{
-    validateRequest(request);
-    const args=[...request.args]; while(args.length<5) args.push(0);
-    if(w.janus_call(operations[request.op],...args))
+    const encoded=encodeRequest(request),args=encoded.args;
+    while(args.length<12) args.push(0);
+    if(w.janus_call(encoded.operation,...args))
       throw new RangeError('calendar date or recurrence outside contract');
     if(w.janus_kind()===1) return {api:API,value:w.janus_scalar()};
     const value={};

@@ -1,0 +1,19 @@
+IMPORT "../janus/calendar.aml"
+
+before = calendar_instant(-1, 86399, 999)
+epoch = calendar_instant(0, 0, 0)
+assert(calendar_compare(before, epoch) == -1, "strict ordering")
+delta = calendar_duration(before, epoch)
+assert(record_get(delta, "milliseconds") == 1, "exact one millisecond")
+assert(record_equal(calendar_shift(before, delta), epoch), "exact shift")
+
+window = calendar_span(before, epoch)
+assert(calendar_contains(window, before) == 1, "start included")
+assert(calendar_contains(window, epoch) == 0, "end excluded")
+empty = calendar_span(epoch, epoch)
+assert(calendar_overlaps(window, empty) == 0, "empty span")
+
+fact = janus_event(20730, 43201, 123, 20730, 43210, 456, 498)
+lag = calendar_duration(janus_event_instant(fact), janus_known_instant(fact))
+PRINT record_get(lag, "seconds")
+PRINT record_get(lag, "milliseconds")

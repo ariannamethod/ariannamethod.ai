@@ -80,6 +80,14 @@ March 1 common-year rule. Hebrew anniversaries retain the existing Reingold
 **yahrzeit** rules, including first-anniversary Cheshvan/Kislev decisions,
 Adar II → final Adar, and Adar I 30 → Shevat 30 in a common year.
 
+## Exact moments and interval relations
+
+The [moments contract](JANUS_MOMENTS.md) adds typed POSIX instants, signed
+split durations, shifts and half-open interval predicates/intersections.
+`calendar_compare` compares two complete instant records; `janus_compare`
+retains civil-day ordering. `janus_event_instant` and `janus_known_instant`
+convert either clock of an existing event into the exact representation.
+
 ## Day, instant, timezone and sunset
 
 | Coordinate | Definition |
@@ -165,14 +173,16 @@ encounters the values through its existing memory and learning mechanisms.
 `am_calendar_date`, `am_calendar_subject`, and `am_calendar_local`. Integer
 operations return 0 on success, 1 on failure and preserve `*out` on failure.
 Record operations return an owned `AM_Record*` or NULL; release with
-`am_record_free`. The functions require no `am_init`, model backend or clock.
+`am_record_free`. `am_calendar_query` returns an allocation-free
+`AM_CalendarReply` for either a scalar or record value; its operation enum and
+argument counts are declared in the same header. The functions require no `am_init`, model backend or clock.
 They share the same calendar helpers used by the bound MetaJanus fields.
 
 ### Autonomous C/WASM browser calendar
 
 `janus/calendar_browser.mjs` is a ready-to-use module containing the calendar
 binary and its adapter. Its `bundledCalendar()` creates a calendar with the
-same seven operations as the native transport:
+same calendar and moment operations as the native transport:
 
 ```js
 import { bundledCalendar } from './janus/calendar_browser.mjs';
@@ -193,8 +203,8 @@ the output. The ordinary AML record constructors convert the same values into
 owned records. All existing language function names, result field order and
 model identities remain available.
 
-The thin `calendar_wasm.c` bridge provides ABI version 1 and a per-instance
-request/result slot. Its 7,363-byte binary has **zero WebAssembly imports** and
+The thin `calendar_wasm.c` bridge provides ABI version 2 and a per-instance
+request/result slot. Its 9,966-byte binary has **zero WebAssembly imports** and
 fixed 128 KiB memory. The JS transport copies every returned leaf before the
 next request and publishes the native transport's nine-significant-digit,
 round-to-nearest/ties-to-even number representation. Each calendar instance

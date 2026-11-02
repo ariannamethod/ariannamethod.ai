@@ -139,6 +139,10 @@ calendar-wasm:
 test-calendar-wasm: all calendar-bridge
 	bash tests/test_aml_calendar_wasm.sh
 
+.PHONY: test-calendar-moments
+test-calendar-moments: all calendar-bridge
+	bash tests/test_aml_calendar_moments.sh
+
 test-utc-day: all
 	bash tests/test_aml_utc_day.sh
 

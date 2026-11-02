@@ -61,3 +61,12 @@ def janus_event(occur_day, occur_sec, occur_ms, known_day, known_sec, known_ms, 
     record_set(result, "known_second", known_sec)
     record_set(result, "known_millisecond", known_ms)
     return result
+
+# Convert either clock of an existing two-clock event into an exact POSIX instant.
+def janus_event_instant(event):
+    assert(text_equal(record_get(event, "schema"), "janus.event/1"), "event schema")
+    return calendar_instant(record_get(event, "occurred_unix_day"), record_get(event, "occurred_second"), record_get(event, "occurred_millisecond"))
+
+def janus_known_instant(event):
+    assert(text_equal(record_get(event, "schema"), "janus.event/1"), "event schema")
+    return calendar_instant(record_get(event, "known_unix_day"), record_get(event, "known_second"), record_get(event, "known_millisecond"))
