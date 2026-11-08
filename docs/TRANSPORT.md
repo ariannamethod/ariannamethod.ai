@@ -1,15 +1,16 @@
-# Hashes, journals, file slices and processes
+# Hashes, journals, file slices, claims and processes
 
 This work follows the [Arianna Method Manifesto](../ARIANNA_METHOD_MANIFESTO.md).
 
 An organism that keeps a hash-chained append-only journal and drives external
-engines needs four things from its runtime: an exact digest of bytes, one
-durable line at a time, a way to read the journal back, and a child process
-whose results return as values. Six intrinsics provide them. Chaining, entry
-schema, retry policy, line splitting and the meaning of an engine's output stay
-in AML.
+engines needs five things from its runtime: an exact digest of bytes, one
+durable line at a time, a way to read the journal back, exclusive ownership of
+a name before the first line, and a child process whose results return as
+values. Seven intrinsics provide them. Chaining, entry schema, retry policy,
+line splitting and the meaning of an engine's output stay in AML.
 
 ```aml
+assert(dir_claim('/srv/haiku/journal.claim') == 1, 'another operator holds the journal')
 head = text_hash_sha256('')
 entry = text_concat(head, ' turn 1')
 status = file_append_line('journal.log', entry)
@@ -38,6 +39,7 @@ assert(record_get(run, 'status') == 0, 'engine step')
 | `file_append_line(path, text)` | Scalar 1 after write and fsync; 2 when written but fsync/close failed; text containing LF is an error before the file is opened |
 | `file_size(path)` | A regular file's size in bytes, an exact scalar up to 16,777,216 |
 | `file_read_slice(path, offset, max_bytes)` | Fresh text: at most `max_bytes` bytes of a regular file from byte `offset`, ending on a whole character; `''` at end of file |
+| `dir_claim(path)` | Scalar 1 when this call created the directory; 0 when the name already exists; every other failure is an error |
 | `process_run(argv)` / `process_run(argv, env)` / `process_run(argv, env, timeout)` | New record `{status, stdout, stderr}` |
 
 Names are case-insensitive, reserved against user function definitions and
@@ -46,6 +48,9 @@ any file is opened or any process starts, and a failed assignment keeps its
 previous value. Paths given to `file_hash_sha256`, `file_append_line`,
 `file_size` and `file_read_slice` resolve from the statement's original source
 file, exactly as checkpoint paths do; an absolute path stays absolute.
+`dir_claim` accepts an absolute path only: a claim names one place for every
+process that contends for it, whatever source file or working directory each
+one starts from.
 
 ## Content hashes
 
@@ -140,6 +145,32 @@ an error. On a finished file, `''` with `offset < file_size(path)` means the
 file ends with up to three bytes of an incomplete sequence. A file truncated
 during the call yields what `pread` still finds.
 
+## Directory claim
+
+`dir_claim(path)` calls `mkdir(2)` once, with mode 0755 subject to the process
+umask. No process starts and `PATH` is never consulted, so no `mkdir` program
+answers for the organ: the kernel creates the directory or refuses, atomically.
+Of any number of processes calling `dir_claim` on one name at the same moment,
+exactly one receives 1.
+
+| Result | Meaning |
+|---:|---|
+| 1 | This call created the directory: the caller owns the name |
+| 0 | The name already exists (`EEXIST`): a directory, a regular file or a symbolic link, dangling or not. Nothing is created, changed or followed |
+| error | Every other failure of `mkdir(2)`: a missing or non-directory parent, denied permission, a read-only file system, an interrupted call, a name too long. The diagnostic carries the system reason |
+
+0 and an error are different facts. 0 means the name has a holder; an error
+means the claim could not be attempted, and it is never reported as 0. An
+interrupted call is not retried: a retry that met a directory created by the
+first attempt would report 0 and leave a claim that nobody holds. A relative
+or empty path, a value that is not text and a wrong number of arguments stop
+execution before `mkdir` runs. A trailing `/` names the same directory.
+
+The directory outlives the call and its process. A claim is released only by
+removing the directory, so an owner that dies keeps its claim and every later
+caller receives 0 until the name is removed. The containing directory is not
+synchronized: survival of the claim across power loss is unconfirmed.
+
 ## External processes
 
 `argv` is a nonempty string list with a nonempty program name. There is no
@@ -206,7 +237,18 @@ with 65,537-byte slices and rebuilt line by line through `file_append_line`;
 the copy's `file_hash_sha256` equals the source's. A child process appends
 lines in two writes split inside a four-byte character while AML follows the
 file with seven-byte slices; the slices join to the final file without an
-error. For processes it covers exit codes 0/1/3/137,
+error. For claims, eight processes released together by one closing pipe
+race for one name in each of 300 rounds per execution path, with a `mkdir`
+first in `PATH` that exits 0 on `EEXIST`: every round has exactly one owner,
+the name then answers 0 to a fresh call after its owner has exited, and the
+fake's log shows the organ never ran it. The same fake through `process_run`
+reports success on an existing directory and admits all eight racers. An
+existing directory with contents, a regular file and a dangling symlink each
+answer 0 with device, inode, mode, link count, owner, size, mtime, ctime and
+bytes unchanged; missing and non-directory parents, a 300-byte name and an
+unwritable parent are errors naming the system reason; relative, empty and
+non-text paths and wrong arities are errors before `mkdir`, and nothing named
+`claim.d` appears in the working or source directory. For processes it covers exit codes 0/1/3/137,
 deaths by signals 9 and 15, inherited/overridden/added environment, a `PATH`
 override that hides `echo`, single argv entries, `/dev/null` stdin, closed host
 stdin/stdout, invalid UTF-8 and NUL output, missing and non-executable
@@ -216,13 +258,16 @@ processes concurrently. After each call the harness confirms no child remains
 and no descriptor leaked.
 
 A second build interposes `write`, `read`, `fsync`, `ftruncate`, `open`,
-`fstat` and `pread` beneath the same suite: fsync failure returns 2 with the
+`fstat`, `pread` and `mkdir` beneath the same suite: fsync failure returns 2 with the
 complete line, a partial write followed by `ENOSPC` restores the previous
 bytes, a partial write that continues completes the line, a failed restore
 names its torn bytes, and seven-byte reads still produce the million-`a`
 digest. Failed `open`, `fstat` and `pread` refuse slices and sizes with the
 system reason and no leaked descriptor; three-byte and `EINTR`-interrupted
-`pread` calls still return the exact slice. A vector file runs through the
+`pread` calls still return the exact slice. An interposed `mkdir` returning
+`EROFS`, or `EINTR` on its first call only, makes `dir_claim` an error after
+exactly one call, with the name still absent. A vector file runs through the
 interpreter, resumable host, bytecode, runner and compiled program, reads its
-own bytes back through five-byte slices, and sixteen invalid calls stop in all
-five before later AML, C `main()` or journal effects.
+own bytes back through five-byte slices; a claim vector written with the run's
+absolute directory answers 1 then 0 in all five; and twenty invalid calls stop
+in all five before later AML, C `main()`, journal or claim effects.

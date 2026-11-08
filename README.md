@@ -633,8 +633,10 @@ text containing LF before opening the file and returns 1 after fsync (2 when
 written but unsynchronized). `file_size(path)` and
 `file_read_slice(path, offset, max_bytes)` read a regular file back by byte
 offset: a slice ends on a whole character, the cursor advances by
-`text_bytes`, and `''` marks the end of the file.
-`process_run(argv, env, timeout)` runs a string list without a shell and
+`text_bytes`, and `''` marks the end of the file. `dir_claim(path)` creates a
+directory at an absolute path with one `mkdir(2)` and no program: 1 makes the
+caller its only owner, 0 means the name is already held, and any other failure
+is an error. `process_run(argv, env, timeout)` runs a string list without a shell and
 returns `{status, stdout, stderr}`; a timeout reports status -256. See
 [transport](docs/TRANSPORT.md).
 
