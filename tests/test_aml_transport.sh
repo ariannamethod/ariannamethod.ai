@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Content hashes, line journal, file slices and external processes through every execution path.
+# Content hashes, line journal, file slices, directory claims and external processes through every execution path.
 set -euo pipefail
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 TRANSPORT_CC=${CC:-cc}
@@ -37,6 +37,27 @@ diff -u "$WORK/expected" "$WORK/compiled"
 printf 'first\nsecond\n' | cmp - "$WORK/vector dir/journal.log"
 echo 'PASS transport vectors: NIST hashes, source-relative journal, file size and slice cursor, process status/env/argv/timeout through five paths'
 
+# A claim takes an absolute path, so its vector is written with this run's directory.
+CLAIM="$WORK/claims/journal.claim"
+CLAIM_SOURCE="$WORK/vector dir/claim_vectors.aml"
+mkdir "$WORK/claims"
+printf "assert(dir_claim('%s') == 1, 'first caller owns the claim')\nassert(dir_claim('%s') == 0, 'second caller holds nothing')\nPRINT 'AML_DIR_CLAIM_OK'\n" \
+    "$CLAIM" "$CLAIM" > "$CLAIM_SOURCE"
+printf 'AML_DIR_CLAIM_OK\n' > "$WORK/claim-expected"
+(cd "$WORK/elsewhere" && "$ROOT/runner/aml" "$CLAIM_SOURCE") > "$WORK/claim-runner"
+diff -u "$WORK/claim-expected" "$WORK/claim-runner"
+rmdir "$CLAIM"
+for mode in 0 1 2; do
+    (cd "$WORK/elsewhere" && "$WORK/transport" --run "$mode" "$CLAIM_SOURCE") > "$WORK/claim-$mode"
+    diff -u "$WORK/claim-expected" "$WORK/claim-$mode"
+    rmdir "$CLAIM"
+done
+"$ROOT/tools/amlc" "$CLAIM_SOURCE" --scalar -o "$WORK/claim program" > "$WORK/claim-build.out" 2> "$WORK/claim-build.err"
+(cd "$WORK/elsewhere" && "$WORK/claim program") > "$WORK/claim-compiled"
+diff -u "$WORK/claim-expected" "$WORK/claim-compiled"
+rmdir "$CLAIM"
+echo 'PASS directory claim: owner 1, then holder 0, at one absolute path through five paths'
+
 bad_count=$("$WORK/transport" --bad-count)
 mkdir "$WORK/bad"
 for ((i=0; i<bad_count; i++)); do
@@ -66,5 +87,8 @@ AML
     if [ -e "$WORK/bad/journal.log" ]; then
         echo "FAIL: transport fixture $i created the journal before its error"; exit 1
     fi
+    if [ -e "$WORK/bad/claim.d" ] || [ -e "$WORK/elsewhere/claim.d" ]; then
+        echo "FAIL: transport fixture $i created a relative claim"; exit 1
+    fi
 done
-echo "PASS transport rejection: $bad_count invalid calls stop in all five paths before later AML, C main or journal effects"
+echo "PASS transport rejection: $bad_count invalid calls stop in all five paths before later AML, C main, journal or claim effects"

@@ -12,6 +12,80 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-11-09 — a name is claimed by one hand
+
+A journal operator claimed its journal by running `/bin/mkdir` through
+`process_run` and trusting the exit status. That status belongs to whichever
+program answers. The uutils coreutils `mkdir` through 0.10.0 checks whether
+the path exists and, when its create then fails, reports success if the path
+is a directory, so two operators started together both won the claim and each
+wrote a genesis. The claim now lives in the language. `dir_claim(path)` calls
+`mkdir(2)` once with mode 0755 and runs no program, so `PATH` and coreutils
+take no part: 1 when this call created the directory, 0 when the name already
+exists (directory, file or symlink, dangling or not; nothing is created,
+changed or followed). Every other errno is an error with the system reason,
+because "another process holds the name" and "the claim could not be
+attempted" are different facts. `EINTR` is not retried: a retry that met a
+directory made by the first attempt would report 0 and leave a claim nobody
+holds. The path must be absolute, unlike the source-relative file organs: a
+claim names one place for every contender. The organ sits in the transport
+family: `aml_transport_function`, `aml_transport_dispatch` and the reserved
+names.
+
+Proof on macOS 26.4.1 arm64 / Apple clang 21.0.0 and Ubuntu 24.04 x86_64 /
+gcc 13.3.0, glibc 2.39:
+
+- `make clean && make`: zero warnings on macOS; on Linux the same two
+  pre-existing warnings as `8f577e8`, none in the new code or harness.
+  `make test`: **550/550** on both.
+- `make test-transport`: **37,105** harness checks (11,985 before) and
+  **37,516** under interposition (12,326 before), identical on both hosts.
+  Eight processes are released together by one closing pipe and race for one
+  name, 300 rounds in each of the interpreter, resumable host and bytecode,
+  in both builds: 1,800 rounds per host, each with exactly one owner and no
+  error. A `mkdir` that exits 0 on `EEXIST` stands first in `PATH` throughout.
+  Red control first: the same fake through `process_run` reports success on
+  an existing directory and admits all eight racers. Under the organ its log
+  never grows. After every round the claimed name answers 0 to a fresh call
+  once its owner has exited.
+- An existing directory with contents, a regular file and a dangling symlink
+  answer 0 with device, inode, mode, link count, owner, size, mtime, ctime
+  and bytes unchanged. Missing parent, file parent, a 300-byte name and an
+  unwritable parent are errors naming the system reason. An interposed
+  `mkdir` returning `EROFS`, or `EINTR` on its first call only, gives an error
+  after exactly one call with the name absent. Relative, empty and non-text
+  paths and wrong arities stop before `mkdir`; no `claim.d` appears in the
+  working or source directory.
+- A claim vector written with the run's absolute directory answers 1 then 0
+  through all five paths. **20** invalid calls (16 before) stop before later
+  AML, C `main()`, journal or claim effects.
+- Seven mutations, each built from a copy of the tree, fail their named test:
+  `stat`-then-create (`dir_claim_existing`, through the dangling symlink),
+  `lstat`-then-create, the uutils algorithm, which passes every deterministic
+  probe (`dir_claim_lying_mkdir`: two owners in round 1), `EEXIST` as 1
+  (`dir_claim_fresh`), every errno as 0 (`dir_claim_refusals`), relative paths
+  accepted (`dir_claim_refusals`), `EINTR` retried (`dir_claim_faults`), and a
+  `chmod` on the held name (`dir_claim_existing`). The tree's sources hash
+  identically before and after.
+- `janus/calendar_browser.mjs` and `janus/calendar-offline.html` carry the
+  SHA-256 of `core/ariannamethod.c`, so the bundle is regenerated: only the
+  `Source SHA-256` line changes. The calendar-only translation unit
+  (`-DAM_CALENDAR_ONLY`) preprocesses byte-identically before and after, so
+  the 9,966-byte WASM is the committed one (its SHA-256 still matches the
+  bundle header); `make test-calendar-wasm` passes 7/7. Neither host has a
+  WASI toolchain, so the WASM was not recompiled; a rebuild with a WASI clang
+  is a separate step.
+- The rest of the suite on macOS matches the run before this change target
+  for target: workers, imports and amlc end in `SIGBUS`, records fails to
+  build (`mkdtemp`), the NoTorch targets fail to link, test-janus lacks its
+  header; everything else passes.
+
+```sh
+make clean && make
+make test
+make test-transport
+```
+
 ## 2026-11-02 — Exact moments, durations and interval relations (v5.15.0)
 
 Audit baseline `5e893f9`: events already retained seconds and milliseconds;

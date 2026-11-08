@@ -4147,7 +4147,8 @@ static int aml_record_function(const char* name) {
 static int aml_transport_function(const char* name) {
     return !strcasecmp(name, "text_hash_sha256") || !strcasecmp(name, "file_hash_sha256") ||
            !strcasecmp(name, "file_append_line") || !strcasecmp(name, "process_run") ||
-           !strcasecmp(name, "file_size") || !strcasecmp(name, "file_read_slice");
+           !strcasecmp(name, "file_size") || !strcasecmp(name, "file_read_slice") ||
+           !strcasecmp(name, "dir_claim");
 }
 
 static int aml_calendar_operation(const char* name) {
@@ -4764,6 +4765,16 @@ static int aml_file_size(const char* path, float* size, char* error, size_t cap)
     return 0;
 }
 
+// One mkdir(2) and no program: the kernel admits exactly one creator. EEXIST
+// is 0, never an error; every other errno, EINTR included, is an error, so a
+// caller that could not attempt the claim is never told someone else holds it.
+static int aml_dir_claim(const char* path, char* error, size_t cap) {
+    if (!mkdir(path, 0755)) return 1;
+    if (errno == EEXIST) return 0;
+    aml_transport_io_error(error, cap, "dir_claim failed", errno);
+    return -1;
+}
+
 // Reads at most max_bytes from offset, bounded by the size fstat reports, so a
 // file being appended yields the prefix present at that moment. A character
 // cut by the end of the bytes read stays for the call that starts at it; the
@@ -5194,6 +5205,17 @@ static int aml_transport_dispatch(AML_ExecCtx* ctx, const char* name,
     if (!strcasecmp(name, "process_run")) return aml_process_run(ctx, args, nargs, out);
     if (!strcasecmp(name, "file_size") || !strcasecmp(name, "file_read_slice"))
         return aml_file_read_dispatch(ctx, !strcasecmp(name, "file_read_slice"), args, nargs, out);
+    if (!strcasecmp(name, "dir_claim")) {
+        if (nargs != 1) { set_error(ctx, "dir_claim requires exactly one path"); return 1; }
+        if (args[0].type != AML_TYPE_STRING || !args[0].string || args[0].string->data[0] != '/') {
+            set_error(ctx, "dir_claim requires an absolute path"); return 1;
+        }
+        char error[256] = {0};
+        int status = aml_dir_claim(args[0].string->data, error, sizeof(error));
+        if (status < 0) { set_error(ctx, error); return 1; }
+        out->value = (float)status;
+        return 0;
+    }
     int appending = !strcasecmp(name, "file_append_line");
     if (nargs != (appending ? 2 : 1)) { set_error(ctx, "wrong number of hash/journal arguments"); return 1; }
     char hex[65];
@@ -8161,7 +8183,7 @@ static int aml_reserved_function(const char* name) {
         "record_new", "record_set", "record_get", "record_has", "record_keys", "record_kind",
         "record_clone", "record_equal", "record_replace", "record_swap", "checkpoint_save", "checkpoint_load", "file_exists",
         "text_hash_sha256", "file_hash_sha256", "file_append_line", "process_run",
-        "file_size", "file_read_slice", "exp", "log", "field_project", "field_normalize", "field_dot"
+        "file_size", "file_read_slice", "dir_claim", "exp", "log", "field_project", "field_normalize", "field_dot"
     };
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (strcasecmp(name, names[i]) == 0) return 1;

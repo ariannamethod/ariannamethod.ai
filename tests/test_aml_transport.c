@@ -1,4 +1,4 @@
-/* Transport organs: SHA-256 oracles, line journal faults, file slices, process capture. */
+/* Transport organs: SHA-256 oracles, line journal faults, file slices, directory claims, process capture. */
 #undef _FORTIFY_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #ifndef _XOPEN_SOURCE
@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -53,8 +54,9 @@ static const struct { size_t bytes; const char* digest; } repeated_a[] = {
  * real functions are resolved once, before any fork. */
 enum { FAULT_NONE, FAULT_FSYNC, FAULT_PARTIAL_FAIL, FAULT_PARTIAL_CONTINUE,
        FAULT_PARTIAL_NO_RESTORE, FAULT_SHORT_READ, FAULT_OPEN, FAULT_FSTAT,
-       FAULT_PREAD_EIO, FAULT_PREAD_SHORT, FAULT_PREAD_EINTR };
+       FAULT_PREAD_EIO, FAULT_PREAD_SHORT, FAULT_PREAD_EINTR, FAULT_MKDIR_EROFS, FAULT_MKDIR_EINTR };
 static int fault, fault_hits;
+static int (*real_mkdir)(const char*, mode_t);
 static ssize_t (*real_write)(int, const void*, size_t);
 static ssize_t (*real_read)(int, void*, size_t);
 static int (*real_fsync)(int);
@@ -105,6 +107,12 @@ int fsync(int fd) {
     if (fault == FAULT_FSYNC) { fault_hits++; errno = EIO; return -1; }
     return real_fsync(fd);
 }
+/* EINTR fails the first call only, so an organ that retried would succeed. */
+int mkdir(const char* path, mode_t mode) {
+    if (fault == FAULT_MKDIR_EROFS) { fault_hits++; errno = EROFS; return -1; }
+    if (fault == FAULT_MKDIR_EINTR && !fault_hits) { fault_hits++; errno = EINTR; return -1; }
+    return real_mkdir(path, mode);
+}
 int ftruncate(int fd, off_t length) {
     if (fault == FAULT_PARTIAL_NO_RESTORE) { fault_hits++; errno = EIO; return -1; }
     return real_ftruncate(fd, length);
@@ -117,8 +125,9 @@ static void resolve_real(void) {
     real_open = (int (*)(const char*, int, ...))dlsym(RTLD_NEXT, "open");
     real_fstat = (int (*)(int, struct stat*))dlsym(RTLD_NEXT, "fstat");
     real_pread = (ssize_t (*)(int, void*, size_t, off_t))dlsym(RTLD_NEXT, "pread");
+    real_mkdir = (int (*)(const char*, mode_t))dlsym(RTLD_NEXT, "mkdir");
     if (!real_write || !real_read || !real_fsync || !real_ftruncate ||
-        !real_open || !real_fstat || !real_pread) {
+        !real_open || !real_fstat || !real_pread || !real_mkdir) {
         fprintf(stderr, "FAIL transport: real I/O symbols unavailable\n"); exit(1);
     }
 }
@@ -760,6 +769,209 @@ static void test_append_faults(int mode) {
 }
 #endif
 
+/* ── Directory claims ── */
+static void claim_is(int mode, const char* var, float expected) {
+    char expression[128]; snprintf(expression, sizeof(expression), "dir_claim(%s)", var);
+    if (call(mode, expression) || am_get_var_float("r") != expected) {
+        fprintf(stderr, "FAIL transport %s: '%s' gave %g (%s), expected %g\n",
+                current_test, expression, am_get_var_float("r"), am_get_error(), expected);
+        exit(1);
+    }
+    checks++;
+}
+
+static void test_dir_claim_fresh(int mode) {
+    prepare("dir_claim_fresh");
+    char path[512], slash[520], unicode[512];
+    path_in_work(path, sizeof(path), "fresh.claim");
+    snprintf(slash, sizeof(slash), "%s/", path);
+    path_in_work(unicode, sizeof(unicode), "שלום 🌧.claim");
+    CHECK(am_set_var_text("p", path) == 0 && am_set_var_text("s", slash) == 0 && am_set_var_text("u", unicode) == 0);
+    absent(path);
+    claim_is(mode, "p", 1);
+    struct stat st;
+    CHECK(stat(path, &st) == 0 && S_ISDIR(st.st_mode) && (st.st_mode & 07777) == 0755);
+    claim_is(mode, "p", 0);
+    claim_is(mode, "s", 0);
+    CHECK(call(mode, "DIR_CLAIM(p)") == 0 && am_get_var_float("r") == 0);
+    CHECK(rmdir(path) == 0);
+    claim_is(mode, "s", 1);
+    CHECK(stat(path, &st) == 0 && S_ISDIR(st.st_mode));
+    claim_is(mode, "p", 0);
+    claim_is(mode, "u", 1);
+    CHECK(stat(unicode, &st) == 0 && S_ISDIR(st.st_mode));
+    claim_is(mode, "u", 0);
+    CHECK(rmdir(path) == 0 && rmdir(unicode) == 0);
+    am_persistent_clear();
+}
+
+static void same_stat(const struct stat* a, const struct stat* b) {
+    CHECK(a->st_dev == b->st_dev && a->st_ino == b->st_ino && a->st_mode == b->st_mode &&
+          a->st_nlink == b->st_nlink && a->st_uid == b->st_uid && a->st_gid == b->st_gid &&
+          a->st_size == b->st_size && a->st_mtime == b->st_mtime && a->st_ctime == b->st_ctime);
+}
+
+/* Any existing name is held: a directory with contents, a regular file, a
+ * dangling symlink. Each answers 0 and keeps its metadata and bytes. */
+static void test_dir_claim_existing(int mode) {
+    prepare("dir_claim_existing");
+    char dir[512], inner[600], file[512], link[512];
+    path_in_work(dir, sizeof(dir), "held.claim"); path_in_work(file, sizeof(file), "held.file");
+    path_in_work(link, sizeof(link), "held.link");
+    snprintf(inner, sizeof(inner), "%s/owner", dir);
+    CHECK(mkdir(dir, 0700) == 0);
+    write_file(inner, "pid 1\n", 6); write_file(file, "keep\n", 5);
+    CHECK(symlink("/nonexistent-aml-transport/target", link) == 0);
+    struct timeval past[2] = {{1000000000, 0}, {1000000000, 0}};
+    CHECK(utimes(inner, past) == 0 && utimes(file, past) == 0 && utimes(dir, past) == 0);
+    struct stat d0, i0, f0, l0, d1, i1, f1, l1;
+    CHECK(stat(dir, &d0) == 0 && stat(inner, &i0) == 0 && stat(file, &f0) == 0 && lstat(link, &l0) == 0);
+    CHECK(am_set_var_text("d", dir) == 0 && am_set_var_text("f", file) == 0 && am_set_var_text("l", link) == 0);
+    for (int i = 0; i < 3; i++) { claim_is(mode, "d", 0); claim_is(mode, "f", 0); claim_is(mode, "l", 0); }
+    CHECK(stat(dir, &d1) == 0 && stat(inner, &i1) == 0 && stat(file, &f1) == 0 && lstat(link, &l1) == 0);
+    same_stat(&d0, &d1); same_stat(&i0, &i1); same_stat(&f0, &f1); same_stat(&l0, &l1);
+    CHECK(d1.st_mtime == 1000000000 && (d1.st_mode & 07777) == 0700 && S_ISLNK(l1.st_mode));
+    expect_file(inner, "pid 1\n", 6); expect_file(file, "keep\n", 5);
+    absent("/nonexistent-aml-transport/target");
+    CHECK(unlink(inner) == 0 && rmdir(dir) == 0 && unlink(file) == 0 && unlink(link) == 0);
+    am_persistent_clear();
+}
+
+/* A claim that cannot be attempted is an error with the system reason, never 0. */
+static void test_dir_claim_refusals(int mode) {
+    prepare("dir_claim_refusals");
+    char plain[512], under_file[600], locked[512], under_locked[600], longname[900];
+    path_in_work(plain, sizeof(plain), "plain.file"); write_file(plain, "x", 1);
+    snprintf(under_file, sizeof(under_file), "%s/claim", plain);
+    path_in_work(locked, sizeof(locked), "locked"); CHECK(mkdir(locked, 0555) == 0);
+    snprintf(under_locked, sizeof(under_locked), "%s/claim", locked);
+    int n = snprintf(longname, sizeof(longname), "%s/", work);
+    memset(longname + n, 'n', 300); longname[n + 300] = 0;
+    CHECK(am_set_var_text("missing", "/nonexistent-aml-transport/claim") == 0);
+    CHECK(am_set_var_text("under_file", under_file) == 0 && am_set_var_text("locked", under_locked) == 0);
+    CHECK(am_set_var_text("longname", longname) == 0);
+    refused(mode, "dir_claim(missing)", "dir_claim failed: No such file or directory");
+    absent("/nonexistent-aml-transport");
+    refused(mode, "dir_claim(under_file)", "dir_claim failed: Not a directory");
+    expect_file(plain, "x", 1);
+    refused(mode, "dir_claim(longname)", "dir_claim failed: File name too long");
+    if (geteuid() != 0) {
+        refused(mode, "dir_claim(locked)", "dir_claim failed: Permission denied");
+        absent(under_locked);
+    }
+    refused(mode, "dir_claim('claim.d')", "dir_claim requires an absolute path");
+    refused(mode, "dir_claim('./claim.d')", "dir_claim requires an absolute path");
+    refused(mode, "dir_claim('')", "dir_claim requires an absolute path");
+    refused(mode, "dir_claim(1)", "dir_claim requires an absolute path");
+    refused(mode, "dir_claim(list_new())", "dir_claim requires an absolute path");
+    refused(mode, "dir_claim()", "dir_claim requires exactly one path");
+    refused(mode, "dir_claim(missing, missing)", "dir_claim requires exactly one path");
+    absent("claim.d");
+    CHECK(rmdir(locked) == 0 && unlink(plain) == 0);
+    am_persistent_clear();
+}
+
+/* Racers fork, block on one pipe and are released together when it closes;
+ * each runs `source` once and exits 10 for r == 1, 11 for r == 0. */
+static int race(int mode, const char* source, int racers, int* errors) {
+    int gate[2]; CHECK(pipe(gate) == 0);
+    pid_t pids[8]; CHECK(racers <= 8);
+    fflush(stdout); fflush(stderr);
+    for (int i = 0; i < racers; i++) {
+        pids[i] = fork(); CHECK(pids[i] >= 0);
+        if (!pids[i]) {
+            close(gate[1]);
+            char c; ssize_t got;
+            do got = read(gate[0], &c, 1); while (got < 0 && errno == EINTR);
+            if (got != 0 || run(mode, source)) _exit(2);
+            float r = am_get_var_float("r");
+            _exit(r == 1 ? 10 : r == 0 ? 11 : 3);
+        }
+    }
+    CHECK(close(gate[0]) == 0 && close(gate[1]) == 0);
+    int owners = 0; *errors = 0;
+    for (int i = 0; i < racers; i++) {
+        int status; CHECK(waitpid(pids[i], &status, 0) == pids[i]);
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 10) owners++;
+        else if (!WIFEXITED(status) || WEXITSTATUS(status) != 11) (*errors)++;
+    }
+    no_children();
+    return owners;
+}
+static int lines_in(const char* path) {
+    size_t n; char* data = read_file(path, &n); int count = 0;
+    for (size_t i = 0; i < n; i++) count += data[i] == '\n';
+    free(data); return count;
+}
+
+/* First in PATH stands a mkdir that exits 0 on EEXIST: a harder form of the
+ * uutils coreutils mkdir through 0.10.0, which reports success when its create
+ * loses a race to a directory. Red control first: the claim through
+ * process_run admits a second caller and every racer. The organ runs no
+ * program: under the same PATH it admits exactly one racer in each of 300
+ * rounds and never invokes it. */
+static void test_dir_claim_lying_mkdir(int mode) {
+    prepare("dir_claim_lying_mkdir");
+    char bin[512], fake[600], log[512], script[1400], held[512], path[512], poisoned[8192];
+    path_in_work(bin, sizeof(bin), "lying-bin"); CHECK(mkdir(bin, 0755) == 0);
+    snprintf(fake, sizeof(fake), "%s/mkdir", bin);
+    path_in_work(log, sizeof(log), "lying-mkdir.log"); write_file(log, "", 0);
+    snprintf(script, sizeof(script), "#!/bin/sh\necho \"$*\" >> '%s'\n/bin/mkdir \"$@\" 2>/dev/null\nexit 0\n", log);
+    write_file(fake, script, strlen(script)); CHECK(chmod(fake, 0755) == 0);
+    const char* inherited = getenv("PATH");
+    char* saved = inherited ? strdup(inherited) : NULL; CHECK(!inherited || saved);
+    CHECK(snprintf(poisoned, sizeof(poisoned), "%s:%s", bin, saved ? saved : "/usr/bin:/bin") < (int)sizeof(poisoned));
+    CHECK(setenv("PATH", poisoned, 1) == 0);
+    path_in_work(held, sizeof(held), "held.claim"); CHECK(mkdir(held, 0755) == 0);
+    path_in_work(path, sizeof(path), "race.claim");
+    CHECK(am_set_var_text("held", held) == 0 && am_set_var_text("p", path) == 0);
+
+    set_command("cmd", "mkdir", held, NULL);
+    CHECK(call(mode, "record_get(process_run(cmd), 'status')") == 0 && am_get_var_float("r") == 0);
+    CHECK(lines_in(log) == 1);
+    set_command("cmd", "mkdir", path, NULL);
+    int errors, owners = race(mode, "r = record_get(process_run(cmd), 'status') == 0\n", 8, &errors);
+    CHECK(errors == 0 && owners == 8 && lines_in(log) == 9);
+    CHECK(rmdir(path) == 0);
+
+    claim_is(mode, "held", 0);
+    for (int round = 0; round < 300; round++) {
+        owners = race(mode, "r = dir_claim(p)\n", 8, &errors);
+        if (owners != 1 || errors) {
+            fprintf(stderr, "FAIL transport %s: round %d gave %d owners and %d errors\n",
+                    current_test, round, owners, errors);
+            exit(1);
+        }
+        checks++;
+        claim_is(mode, "p", 0);
+        CHECK(rmdir(path) == 0);
+    }
+    CHECK(lines_in(log) == 9);
+    if (saved) CHECK(setenv("PATH", saved, 1) == 0); else CHECK(unsetenv("PATH") == 0);
+    free(saved);
+    CHECK(rmdir(held) == 0 && unlink(fake) == 0 && rmdir(bin) == 0 && unlink(log) == 0);
+    am_persistent_clear();
+}
+
+#ifdef AML_TRANSPORT_FAULTS
+static void test_dir_claim_faults(int mode) {
+    prepare("dir_claim_faults");
+    char path[512]; path_in_work(path, sizeof(path), "fault.claim");
+    CHECK(am_set_var_text("p", path) == 0);
+    fault = FAULT_MKDIR_EROFS; fault_hits = 0;
+    refused(mode, "dir_claim(p)", "dir_claim failed: Read-only file system");
+    fault = FAULT_NONE; CHECK(fault_hits == 1);
+    absent(path);
+    fault = FAULT_MKDIR_EINTR; fault_hits = 0;
+    refused(mode, "dir_claim(p)", "dir_claim failed: Interrupted system call");
+    fault = FAULT_NONE; CHECK(fault_hits == 1);
+    absent(path);
+    claim_is(mode, "p", 1);
+    CHECK(rmdir(path) == 0);
+    am_persistent_clear();
+}
+#endif
+
 /* ── External processes ── */
 static void test_process_echo_and_status(int mode) {
     prepare("process_echo_and_status");
@@ -951,7 +1163,7 @@ static void test_process_workers(int mode) {
 static void test_reserved_names(int mode) {
     prepare("reserved_names");
     const char* names[] = {"text_hash_sha256", "FILE_HASH_SHA256", "file_append_line", "Process_Run",
-                           "file_size", "FILE_READ_SLICE"};
+                           "file_size", "FILE_READ_SLICE", "Dir_Claim"};
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
         char source[128]; snprintf(source, sizeof(source), "def %s(x):\n    return x\n", names[i]);
         CHECK(run(mode, source) != 0 && strstr(am_get_error(), "collides with an intrinsic"));
@@ -977,6 +1189,10 @@ static const char* const invalid[] = {
     "s = file_read_slice('journal.log', -1, 1)\n",
     "s = file_read_slice('journal.log', 0, 1048577)\n",
     "s = file_read_slice('journal.log', 0)\n",
+    "c = dir_claim('claim.d')\n",
+    "c = dir_claim('/nonexistent-aml-transport/claim.d')\n",
+    "c = dir_claim()\n",
+    "c = dir_claim(1)\n",
 };
 
 static char* read_source(const char* path) {
@@ -1014,6 +1230,7 @@ int main(int argc, char** argv) {
 #ifdef AML_TRANSPORT_FAULTS
         test_append_faults(mode);
         test_slice_faults(mode);
+        test_dir_claim_faults(mode);
 #endif
         test_sha256_vectors(mode);
         test_file_hash_equals_text_hash(mode);
@@ -1026,6 +1243,10 @@ int main(int argc, char** argv) {
         test_slice_utf8_boundaries(mode);
         test_slice_large_loop(mode);
         test_slice_concurrent_writer(mode);
+        test_dir_claim_fresh(mode);
+        test_dir_claim_existing(mode);
+        test_dir_claim_refusals(mode);
+        test_dir_claim_lying_mkdir(mode);
         test_process_echo_and_status(mode);
         test_process_argv_one_entry(mode);
         test_process_environment(mode);

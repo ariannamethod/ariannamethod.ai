@@ -329,8 +329,9 @@ and may carry it through records, workers or checkpoints. The name is reserved
 case-insensitively and consumes no registered function slot: 495 user definitions
 remain available. [UTC_DAY.md](../docs/UTC_DAY.md) documents the epoch and examples.
 
-The six transport intrinsics are `text_hash_sha256`, `file_hash_sha256`,
-`file_append_line`, `file_size`, `file_read_slice` and `process_run`.
+The seven transport intrinsics are `text_hash_sha256`, `file_hash_sha256`,
+`file_append_line`, `file_size`, `file_read_slice`, `dir_claim` and
+`process_run`.
 `text_hash_sha256(text)` returns 64 lowercase hex digits of the SHA-256 of the
 text's UTF-8 bytes; `file_hash_sha256(path)` streams a regular file's bytes to
 the same digest. `file_append_line(path, text)` appends text and one LF through
@@ -347,7 +348,11 @@ at or past the end, or `max_bytes` 0, gives `''`. A character cut by either
 edge is left for the slice that starts at it, so callers advance by
 `text_bytes`. An offset inside a character, invalid UTF-8, NUL, `max_bytes`
 smaller than the character at the offset, and a slice ending past byte
-16,777,216 are errors. `process_run(argv, env?, timeout?)` executes a string
+16,777,216 are errors. `dir_claim(path)` requires an absolute path and calls
+`mkdir(2)` once with mode 0755, without a program or `PATH`: 1 when the call
+created the directory, 0 when the name already exists; every other failure,
+an interrupted call included, is an error and is never reported as 0.
+`process_run(argv, env?, timeout?)` executes a string
 list directly, without a shell, using execvp's `PATH` rule over the child's
 environment. A text-valued record adds or replaces environment names, and a
 positive timeout sends `SIGTERM`, then `SIGKILL` after one second. It returns a fresh
@@ -355,8 +360,9 @@ positive timeout sends `SIGTERM`, then `SIGKILL` after one second. It returns a 
 `-256` for timeout. Both streams are drained together, each bounded by the
 1 MiB text limit and required to be UTF-8 without NUL. Unexecutable programs,
 invalid arguments, exceeded output and invalid output are errors; every child
-is reaped. Paths resolve from the original statement's source directory; the
-names are reserved case-insensitively and consume no function slot.
+is reaped. Paths other than `dir_claim`'s resolve from the original
+statement's source directory; the names are reserved case-insensitively and
+consume no function slot.
 [TRANSPORT.md](../docs/TRANSPORT.md) defines the complete contracts.
 
 Owned sampling uses an optional registered NoTorch backend. `rng_new(seed)`
