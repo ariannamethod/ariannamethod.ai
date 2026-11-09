@@ -3,7 +3,7 @@
 #include "ariannamethod.h"
 #include "harness/archs.h"
 #include "harness/experts.h"
-#include "examples/bpe.h"
+#include "harness/tokenizer.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -54,8 +54,7 @@ static const char *end_session(void *ptr) {
     return error;
 }
 
-static const char *open_with_tokenizer(const char *path, const char *spore, int capacity,
-                                       const char *tokenizer, void **out) {
+static const char *start_session(const char *path, const char *spore, int capacity, void **out) {
     DoeSession *s = calloc(1, sizeof(*s));
     if (!s) return "DOE session allocation failed";
     const char *error = "DOE host path exceeds the GGUF reader limit";
@@ -71,21 +70,8 @@ static const char *open_with_tokenizer(const char *path, const char *spore, int 
     error = "DOE model load failed";
     s->model = s->arch->load(s->host, &s->dims);
     if (!s->model || s->dims.vocab < 1 || s->dims.vocab > AM_MAX_ARRAY_SIZE) goto fail;
-    s->tok = bpe_load(tokenizer ? tokenizer : path);
-    error = "DOE tokenizer missing or incompatible with the host";
-    if (tokenizer) {
-        char family[64] = {0};
-        if (!s->tok || (gguf_read_str_kv(tokenizer, "general.architecture", family, sizeof(family)) == 0 &&
-                        strcmp(family, s->host->arch))) goto fail;
-    }
-    if (s->tok && bpe_n_vocab(s->tok) > s->dims.vocab) goto fail;
-    uint64_t eos;
-    s->eos = -1;
-    if (!gguf_read_uint_kv(tokenizer ? tokenizer : path, "tokenizer.ggml.eos_token_id", &eos) ||
-        (tokenizer && !gguf_read_uint_kv(path, "tokenizer.ggml.eos_token_id", &eos))) {
-        if (eos >= (uint64_t)s->dims.vocab) goto fail;
-        s->eos = (int)eos;
-    }
+    error = nt_model_tokenizer_open(s->host, path, s->dims.vocab, NULL, &s->tok, &s->eos);
+    if (error) goto fail;
     error = "DOE expert state or host fingerprint rejected";
     s->experts = nt_experts_open(s->host, spore, NULL);
     if (!s->experts) goto fail;
@@ -101,10 +87,6 @@ static const char *open_with_tokenizer(const char *path, const char *spore, int 
 fail:
     end_session(s);
     return error;
-}
-
-static const char *start_session(const char *path, const char *spore, int capacity, void **out) {
-    return open_with_tokenizer(path, spore, capacity, NULL, out);
 }
 
 static const char *encode(void *ptr, const char *text, AM_Array **out) {
@@ -162,7 +144,7 @@ static const char *choose(void *ptr, int request, int *chosen) {
     DoeSession *s = ptr;
     if (!s->active || s->stopped) return "DOE choice requires an active, unstopped turn";
     if (request < -1 || request >= s->dims.vocab) return "DOE choice outside vocabulary";
-    int best = sample(s->logits, s->dims.vocab, 0);
+    int best = nt_sample_model_token(s->logits, s->dims.vocab, s->tok, 0);
     int id = request == -1 ? best : request;
     if (s->tok) s->stopped = id == s->eos || bpe_is_eog(s->tok, id);
     else if (s->arch == &nt_arch_llama) s->stopped = id <= 2; // Historical pretokenized session.
@@ -216,5 +198,5 @@ void am_use_notorch_doe(void) {
         .choose = choose, .logits = logits, .finish = finish, .reset = reset,
         .wait = await, .save = save, .transplant = transplant
     };
-    am_set_doe_backend_with_tokenizer(&backend, open_with_tokenizer);
+    am_set_doe_backend(&backend);
 }

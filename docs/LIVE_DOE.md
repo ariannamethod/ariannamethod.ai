@@ -10,11 +10,11 @@ file containing the call.
 
 | Expression | Effect |
 | --- | --- |
-| `doe_open(host, spore, capacity [, tokenizer])` | Open a host and a context of 1 to 1,048,576 positions, within the declared host limit. Use an empty spore string for new experts. The optional fourth argument names a separate tokenizer GGUF. Its declared family must match the host and its vocabulary must fit the output head. |
+| `doe_open(host, spore, capacity)` | Open a host and a context of 1 to 1,048,576 positions, within the declared host limit. Use an empty spore string for new experts. NoTorch uses the host’s embedded vocabulary or a companion named `tokenizer.gguf` in the host directory. |
 | `doe_encode(text)` | Return token IDs from the GGUF tokenizer, including its BOS policy. Pretokenized hosts can take IDs directly. |
 | `doe_prompt(ids)` | Start a turn with a nonempty token vector at the current KV position and return the full next-token logits. |
 | `doe_logits()` | Copy the current full logit vector during an active turn. |
-| `doe_choose(id)` | Record and forward this token, returning its ID. Use −1 for greedy selection. A stop token records the choice and closes generation for this turn. |
+| `doe_choose(id)` | Record and forward this token, returning its ID. Use −1 for greedy selection over the loaded tokenizer vocabulary, or over the full head on token-ID-only hosts. A stop token records the choice and closes generation for this turn. |
 | `doe_finish(mode)` | Commit a turn after one or more choices. `'vote'` carries routing and history forward. `'learn'` also updates elected factors and lifecycle. `'async'` hands the same update to a background worker. |
 | `doe_wait()` | Join a pending consolidation. The next prompt, save, transplant and close also wait. |
 | `doe_reset()` | Start the next turn at KV position zero while keeping the parliament. |
@@ -31,8 +31,8 @@ the table with `am_set_doe_backend`. The NoTorch adapter supplies
 
 ## Build and run
 
-Build [NoTorch with native consolidation](https://github.com/ariannamethod/notorch/commit/5f408730544f90e248915b6456252a72423b2068)
-and set `NOTORCH_ROOT` to that checkout. For a portable CPU build:
+Build NoTorch with the [shared model tokenizer API](https://github.com/ariannamethod/notorch/pull/199)
+and native consolidation. Set `NOTORCH_ROOT` to that checkout. For a portable CPU build:
 
 ```sh
 make -C "$NOTORCH_ROOT" lib lib_harness BLAS_FLAGS= BLAS_LIBS=

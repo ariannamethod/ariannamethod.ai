@@ -48,11 +48,11 @@ static void write_tokenizer(const char *path, const char *family, int vocab) {
 static void check_hybrid_reset(int mode) {
     char source[1024];
     snprintf(source, sizeof(source),
-        "doe_open('hybrid.gguf','',16,'hybrid-tokens.gguf')\n"
+        "doe_open('hybrid/host.gguf','',16)\n"
         "doe_prompt(doe_encode('ab'))\ndoe_choose(0)\ndoe_finish('async')\n"
         "doe_save('hybrid%d.gguf')\ndoe_reset()\n"
         "reset = doe_prompt([3,4])\ndoe_close()\n"
-        "doe_open('hybrid.gguf','hybrid%d.gguf',16,'hybrid-tokens.gguf')\n"
+        "doe_open('hybrid/host.gguf','hybrid%d.gguf',16)\n"
         "fresh = doe_prompt([3,4])\nassert(len(fresh)==40,'hybrid head')\n"
         "i = 0\nwhile i < len(fresh):\n"
         "    assert(fresh[i]==reset[i],'reset logits match a restarted Qwen3.5')\n"
@@ -66,13 +66,13 @@ int main(void) {
     assert(am_exec(open) != 0 && strstr(am_get_error(), "backend unavailable"));
     am_use_notorch_doe();
 #ifdef NT_DOE_DECODER_API
-    assert(fixture("hybrid.gguf", 0) == 0);
-    write_tokenizer("hybrid-tokens.gguf", "qwen35", 8);
+    assert(fixture("hybrid/host.gguf", 0) == 0);
+    write_tokenizer("hybrid/tokenizer.gguf", "qwen35", 8);
 #endif
-    write_tokenizer("tokens.gguf", "qwen2", 8);
-    write_tokenizer("other-family.gguf", "qwen35", 8);
-    write_tokenizer("too-many.gguf", "qwen2", 41);
-    const char *separate = "doe_open('host.gguf','',16,'tokens.gguf')\n"
+    write_tokenizer("dense/tokenizer.gguf", "qwen2", 8);
+    write_tokenizer("wrong/tokenizer.gguf", "qwen35", 8);
+    write_tokenizer("oversized/tokenizer.gguf", "qwen2", 41);
+    const char *separate = "doe_open('dense/host.gguf','',16)\n"
         "ids = doe_encode('ab')\nassert(len(ids)==1 and ids[0]==2,'external BPE merge')\n"
         "full = doe_prompt(ids)\nassert(len(full)==40,'padded output head')\n"
         "doe_choose(0)\ndoe_choose(7)\ndoe_finish('vote')\ndoe_close()\n";
@@ -91,8 +91,8 @@ int main(void) {
 #endif
         assert(run(mode, separate) == 0);
         assert(run(mode, "doe_open('host.gguf','',16,'missing.gguf')") != 0);
-        assert(run(mode, "doe_open('host.gguf','',16,'other-family.gguf')") != 0);
-        assert(run(mode, "doe_open('host.gguf','',16,'too-many.gguf')") != 0);
+        assert(run(mode, "doe_open('wrong/host.gguf','',16)") != 0);
+        assert(run(mode, "doe_open('oversized/host.gguf','',16)") != 0);
         snprintf(source, sizeof(source),
             "%slogits = doe_prompt([3,4,5])\nassert(len(logits)==40,'vocab')\n"
             "cached = doe_logits()\nassert(cached[0]==logits[0],'logits snapshot')\n"
