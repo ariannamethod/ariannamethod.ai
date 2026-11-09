@@ -10,6 +10,7 @@ janus_train
 test_aml
 runner/aml
 runner/aml-notorch
+runner/aml-harness
 tools/amlc
 janus_ckpt_step*.bin
 

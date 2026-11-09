@@ -1,0 +1,135 @@
+# SmolLM2-360M / one exposure, ten distractors, four independently saved lineages.
+# stdin: absolute host GGUF path, then a fresh absolute output directory.
+def cat(a, b):
+    return text_concat(a, b)
+
+def col(a, b):
+    return cat(cat(a, '\t'), b)
+
+def spore(label):
+    return cat(cat(outdir, '/'), cat(label, '.gguf'))
+
+def emit(file, line):
+    assert(file_append_line(cat(cat(outdir, '/'), file), line) == 1, 'receipt write failed')
+
+def exposure(word):
+    doe_open(host, '', 128)
+    text = cat('Miro is the lighthouse keeper. Every night Miro carries a ', word)
+    text = cat(text, '. At sunrise the lighthouse keeper returns home.')
+    doe_prompt(doe_encode(text))
+    assert(doe_choose(-1) == 198, 'exposure continuations must match')
+    doe_finish('async')
+    doe_save(spore(word))
+    doe_close()
+
+def checkpoint_name(word, mode, step):
+    if step == 0:
+        return word
+    return cat(cat(cat(cat(word, '-'), mode), '-'), text_fixed(step, 0))
+
+def lineage(word, mode):
+    doe_open(host, spore(word), 128)
+    i = 0
+    while i < list_len(distractors):
+        doe_reset()
+        raw = doe_prompt(doe_encode(list_get(distractors, i)))
+        # Give every branch exactly the same observed continuation and let DOE
+        # compute its own choice signal from its live logits.
+        assert(doe_choose(198) == 198, 'teacher token')
+        doe_finish(mode)
+        i = i + 1
+        label = checkpoint_name(word, mode, i)
+        emit('turns.tsv', col(label, text_fixed(raw[198], 9)))
+        if i == 1 or i == 5 or i == 10:
+            doe_save(spore(label))
+    doe_close()
+
+def target(prefix, ids, suffix):
+    joined = doe_encode(cat(prefix, suffix))
+    assert(len(joined) == len(ids) + 1, 'target must add one token')
+    t = 0
+    while t < len(ids):
+        assert(joined[t] == ids[t], 'target changed probe prefix')
+        t = t + 1
+    return joined[t]
+
+def probe(parent, donor, slot, which):
+    doe_open(host, spore(parent), 128)
+    if slot >= 0:
+        doe_transplant(spore(donor), slot)
+    prefix = list_get(probes, which)
+    ids = doe_encode(prefix)
+    left = target(prefix, ids, ' key')
+    right = target(prefix, ids, ' bell')
+    assert(left == 1646 and right == 13095, 'SmolLM2 target IDs')
+    raw = doe_prompt(ids)
+    probs = softmax(raw)
+    margin = raw[left] - raw[right]
+    line = col(col(parent, donor), text_fixed(slot, 0))
+    line = col(line, text_fixed(which, 0))
+    line = col(col(line, text_fixed(probs[left], 9)), text_fixed(probs[right], 9))
+    emit('scores.tsv', col(line, text_fixed(margin, 9)))
+    doe_close()
+    return margin
+
+def measure(step, mode):
+    key = checkpoint_name('key', mode, step)
+    bell = checkpoint_name('bell', mode, step)
+    q = 0
+    while q < list_len(probes):
+        k = probe(key, '-', -1, q)
+        b = probe(bell, '-', -1, q)
+        line = col(col(text_fixed(step, 0), mode), text_fixed(q, 0))
+        emit('contrast.tsv', col(line, text_fixed(k-b, 9)))
+        if q == 0:
+            kmargin = k
+            bmargin = b
+        q = q + 1
+    if text_equal(mode, 'vote') == 0:
+        seat = 0
+        while seat < 4:
+            kb = probe(bell, key, seat, 0)
+            bk = probe(key, bell, seat, 0)
+            line = col(text_fixed(step, 0), text_fixed(seat, 0))
+            emit('seats.tsv', col(col(line, text_fixed(kb-bmargin, 9)), text_fixed(bk-kmargin, 9)))
+            seat = seat + 1
+
+host = list_get(read_line(), 0)
+outdir = list_get(read_line(), 0)
+assert(text_equal(file_hash_sha256(host), '2fa3f013dcdd7b99f9b237717fa0b12d75bbb89984cc1274be1471a465bac9c2'), 'host differs from recorded experiment')
+assert(dir_claim(outdir) == 1, 'choose a new output directory')
+distractors = list_new()
+list_push(distractors, 'A robin builds its nest in a tree.')
+list_push(distractors, 'The soup was served in a blue bowl.')
+list_push(distractors, 'Snow fell on the empty road.')
+list_push(distractors, 'A violinist tuned the lowest string.')
+list_push(distractors, 'Three bicycles stood beside the fence.')
+list_push(distractors, 'The baker folded the dough.')
+list_push(distractors, 'A red kite rose above the hill.')
+list_push(distractors, 'Two children drew circles in the sand.')
+list_push(distractors, 'The train stopped near the orchard.')
+list_push(distractors, 'Rain tapped on the greenhouse roof.')
+probes = list_new()
+list_push(probes, 'Every night the lighthouse keeper carries a')
+list_push(probes, 'Before leaving for the harbor, Miro picks up the')
+list_push(probes, 'The object the keeper keeps in his pocket is a')
+list_push(probes, 'At the lighthouse, Miro reaches for his')
+list_push(probes, 'On the desk there is a')
+emit('turns.tsv', 'generation\tforced_newline_logit')
+emit('scores.tsv', 'recipient\tdonor\tseat\tprobe\tp_key\tp_bell\tlog_odds')
+emit('contrast.tsv', 'intervening_turns\tmode\tprobe\tkey_history_minus_bell_history')
+emit('seats.tsv', 'intervening_turns\tseat\tkey_seat_into_bell\tbell_seat_into_key')
+exposure('key')
+exposure('bell')
+lineage('key', 'async')
+lineage('key', 'vote')
+lineage('bell', 'async')
+lineage('bell', 'vote')
+measure(0, 'parent')
+measure(1, 'async')
+measure(1, 'vote')
+measure(5, 'async')
+measure(5, 'vote')
+measure(10, 'async')
+measure(10, 'vote')
+PRINT 'DOE_RETENTION_COMPLETE'

@@ -122,6 +122,15 @@ static AM_ParliamentBackend g_parliament_backend;
 static AM_TokenizerBackend g_tokenizer_backend;
 static AM_ModelBackend g_model_backend;
 
+struct AM_DoeSession { void *native; AM_DoeBackend backend; };
+static AM_DoeBackend g_doe_backend;
+
+void am_set_doe_backend(const AM_DoeBackend *b) {
+    if (b && b->open && b->close && b->encode && b->prompt && b->logits && b->choose &&
+        b->finish && b->reset && b->wait && b->save && b->transplant) g_doe_backend = *b;
+    else memset(&g_doe_backend, 0, sizeof(g_doe_backend));
+}
+
 struct AM_Model {
     void* native;
     AM_ModelBackend backend;
@@ -3315,6 +3324,7 @@ static void aml_register_funcs(AML_ExecCtx* ctx);
 static int aml_exec_block(AML_ExecCtx* ctx, int start, int end);
 static void aml_value_clear(AML_Var* value);
 static void aml_clear_return(AML_ExecCtx* ctx);
+static void aml_doe_close(AML_ExecCtx *ctx);
 static int am_spawn_join_owner(uint64_t owner);
 
 // Code and mutable values outlive the launching frame. Source origins remain
@@ -3374,6 +3384,7 @@ static void* am_spawn_thread_fn(void* data) {
         set_error(ctx, "worker persistent snapshot allocation failed");
     if (!ctx->error[0]) aml_exec_block(ctx, arg->start, arg->end);
     am_spawn_context_drain(ctx);
+    aml_doe_close(ctx);
     // The return expression owns a reference. Transfer it before the context
     // and its TLS persistent store are destroyed; no mutable parent is shared.
     AML_Var result = {0};
@@ -4110,6 +4121,22 @@ static int aml_tokenizer_function(const char* name) {
            !strcasecmp(name, "tokenizer_identity");
 }
 
+typedef enum { DOE_OPEN, DOE_CLOSE, DOE_ENCODE, DOE_PROMPT, DOE_LOGITS, DOE_CHOOSE,
+               DOE_FINISH, DOE_RESET, DOE_WAIT, DOE_SAVE, DOE_TRANSPLANT } AML_DoeId;
+typedef struct { const char *name; AML_DoeId id; int arity; } AML_DoeOp;
+
+static const AML_DoeOp *aml_doe_operation(const char *name) {
+    static const AML_DoeOp ops[] = {
+        {"doe_open", DOE_OPEN, 3}, {"doe_close", DOE_CLOSE, 0}, {"doe_encode", DOE_ENCODE, 1},
+        {"doe_prompt", DOE_PROMPT, 1}, {"doe_logits", DOE_LOGITS, 0}, {"doe_choose", DOE_CHOOSE, 1},
+        {"doe_finish", DOE_FINISH, 1}, {"doe_reset", DOE_RESET, 0}, {"doe_wait", DOE_WAIT, 0},
+        {"doe_save", DOE_SAVE, 1}, {"doe_transplant", DOE_TRANSPLANT, 2}
+    };
+    for (size_t i = 0; i < sizeof(ops)/sizeof(ops[0]); i++)
+        if (!strcasecmp(name, ops[i].name)) return &ops[i];
+    return NULL;
+}
+
 static int aml_model_function(const char* name) {
     static const char* names[] = {"model_try_load", "model_ready", "model_error",
         "model_identity", "model_tokenizer_identity", "model_info", "model_encode",
@@ -4332,6 +4359,103 @@ static char* aml_resolve_value_path(AML_ExecCtx* ctx, const AML_Var* value) {
     if (prefix) snprintf(resolved, prefix + 1, "%s/", ctx->base_dir);
     memcpy(resolved + prefix, path->data, (size_t)path->byte_len + 1);
     return resolved;
+}
+
+static void aml_doe_close(AML_ExecCtx *ctx) {
+    if (!ctx->doe) return;
+    const char *error = ctx->doe->backend.close(ctx->doe->native);
+    free(ctx->doe);
+    ctx->doe = NULL;
+    if (error && !ctx->error[0]) set_error(ctx, error);
+}
+
+static int aml_doe_open(AML_ExecCtx *ctx, const AML_Var *args) {
+    if (ctx->doe) { set_error(ctx, "close current DOE session first"); return 1; }
+    if (!g_doe_backend.open) { set_error(ctx, "live DOE backend unavailable"); return 1; }
+    if (args[1].type != AML_TYPE_STRING) { set_error(ctx, "DOE spore must be a path or empty string"); return 1; }
+    int capacity;
+    if (aml_text_integer(ctx, &args[2], &capacity)) return 1;
+    if (capacity < 1 || capacity > AM_MAX_ARRAY_SIZE) { set_error(ctx, "DOE context out of range"); return 1; }
+    char *host = aml_resolve_value_path(ctx, &args[0]);
+    if (!host) return 1;
+    char *spore = NULL;
+    if (args[1].string->len) {
+        spore = aml_resolve_value_path(ctx, &args[1]);
+        if (!spore) { free(host); return 1; }
+    }
+    AM_DoeSession *s = calloc(1, sizeof(*s));
+    const char *error = "DOE session allocation failed";
+    if (s) {
+        s->backend = g_doe_backend;
+        error = s->backend.open(host, spore, capacity, &s->native);
+        if (!error && !s->native) error = "DOE backend returned no session";
+    }
+    free(host);
+    free(spore);
+    if (error) { free(s); set_error(ctx, error); return 1; }
+    ctx->doe = s;
+    return 0;
+}
+
+static int aml_doe_dispatch(AML_ExecCtx *ctx, const char *name, AML_Var *args,
+                            int nargs, AML_Var *out) {
+    const AML_DoeOp *op = aml_doe_operation(name);
+    if (!op || nargs != op->arity) { set_error(ctx, "wrong DOE argument count"); return 1; }
+    out->value = 1;
+    if (op->id == DOE_OPEN) return aml_doe_open(ctx, args);
+    AM_DoeSession *s = ctx->doe;
+    if (!s) { set_error(ctx, "open a DOE session first"); return 1; }
+    const char *error = NULL;
+    switch (op->id) {
+    case DOE_SAVE:
+    case DOE_TRANSPLANT: {
+        int slot = 0;
+        if (op->id == DOE_TRANSPLANT && aml_text_integer(ctx, &args[1], &slot)) return 1;
+        char *path = aml_resolve_value_path(ctx, &args[0]);
+        if (!path) return 1;
+        error = op->id == DOE_SAVE ? s->backend.save(s->native, path)
+                                   : s->backend.transplant(s->native, path, slot);
+        free(path);
+        break;
+    }
+    case DOE_FINISH: {
+        if (args[0].type != AML_TYPE_STRING) { error = "DOE finish needs vote, learn or async"; break; }
+        const char *mode = args[0].string->data;
+        if (!strcmp(mode, "vote")) error = s->backend.finish(s->native, AM_DOE_VOTE);
+        else if (!strcmp(mode, "learn")) error = s->backend.finish(s->native, AM_DOE_LEARN);
+        else if (!strcmp(mode, "async")) error = s->backend.finish(s->native, AM_DOE_ASYNC);
+        else error = "unknown DOE finish mode";
+        break;
+    }
+    case DOE_CHOOSE: {
+        int req, chosen = -1;
+        if (aml_text_integer(ctx, &args[0], &req)) return 1;
+        error = s->backend.choose(s->native, req, &chosen);
+        out->value = (float)chosen;
+        break;
+    }
+    case DOE_ENCODE:
+        if (args[0].type != AML_TYPE_STRING) { error = "DOE encode requires text"; break; }
+        out->type = AML_TYPE_ARRAY;
+        error = s->backend.encode(s->native, args[0].string->data, &out->array);
+        break;
+    case DOE_PROMPT:
+        if (args[0].type != AML_TYPE_ARRAY || args[0].array->rows) { error = "DOE prompt requires a token vector"; break; }
+        out->type = AML_TYPE_ARRAY;
+        error = s->backend.prompt(s->native, args[0].array, &out->array);
+        break;
+    case DOE_LOGITS:
+        out->type = AML_TYPE_ARRAY;
+        error = s->backend.logits(s->native, &out->array);
+        break;
+    case DOE_RESET: error = s->backend.reset(s->native); break;
+    case DOE_WAIT:  error = s->backend.wait(s->native); break;
+    case DOE_CLOSE: aml_doe_close(ctx); return ctx->error[0] != 0;
+    default: error = "unknown DOE operation";
+    }
+    if (!error && out->type == AML_TYPE_ARRAY && !out->array) error = "DOE backend returned no vector";
+    if (error) { set_error(ctx, error); return 1; }
+    return 0;
 }
 
 static int aml_tokenizer_dispatch(AML_ExecCtx* ctx, const char* name,
@@ -6099,6 +6223,7 @@ static int aml_invoke_value(AML_ExecCtx* ctx, const char* name,
     else if (aml_sampling_function(name)) rc = aml_sampling_dispatch(ctx, name, args, nargs, out);
     else if (aml_numerical_function(name)) rc = aml_numerical_dispatch(ctx, name, args, nargs, out);
     else if (aml_tokenizer_function(name)) rc = aml_tokenizer_dispatch(ctx, name, args, nargs, out);
+    else if (aml_doe_operation(name)) rc = aml_doe_dispatch(ctx, name, args, nargs, out);
     else if (aml_model_function(name)) rc = aml_model_dispatch(ctx, name, args, nargs, out);
     else if (aml_array_scalar_function(name)) rc = aml_array_scalar_dispatch(ctx, name, args, nargs, out);
     else if (aml_field_function(name)) rc = aml_field_dispatch(ctx, name, args, nargs, out);
@@ -6205,7 +6330,7 @@ static float expr_primary(AML_Expr* e) {
         if (*e->p == '(') {
             if (e->ctx && (aml_text_function(name) || aml_list_function(name) ||
                            aml_map_function(name) || aml_calendar_function(name) || aml_scalar_intrinsic_function(name) ||
-                           aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) || aml_model_function(name) || aml_record_function(name) || aml_transport_function(name) ||
+                           aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) || aml_model_function(name) || aml_doe_operation(name) || aml_record_function(name) || aml_transport_function(name) ||
                            aml_array_scalar_function(name) || aml_field_function(name) ||
                            aml_value_function(e->ctx, name))) {
                 AML_Var result = {0};
@@ -6468,7 +6593,7 @@ static int aml_eval_value(AML_ExecCtx* ctx, const char* text, AML_Var* out) {
         }
         if (*p == '(' && (aml_text_function(name) || aml_list_function(name) ||
                           aml_map_function(name) || aml_calendar_function(name) || aml_scalar_intrinsic_function(name) ||
-                          aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) || aml_model_function(name) || aml_record_function(name) || aml_transport_function(name) ||
+                          aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) || aml_model_function(name) || aml_doe_operation(name) || aml_record_function(name) || aml_transport_function(name) ||
                           aml_array_scalar_function(name) || aml_field_function(name) ||
                           aml_value_function(ctx, name))) {
             const char* close = aml_value_close(p);
@@ -8185,6 +8310,7 @@ static int aml_reserved_function(const char* name) {
         "text_hash_sha256", "file_hash_sha256", "file_append_line", "process_run",
         "file_size", "file_read_slice", "dir_claim", "exp", "log", "field_project", "field_normalize", "field_dot"
     };
+    if (aml_doe_operation(name)) return 1;
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (strcasecmp(name, names[i]) == 0) return 1;
     return 0;
@@ -9939,7 +10065,7 @@ static int aml_exec_line_body(AML_ExecCtx* ctx, int idx) {
              !strcasecmp(name, "sqrt") || !strcasecmp(name, "clamp") ||
              aml_array_function(name) ||
              aml_map_function(name) || aml_calendar_function(name) || aml_scalar_intrinsic_function(name) ||
-             aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) || aml_model_function(name) || aml_record_function(name) || aml_transport_function(name) ||
+             aml_sampling_function(name) || aml_numerical_function(name) || aml_tokenizer_function(name) || aml_model_function(name) || aml_doe_operation(name) || aml_record_function(name) || aml_transport_function(name) ||
              aml_array_scalar_function(name) || aml_field_function(name))) {
             AML_Var value = {0};
             aml_eval_value(ctx, text, &value);
@@ -10105,6 +10231,7 @@ int am_exec(const char* script) {
 #ifndef AM_ASYNC_DISABLED
     am_spawn_context_drain(&ctx);
 #endif
+    aml_doe_close(&ctx);
     if (persistent_save(&ctx.globals) && !ctx.error[0])
         set_error(&ctx, "persistent globals allocation failed");
     symtab_clear_arrays(&ctx.globals);
@@ -10192,6 +10319,7 @@ int am_program_close(void* handle) {
 #ifndef AM_ASYNC_DISABLED
     am_spawn_context_drain(&p->ctx);
 #endif
+    aml_doe_close(&p->ctx);
     if (persistent_save(&p->ctx.globals) && !p->ctx.error[0])
         set_error(&p->ctx, "persistent globals allocation failed");
     symtab_clear_arrays(&p->ctx.globals);
@@ -10704,6 +10832,7 @@ int am_exec_compiled(void* handle) {
 #ifndef AM_ASYNC_DISABLED
     am_spawn_context_drain(&ctx);
 #endif
+    aml_doe_close(&ctx);
     if (persistent_save(&ctx.globals) && !ctx.error[0])
         set_error(&ctx, "persistent globals allocation failed");
     symtab_clear_arrays(&ctx.globals);

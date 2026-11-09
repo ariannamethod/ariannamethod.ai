@@ -445,10 +445,14 @@ static int emit_c(Parsed *p, FILE *fp, const char *source_path) {
     fprintf(fp, "extern void am_use_notorch(void);\n");
     fprintf(fp, "#endif\n");
     total_lines += 3;
+    fprintf(fp, "#if defined(AML_LINK_DOE)\nextern void am_use_notorch_doe(void);\n#endif\n");
+    total_lines += 3;
     if (p->n_directives == 0) {
         fprintf(fp, "#if defined(AML_LINK_NOTORCH) || defined(AML_LINK_NOTORCH_SAMPLING)\n");
         fprintf(fp, "__attribute__((constructor)) static void aml__notorch_init(void) {\n");
-        fprintf(fp, "    am_use_notorch();\n}\n#endif\n");
+        fprintf(fp, "    am_use_notorch();\n");
+        fprintf(fp, "#ifdef AML_LINK_DOE\n    am_use_notorch_doe();\n#endif\n}\n#endif\n");
+        total_lines += 3;
         total_lines += 5;
     }
 
@@ -475,6 +479,8 @@ static int emit_c(Parsed *p, FILE *fp, const char *source_path) {
         fprintf(fp, "#if defined(AML_LINK_NOTORCH) || defined(AML_LINK_NOTORCH_SAMPLING)\n");
         fprintf(fp, "    am_use_notorch();\n");
         fprintf(fp, "#endif\n");
+        fprintf(fp, "#ifdef AML_LINK_DOE\n    am_use_notorch_doe();\n#endif\n");
+        total_lines += 3;
         fprintf(fp, "    int aml__rc = am_exec_source(\n");
         total_lines += 10;
         for (int i = 0; i < p->n_directives; i++) {
@@ -723,9 +729,14 @@ int main(int argc, char **argv) {
     snprintf(libbridge,  sizeof(libbridge),  "%s/lib/libaml_notorch.a", PFX);
     snprintf(inc_dir,    sizeof(inc_dir),    "%s/include",          PFX);
 
+    char libdoe[1024], libharness[1024];
+    snprintf(libdoe, sizeof(libdoe), "%s/lib/libaml_doe.a", PFX);
+    snprintf(libharness, sizeof(libharness), "%s/lib/libnotorch_harness.a", PFX);
+
     int have_aml     = !no_accel && file_exists(libaml);
     int have_notorch = !no_accel && file_exists(libnotorch);
     int have_bridge = have_aml && have_notorch && file_exists(libbridge);
+    int have_doe = have_bridge && file_exists(libdoe) && file_exists(libharness);
     int use_accel = !no_accel && !scalar;
     if (p.n_directives > 0 && !have_aml) {
         fprintf(stderr, "amlc: runtime program needs %s; set AML_PREFIX to its installation\n", libaml);
@@ -748,6 +759,8 @@ int main(int argc, char **argv) {
                      inc_dir, src_dir);
     if (have_bridge)
         aml_appendf(cmd, sizeof(cmd), &n, " -DAML_LINK_NOTORCH");
+    if (have_doe)
+        aml_appendf(cmd, sizeof(cmd), &n, " -DAML_LINK_DOE");
 
 #if defined(__APPLE__)
     if (use_accel) {
@@ -762,10 +775,14 @@ int main(int argc, char **argv) {
 
     aml_appendf(cmd, sizeof(cmd), &n, " '%s' -o '%s'", cpath, outfile);
 
+    if (have_doe)
+        aml_appendf(cmd, sizeof(cmd), &n, " '%s'", libdoe);
     if (have_bridge)
         aml_appendf(cmd, sizeof(cmd), &n, " '%s'", libbridge);
     if (have_aml)
         aml_appendf(cmd, sizeof(cmd), &n, " '%s'", libaml);
+    if (have_doe)
+        aml_appendf(cmd, sizeof(cmd), &n, " '%s'", libharness);
     if (have_notorch)
         aml_appendf(cmd, sizeof(cmd), &n, " '%s'", libnotorch);
 
@@ -785,7 +802,8 @@ int main(int argc, char **argv) {
     if (no_accel) {
         fprintf(stderr, "amlc: building with --no-accel (pure scalar C)\n");
     } else {
-        fprintf(stderr, "amlc: linking%s%s%s%s\n",
+        fprintf(stderr, "amlc: linking%s%s%s%s%s\n",
+                have_doe ? " libaml_doe/libnotorch_harness" : "",
                 have_bridge ? " libaml_notorch" : "",
                 have_aml     ? " libaml"     : "",
                 have_notorch ? " libnotorch" : "",
