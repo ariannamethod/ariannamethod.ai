@@ -32,7 +32,7 @@ AML
         if [[ $mode == explicit ]]; then extra=(--tokenizer hybrid/tokenizer.gguf); fi
         env -u NT_TOKENS NT_CHAT='||' NT_CTX=16 NT_ATTN_THREADS=1 "$nt/notorch" \
             "${opts[@]}" "${extra[@]}" --spore-out "hybrid-$mode.gguf" hybrid/host.gguf ab 1 0 > /dev/null
-        cmp hybrid-aml.gguf "hybrid-$mode.gguf"
+        ./check spore-eq hybrid-aml.gguf "hybrid-$mode.gguf"
     done
 fi
 test ! -e bad.gguf

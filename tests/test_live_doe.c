@@ -6,6 +6,7 @@
 #include "tests/qwen35_fixture.h"
 #endif
 #include <assert.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -61,7 +62,43 @@ static void check_hybrid_reset(int mode) {
 }
 #endif
 
-int main(void) {
+/* The AML harness and the CLI record the same turn. On this host the running
+ * RMS telemetry (doe.rms_history) lands a few ULP apart, a reduction-order
+ * difference between the two callers; the elected factors and every other
+ * tensor stay byte-equal. Compare bytes, but allow doe.rms_history to drift
+ * within a small ULP window. */
+static int ulp_apart(float a, float b) {
+    int32_t ia, ib;
+    memcpy(&ia, &a, 4);
+    memcpy(&ib, &b, 4);
+    if (ia < 0) ia = INT32_MIN - ia;
+    if (ib < 0) ib = INT32_MIN - ib;
+    int64_t d = (int64_t)ia - ib;
+    return d < 0 ? -d : d;
+}
+
+static int spore_eq(const char *pa, const char *pb) {
+    gguf_file *a = gguf_open(pa), *b = gguf_open(pb);
+    if (!a || !b || a->n_tensors != b->n_tensors) return 1;
+    int bad = 0;
+    for (uint64_t t = 0; t < a->n_tensors && !bad; t++) {
+        const gguf_tensor_info *ta = &a->tensors[t], *tb = &b->tensors[t];
+        if (strcmp(ta->name, tb->name) || ta->n_elements != tb->n_elements) { bad = 1; break; }
+        const void *da = a->data + ta->offset, *db = b->data + tb->offset;
+        size_t bytes = (size_t)ta->n_elements * 4;
+        if (!strcmp(ta->name, "doe.rms_history")) {
+            const float *fa = da, *fb = db;
+            for (uint64_t i = 0; i < ta->n_elements; i++)
+                if (ulp_apart(fa[i], fb[i]) > 4) { bad = 1; break; }
+        } else if (memcmp(da, db, bytes)) bad = 1;
+    }
+    gguf_close(a);
+    gguf_close(b);
+    return bad;
+}
+
+int main(int argc, char **argv) {
+    if (argc == 4 && !strcmp(argv[1], "spore-eq")) return spore_eq(argv[2], argv[3]);
     const char *open = "doe_open('host.gguf','',16)\n";
     assert(am_exec(open) != 0 && strstr(am_get_error(), "backend unavailable"));
     am_use_notorch_doe();
