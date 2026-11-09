@@ -3,13 +3,26 @@
 #include "ariannamethod.h"
 #include "harness/archs.h"
 #include "harness/experts.h"
-#include "examples/bpe.h"
+#include "harness/tokenizer.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
+typedef int (*DoeForward)(void *, kv_cache *, const int *, int, int, float *,
+                          nt_residual_fn, nt_residual_fn, void *);
+
+static DoeForward expert_forward(const nt_arch *arch) {
+#ifdef NT_DOE_DECODER_API
+    return arch && arch->doe ? arch->doe->forward : NULL;
+#else
+    return arch == &nt_arch_llama ? nt_llama_forward_hooks : NULL;
+#endif
+}
+
 typedef struct {
     gguf_file *host;
+    const nt_arch *arch;
+    DoeForward forward;
     void *model;
     bpe_tokenizer *tok;
     nt_dims dims;
@@ -30,9 +43,10 @@ static const char *end_session(void *ptr) {
     DoeSession *s = ptr;
     const char *error = await(s);
     nt_experts_free(s->experts);
-    kv_free(s->kv);
+    if (s->kv && s->arch->kv_free) s->arch->kv_free(s->model, s->kv);
+    else kv_free(s->kv);
     bpe_free(s->tok);
-    if (s->model) nt_arch_llama.free(s->model);
+    if (s->model) s->arch->free(s->model);
     if (s->host) gguf_close(s->host);
     free(s->ids);
     free(s->logits);
@@ -45,19 +59,19 @@ static const char *start_session(const char *path, const char *spore, int capaci
     if (!s) return "DOE session allocation failed";
     const char *error = "DOE host path exceeds the GGUF reader limit";
     if (strlen(path) >= sizeof(s->host->path)) goto fail;
-    error = "DOE needs a readable dense llama-family GGUF";
+    error = "DOE needs a GGUF with native expert hooks";
     s->host = gguf_open(path);
-    if (!s->host || nt_pick_arch(s->host->arch) != &nt_arch_llama) goto fail;
+    if (!s->host) goto fail;
+    s->arch = nt_pick_arch(s->host->arch);
+    s->forward = expert_forward(s->arch);
+    if (!s->forward) goto fail;
     error = "DOE context exceeds the host context";
     if (s->host->ctx_len > 0 && capacity > s->host->ctx_len) goto fail;
     error = "DOE model load failed";
-    s->model = nt_arch_llama.load(s->host, &s->dims);
+    s->model = s->arch->load(s->host, &s->dims);
     if (!s->model || s->dims.vocab < 1 || s->dims.vocab > AM_MAX_ARRAY_SIZE) goto fail;
-    s->tok = bpe_load(path);
-    error = "DOE tokenizer vocabulary mismatch";
-    if (s->tok && bpe_n_vocab(s->tok) != s->dims.vocab) goto fail;
-    const gguf_kv *eos = gguf_get_kv(s->host, "tokenizer.ggml.eos_token_id");
-    s->eos = eos ? (int)eos->val.u32 : -1;
+    error = nt_model_tokenizer_open(s->host, path, s->dims.vocab, NULL, &s->tok, &s->eos);
+    if (error) goto fail;
     error = "DOE expert state or host fingerprint rejected";
     s->experts = nt_experts_open(s->host, spore, NULL);
     if (!s->experts) goto fail;
@@ -65,7 +79,8 @@ static const char *start_session(const char *path, const char *spore, int capaci
     s->capacity = capacity;
     s->ids = malloc(((size_t)capacity+1) * sizeof(*s->ids));
     s->logits = malloc((size_t)s->dims.vocab * sizeof(*s->logits));
-    s->kv = kv_new(s->dims.n_layers, capacity, s->dims.kv_dim);
+    s->kv = s->arch->kv_new ? s->arch->kv_new(s->model, capacity)
+                            : kv_new(s->dims.n_layers, capacity, s->dims.kv_dim);
     if (!s->ids || !s->logits || !s->kv) goto fail;
     *out = s;
     return NULL;
@@ -88,7 +103,7 @@ static const char *encode(void *ptr, const char *text, AM_Array **out) {
 static const char *forward(DoeSession *s, const int *ids, int n) {
     while (n > 0) {
         int k = n < NT_PREFILL_CHUNK ? n : NT_PREFILL_CHUNK;
-        int rc = nt_llama_forward_hooks(s->model, s->kv, ids, k, s->pos,
+        int rc = s->forward(s->model, s->kv, ids, k, s->pos,
             n == k ? s->logits : NULL, nt_experts_attend, nt_experts_observe, s->experts);
         if (rc != NT_OK) return nt_strerror(rc);
         s->pos += k;
@@ -129,9 +144,11 @@ static const char *choose(void *ptr, int request, int *chosen) {
     DoeSession *s = ptr;
     if (!s->active || s->stopped) return "DOE choice requires an active, unstopped turn";
     if (request < -1 || request >= s->dims.vocab) return "DOE choice outside vocabulary";
-    int best = sample(s->logits, s->dims.vocab, 0);
+    int best = nt_sample_model_token(s->logits, s->dims.vocab, s->tok, 0);
     int id = request == -1 ? best : request;
-    s->stopped = s->tok ? id == s->eos || bpe_is_eog(s->tok, id) : id <= 2;
+    if (s->tok) s->stopped = id == s->eos || bpe_is_eog(s->tok, id);
+    else if (s->arch == &nt_arch_llama) s->stopped = id <= 2; // Historical pretokenized session.
+    else s->stopped = id == s->eos;
     if (!s->stopped && s->pos == s->capacity) return "DOE choice exceeds available context";
     nt_experts_choice(s->experts, s->logits[best], s->logits[id]);
     *chosen = id;
@@ -151,7 +168,7 @@ static const char *finish(void *ptr, AM_DoeMode mode) {
 static const char *reset(void *ptr) {
     DoeSession *s = ptr;
     if (s->active) return "finish the active DOE turn before resetting KV";
-    s->pos = 0; // Dense attention reads only the prefix below its write position.
+    s->pos = 0; // Qwen3.5 clears its recurrent state when the next forward starts at zero.
     return NULL;
 }
 

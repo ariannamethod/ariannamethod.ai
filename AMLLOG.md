@@ -12,6 +12,15 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-11-09 — Qwen3.5 expert sessions through the NoTorch decoder
+
+The optional adapter uses NoTorch’s decoder hooks, cache and model tokenizer.
+The language and C registration table keep the original three-argument open.
+The integration fixture loads a model and its adjacent tokenizer, learns and
+saves a spore, then compares every reset logit with a fresh session. The
+installed compiler opens the model relative to the AML source from another
+working directory.
+
 ## 2026-11-09 — an AML program carries a living parliament between turns
 
 v5.16.0. `aml-harness` binds a program directly to the dense CPU Harness in
