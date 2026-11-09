@@ -12,6 +12,66 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-11-09 — an AML program carries a living parliament between turns
+
+v5.16.0. `aml-harness` binds a program directly to the dense CPU Harness in
+[NoTorch 5f40873](https://github.com/ariannamethod/notorch/commit/5f408730544f90e248915b6456252a72423b2068).
+One execution context owns a mutable parliament, KV and pending consolidation.
+AML chooses each observed token and when a turn ends. A worker applies Oja and
+lifecycle on `doe_finish('async')`. Completing the next prompt's forward,
+saving a GGUF spore or releasing the session respects that handoff. A fresh
+context can restore the spore and transplant the A/B of a matching living
+seat. The adapter uses the existing Harness hooks. Ordinary AML programs still
+build with the core archive. [Language and C interface](docs/LIVE_DOE.md).
+
+**Lineage.** Canonical DOE exposes the living field through its REPL and
+streaming HTTP server. Its chat and HTTP loops call the Oja accumulator flush
+directly on completion. We also ran the canonical C binary on the 360M host
+below with `--train 1 --max-new 1 --top-k 1 --temp 0`. Its REPL reported
+256 living experts (eight per layer, rank 16). It wrote
+`doe_mycelium/spore_a828d74975de44f0_s1.bin`. A second process reported
+restoring that fingerprint at step 1. The Harness uses its own host-bound
+GGUF spore format and, on this body, four rank-4 founders on layer 16.
+[Canonical Oja](https://github.com/ariannamethod/doe/blob/103b7b1/doe.c#L3069)
+and [canonical mycelium](https://github.com/ariannamethod/doe/blob/103b7b1/doe.c#L3279).
+
+**Measured in one AML process.** SmolLM2-360M-Instruct Q4_K_M on Linux x86-64,
+one pinned core, CPU packed kernels, GCC 14.2, no BLAS. The program reproduced
+the key and bell parent spores from NoTorch PR 193 byte for byte. Each
+parent then had two descendants, one consolidating asynchronously and one
+voting. All four received the same ten unrelated prompts and the same observed
+newline after each. Every probe had a fresh KV and a fresh copy of its
+saved parliament. Probe 0 was “Every night the lighthouse keeper carries a”.
+The table subtracts the bell-history log odds of key over bell from the
+key-history log odds on that same probe.
+
+| Intervening turns | Async learning | Voting |
+| ---: | ---: | ---: |
+| 0 | +0.487766 | +0.487766 |
+| 1 | −0.103618 | +0.221848 |
+| 5 | +0.155783 | −0.072775 |
+| 10 | +0.183092 | +0.344975 |
+
+At turn 10 all four branches had completed eleven total turns and 111
+elections. In both voting branches each A/B tensor was byte-identical to
+its parent and all sixteen RMS-history entries differed. In both learning
+branches 15,360 of 23,040 floats in each A/B tensor differed from the parent.
+Transplanting key seat 3 into the contemporary bell recipient shifted the
+primary margin by +0.287450 at exposure, −0.235730 after one distractor,
++0.275196 after five and +0.197227 after ten. At turn 10 the two parents'
+contrast on the harbor paraphrase was −0.138717 with learning and +0.258206
+with voting. [102 measured probe/recipient combinations](examples/doe/smollm2-360m-retention.tsv)
+and [the runnable AML protocol](examples/doe/retention.aml).
+
+**Gates.** The ordinary CLI and AML produced byte-identical spores on packed
+Qwen2 fixtures, including restart, a two-turn KV and multiple chosen tokens.
+`make test-live-doe` covers native, interpreted, bytecode, resumable,
+spawned and `amlc --scalar` paths, failed turns and unavailable backends.
+Core (550/550), compiler, expressions, records, imports, workers, transport
+and the existing parliament value gates passed. Replacing the asynchronous
+update with a vote-only finish made the CLI spore comparison fail. Two 360M
+runs reproduced all fourteen GGUFs and the four result tables byte for byte.
+
 ## 2026-11-09 — a name is claimed by one hand
 
 A journal operator claimed its journal by running `/bin/mkdir` through

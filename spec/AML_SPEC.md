@@ -436,6 +436,18 @@ belong to AML; the callbacks operate on caller-owned numeric buffers without a
 global tape. [PARLIAMENT_VALUES.md](../docs/PARLIAMENT_VALUES.md) defines bounds,
 packed layouts and the canonical numerical contracts.
 
+Live DOE operations open one mutable session per execution context with
+`doe_open(host, spore, capacity)`. `doe_prompt(ids)`, `doe_logits()` and
+`doe_encode(text)` return owned vectors. `doe_choose(id)` returns the observed
+token ID. `doe_finish(mode)` commits one turn after at least one choice.
+In `async` mode the worker owns the state until the next prompt, wait, save,
+transplant or close. `doe_reset()` clears the logical KV prefix.
+`doe_save(path)` publishes a completed generation under a new filename.
+`doe_transplant(donor, slot)` transfers the same slot's A/B at a completed
+boundary. A worker starts with its own empty session slot. Each execution
+context releases its session on completion or failure. The full interface
+and backend contract are in [LIVE_DOE.md](../docs/LIVE_DOE.md).
+
 The numeric array queries `len`, `sum`, `rows`, and `cols` take exactly one typed
 argument; `dot` takes exactly two. Parenthesized and returned values retain
 their type. Optional gamma/beta/bias array arguments are evaluated once and

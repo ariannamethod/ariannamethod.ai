@@ -62,6 +62,27 @@ core/aml_notorch.o: core/aml_notorch.c core/ariannamethod.h $(NOTORCH_INCLUDE)/n
 runner/aml-notorch: runner/am.c libaml_notorch.a libaml.a $(NOTORCH_LIB)
 	$(CC) $(CFLAGS) -DAML_WITH_NOTORCH -Icore runner/am.c libaml_notorch.a libaml.a $(NOTORCH_LIB) -o $@ $(LDFLAGS) $(NOTORCH_LDFLAGS) -lpthread
 
+# Optional live DOE sessions inside AML. NoTorch supplies both archives.
+NOTORCH_HARNESS_LIB ?= $(NOTORCH_ROOT)/libnotorch_harness.a
+.PHONY: harness install-harness test-live-doe
+harness: runner/aml-harness
+
+test-live-doe: harness all
+	bash tests/test_live_doe.sh
+
+core/aml_doe.o: core/aml_doe.c core/ariannamethod.h $(NOTORCH_INCLUDE)/harness/experts.h $(NOTORCH_INCLUDE)/harness/archs.h $(NOTORCH_INCLUDE)/examples/bpe.h
+	$(CC) $(CFLAGS) -Icore -I$(NOTORCH_INCLUDE) -c $< -o $@
+
+libaml_doe.a: core/aml_doe.o
+	ar rcs $@ $^
+
+runner/aml-harness: runner/am.c libaml_doe.a libaml_notorch.a libaml.a $(NOTORCH_HARNESS_LIB) $(NOTORCH_LIB)
+	$(CC) $(CFLAGS) -DAML_WITH_NOTORCH -DAML_WITH_DOE -Icore $^ -o $@ $(LDFLAGS) $(NOTORCH_LDFLAGS) -lpthread
+
+install-harness: install-notorch harness
+	install -m 0755 runner/aml-harness $(PREFIX)/bin/aml-harness
+	install -m 0644 libaml_doe.a $(PREFIX)/lib/libaml_doe.a
+
 # ═══ CUDA backend (optional, requires nvcc + cuBLAS) ═══
 # Build:   make cuda
 # Install: make install-cuda PREFIX=/usr/local
@@ -231,5 +252,5 @@ test-janus-loaders: libaml.a
 
 # ═══ Clean ═══
 clean:
-	rm -f core/*.o core/test_aml core/test_aml_blas libaml.a libaml_notorch.a runner/aml runner/aml-notorch tools/amlc
+	rm -f libaml_doe.a runner/aml-harness core/*.o core/test_aml core/test_aml_blas libaml.a libaml_notorch.a runner/aml runner/aml-notorch tools/amlc
 	rm -f janus/calendar.wasm janus/calendar-bridge janus/libjanus.dylib janus/libjanus.h janus/test_janus_c

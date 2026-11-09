@@ -41,6 +41,9 @@ int main(int argc, char **argv) {
 #ifdef AML_WITH_NOTORCH
     am_use_notorch();
 #endif
+#ifdef AML_WITH_DOE
+    am_use_notorch_doe();
+#endif
     int rc = am_exec_file(argv[1]);
     if (rc != 0)
         fprintf(stderr, "aml: exec failed (rc=%d): %s\n", rc, am_get_error());

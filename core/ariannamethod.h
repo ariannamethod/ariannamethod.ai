@@ -568,6 +568,28 @@ typedef struct {
 #endif
 } AM_Array;
 
+// Optional live, context-owned sessions. Register before execution. Error
+// strings have static lifetime; open publishes ownership only on success.
+// Successful vector callbacks transfer one new AML array; close always drains
+// and destroys its native session, including on failure.
+typedef enum { AM_DOE_VOTE, AM_DOE_LEARN, AM_DOE_ASYNC } AM_DoeMode;
+typedef struct {
+    const char *(*open)(const char *host, const char *spore, int capacity, void **session);
+    const char *(*close)(void *session);
+    const char *(*encode)(void *session, const char *text, AM_Array **ids);
+    const char *(*prompt)(void *session, const AM_Array *ids, AM_Array **logits);
+    const char *(*logits)(void *session, AM_Array **logits);
+    const char *(*choose)(void *session, int token, int *chosen);
+    const char *(*finish)(void *session, AM_DoeMode mode);
+    const char *(*reset)(void *session);
+    const char *(*wait)(void *session);
+    const char *(*save)(void *session, const char *path);
+    const char *(*transplant)(void *session, const char *donor, int slot);
+} AM_DoeBackend;
+typedef struct AM_DoeSession AM_DoeSession;
+void am_set_doe_backend(const AM_DoeBackend *backend);
+void am_use_notorch_doe(void);
+
 // Immutable native inference models. A quiet attempted load is itself an owned
 // value: readiness, its diagnostic and validated metadata never change. Model
 // data and copied callbacks survive aliases, persistent globals and workers.
@@ -710,6 +732,7 @@ typedef struct {
     AM_Record*   return_record;     // owned flat record return value
     int          return_type;       // AML_TYPE_* value tag
     uint64_t     spawn_owner;       // children belong to this execution context
+    AM_DoeSession *doe;             // private to this run, including each spawned worker
 } AML_ExecCtx;
 
 // AM_State field map entry (for reading state in expressions)
