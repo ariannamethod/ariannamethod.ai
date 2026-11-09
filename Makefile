@@ -70,7 +70,7 @@ harness: runner/aml-harness
 test-live-doe: harness all
 	bash tests/test_live_doe.sh
 
-core/aml_doe.o: core/aml_doe.c core/ariannamethod.h $(NOTORCH_INCLUDE)/harness/experts.h $(NOTORCH_INCLUDE)/harness/archs.h $(NOTORCH_INCLUDE)/examples/bpe.h
+core/aml_doe.o: core/aml_doe.c core/ariannamethod.h $(NOTORCH_INCLUDE)/harness/arch.h $(NOTORCH_INCLUDE)/harness/experts.h $(NOTORCH_INCLUDE)/harness/archs.h $(NOTORCH_INCLUDE)/examples/bpe.h
 	$(CC) $(CFLAGS) -Icore -I$(NOTORCH_INCLUDE) -c $< -o $@
 
 libaml_doe.a: core/aml_doe.o

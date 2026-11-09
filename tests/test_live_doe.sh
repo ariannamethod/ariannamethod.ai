@@ -10,7 +10,8 @@ trap 'rm -rf "$work"' EXIT
 make -C "$nt" expert_fixtures notorch
 cd "$work"
 "$nt/expert_fixtures" host.gguf gemma.gguf
-"${CC:-cc}" -O2 -I"$root/core" "$root/tests/test_live_doe.c"     "$root/libaml_doe.a" "$root/libaml.a" "$harness" "$lib" -lm -lpthread "${flags[@]}" -o check
+"${CC:-cc}" -O2 -I"$root/core" -I"$nt" "$root/tests/test_live_doe.c" \
+    "$root/libaml_doe.a" "$root/libaml.a" "$harness" "$lib" -lm -lpthread "${flags[@]}" -o check
 ./check
 test ! -e bad.gguf
 for mode in 1 2; do cmp mode0.gguf "mode$mode.gguf"; done
@@ -60,6 +61,12 @@ cmp chat.gguf chat-cli.gguf
 mkdir -p prefix/lib elsewhere
 cp "$root"/{libaml.a,libaml_notorch.a,libaml_doe.a} "$lib" "$harness" prefix/lib/
 sed "s/worker.gguf/compiled-worker.gguf/g;s/next.gguf/compiled-next.gguf/g" next.aml > compiled.aml
+cat >> compiled.aml <<'AML'
+doe_close()
+doe_open('host.gguf', '', 16, 'tokens.gguf')
+ids = doe_encode('ab')
+assert(ids[0] == 2, 'source-relative tokenizer')
+AML
 AML_PREFIX="$work/prefix" "$root/tools/amlc" compiled.aml --scalar -o "$work/compiled"
 (cd elsewhere && "$work/compiled")
 cmp compiled-worker.gguf next.gguf

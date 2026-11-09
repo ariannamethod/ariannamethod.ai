@@ -12,6 +12,20 @@ shift) get the spec + README update too. When in doubt: it goes here first.
 
 Newest entries on top.
 
+## 2026-11-09 — Qwen3.5 expert sessions with a separate tokenizer
+
+`doe_open` accepts an optional tokenizer GGUF and dispatches through the
+CPU decoder's native expert hooks and cache. OneJev's 248,077-token BPE
+fits its 248,320-row output head. Three-argument callers and the original
+host registration table retain their existing entry points.
+
+The original OneJev and OneJev 1.6 each reproduced the direct NoTorch
+greedy IDs 25 and 198 for `Check this file`. Each asynchronous AML save
+matched that host's native 222,272-byte spore. Both reopened in a fresh
+session. The hybrid fixture compares every reset logit with a restarted
+session in interpreted, compiled and stepped programs; the installed
+compiler also resolves an external tokenizer from a different directory.
+
 ## 2026-11-09 — an AML program carries a living parliament between turns
 
 v5.16.0. `aml-harness` binds a program directly to the dense CPU Harness in

@@ -1,7 +1,8 @@
 # Living DOE sessions in AML
 
-A program opens one parliament on a dense llama-family GGUF through the NoTorch
-CPU Harness. Each execution context owns its host, KV cache, expert state and
+A program opens one parliament through the NoTorch CPU Harness. The native
+decoder supplies its own expert hooks and cache. Qwen3.5 supports both its
+full-attention and recurrent blocks through the [Qwen3.5 decoder interface](https://github.com/ariannamethod/notorch/pull/197). Each execution context owns its host, KV cache, expert state and
 pending consolidation. Functions within that context share the session.
 Independent programs and spawned workers each open their own. A saved spore
 carries expert state across those boundaries. Paths resolve from the source
@@ -9,7 +10,7 @@ file containing the call.
 
 | Expression | Effect |
 | --- | --- |
-| `doe_open(host, spore, capacity)` | Open a host and a context of 1 to 1,048,576 positions, within the declared host limit. Use an empty spore string for new experts. |
+| `doe_open(host, spore, capacity [, tokenizer])` | Open a host and a context of 1 to 1,048,576 positions, within the declared host limit. Use an empty spore string for new experts. The optional fourth argument names a separate tokenizer GGUF. Its declared family must match the host and its vocabulary must fit the output head. |
 | `doe_encode(text)` | Return token IDs from the GGUF tokenizer, including its BOS policy. Pretokenized hosts can take IDs directly. |
 | `doe_prompt(ids)` | Start a turn with a nonempty token vector at the current KV position and return the full next-token logits. |
 | `doe_logits()` | Copy the current full logit vector during an active turn. |

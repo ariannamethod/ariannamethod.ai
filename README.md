@@ -29,7 +29,8 @@ Two core files, with 550 baseline runtime tests and dedicated compiler, module, 
 
 
 With v5.16.0 an AML program can keep a living DOE parliament across turns,
-consolidate in the background and fork from a saved GGUF. [Live DOE sessions](docs/LIVE_DOE.md).
+consolidate in the background and fork from a saved GGUF. A Qwen3.5 host
+can load its separate tokenizer and use the hybrid decoder’s own expert hooks. [Live DOE sessions](docs/LIVE_DOE.md).
 
 **Version history lives in [AMLLOG.md](AMLLOG.md)** — every "What's new" from v4.8.0 to the current release moved there on 2026-10-27; the README keeps the essence.
 

@@ -588,6 +588,9 @@ typedef struct {
 } AM_DoeBackend;
 typedef struct AM_DoeSession AM_DoeSession;
 void am_set_doe_backend(const AM_DoeBackend *backend);
+typedef const char *(*AM_DoeTokenizerOpen)(const char *host, const char *spore, int capacity,
+                                           const char *tokenizer, void **session);
+void am_set_doe_backend_with_tokenizer(const AM_DoeBackend *backend, AM_DoeTokenizerOpen opener);
 void am_use_notorch_doe(void);
 
 // Immutable native inference models. A quiet attempted load is itself an owned

@@ -124,11 +124,17 @@ static AM_ModelBackend g_model_backend;
 
 struct AM_DoeSession { void *native; AM_DoeBackend backend; };
 static AM_DoeBackend g_doe_backend;
+static AM_DoeTokenizerOpen g_doe_tokenizer_open;
 
-void am_set_doe_backend(const AM_DoeBackend *b) {
+void am_set_doe_backend_with_tokenizer(const AM_DoeBackend *b, AM_DoeTokenizerOpen opener) {
     if (b && b->open && b->close && b->encode && b->prompt && b->logits && b->choose &&
         b->finish && b->reset && b->wait && b->save && b->transplant) g_doe_backend = *b;
     else memset(&g_doe_backend, 0, sizeof(g_doe_backend));
+    g_doe_tokenizer_open = g_doe_backend.open ? opener : NULL;
+}
+
+void am_set_doe_backend(const AM_DoeBackend *b) {
+    am_set_doe_backend_with_tokenizer(b, NULL);
 }
 
 struct AM_Model {
@@ -4369,7 +4375,7 @@ static void aml_doe_close(AML_ExecCtx *ctx) {
     if (error && !ctx->error[0]) set_error(ctx, error);
 }
 
-static int aml_doe_open(AML_ExecCtx *ctx, const AML_Var *args) {
+static int aml_doe_open(AML_ExecCtx *ctx, const AML_Var *args, int nargs) {
     if (ctx->doe) { set_error(ctx, "close current DOE session first"); return 1; }
     if (!g_doe_backend.open) { set_error(ctx, "live DOE backend unavailable"); return 1; }
     if (args[1].type != AML_TYPE_STRING) { set_error(ctx, "DOE spore must be a path or empty string"); return 1; }
@@ -4383,15 +4389,23 @@ static int aml_doe_open(AML_ExecCtx *ctx, const AML_Var *args) {
         spore = aml_resolve_value_path(ctx, &args[1]);
         if (!spore) { free(host); return 1; }
     }
+    char *tokenizer = NULL;
+    if (nargs == 4) {
+        if (!g_doe_tokenizer_open) set_error(ctx, "DOE backend does not accept a separate tokenizer");
+        else tokenizer = aml_resolve_value_path(ctx, &args[3]);
+        if (!tokenizer) { free(host); free(spore); return 1; }
+    }
     AM_DoeSession *s = calloc(1, sizeof(*s));
     const char *error = "DOE session allocation failed";
     if (s) {
         s->backend = g_doe_backend;
-        error = s->backend.open(host, spore, capacity, &s->native);
+        error = tokenizer ? g_doe_tokenizer_open(host, spore, capacity, tokenizer, &s->native)
+                          : s->backend.open(host, spore, capacity, &s->native);
         if (!error && !s->native) error = "DOE backend returned no session";
     }
     free(host);
     free(spore);
+    free(tokenizer);
     if (error) { free(s); set_error(ctx, error); return 1; }
     ctx->doe = s;
     return 0;
@@ -4400,9 +4414,9 @@ static int aml_doe_open(AML_ExecCtx *ctx, const AML_Var *args) {
 static int aml_doe_dispatch(AML_ExecCtx *ctx, const char *name, AML_Var *args,
                             int nargs, AML_Var *out) {
     const AML_DoeOp *op = aml_doe_operation(name);
-    if (!op || nargs != op->arity) { set_error(ctx, "wrong DOE argument count"); return 1; }
+    if (!op || (nargs != op->arity && !(op->id == DOE_OPEN && nargs == 4))) { set_error(ctx, "wrong DOE argument count"); return 1; }
     out->value = 1;
-    if (op->id == DOE_OPEN) return aml_doe_open(ctx, args);
+    if (op->id == DOE_OPEN) return aml_doe_open(ctx, args, nargs);
     AM_DoeSession *s = ctx->doe;
     if (!s) { set_error(ctx, "open a DOE session first"); return 1; }
     const char *error = NULL;

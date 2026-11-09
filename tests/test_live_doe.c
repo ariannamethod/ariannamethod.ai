@@ -1,5 +1,10 @@
 // Real packed sessions through the interpreter, bytecode and stepped programs.
 #include "ariannamethod.h"
+#include "gguf.h"
+#include "harness/arch.h"
+#ifdef NT_DOE_DECODER_API
+#include "tests/qwen35_fixture.h"
+#endif
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -19,10 +24,58 @@ static int run(int mode, const char *source) {
     return am_program_close(p);
 }
 
+/* Only the BPE is separate. Its real vocabulary may be smaller than the head. */
+static void write_tokenizer(const char *path, const char *family, int vocab) {
+    const char *tokens[41], *merges[] = {"a b"};
+    char words[41][12];
+    assert(vocab >= 3 && vocab <= 41);
+    for (int i = 0; i < vocab; i++) {
+        snprintf(words[i], sizeof(words[i]), "unused%d", i);
+        tokens[i] = words[i];
+    }
+    tokens[0] = "a"; tokens[1] = "b"; tokens[2] = "ab";
+    gguf_writer *w = gguf_write_open(path);
+    assert(w);
+    gguf_write_kv_str(w, "general.architecture", family);
+    gguf_write_kv_str(w, "tokenizer.ggml.model", "gpt2");
+    gguf_write_kv_str_array(w, "tokenizer.ggml.tokens", tokens, vocab);
+    gguf_write_kv_str_array(w, "tokenizer.ggml.merges", merges, 1);
+    gguf_write_kv_u32(w, "tokenizer.ggml.eos_token_id", (uint32_t)(vocab - 1));
+    assert(gguf_write_close(w) == 0);
+}
+
+#ifdef NT_DOE_DECODER_API
+static void check_hybrid_reset(int mode) {
+    char source[1024];
+    snprintf(source, sizeof(source),
+        "doe_open('hybrid.gguf','',16,'hybrid-tokens.gguf')\n"
+        "doe_prompt(doe_encode('ab'))\ndoe_choose(0)\ndoe_finish('async')\n"
+        "doe_save('hybrid%d.gguf')\ndoe_reset()\n"
+        "reset = doe_prompt([3,4])\ndoe_close()\n"
+        "doe_open('hybrid.gguf','hybrid%d.gguf',16,'hybrid-tokens.gguf')\n"
+        "fresh = doe_prompt([3,4])\nassert(len(fresh)==40,'hybrid head')\n"
+        "i = 0\nwhile i < len(fresh):\n"
+        "    assert(fresh[i]==reset[i],'reset logits match a restarted Qwen3.5')\n"
+        "    i = i + 1\ndoe_close()\n", mode, mode);
+    assert(run(mode, source) == 0);
+}
+#endif
+
 int main(void) {
     const char *open = "doe_open('host.gguf','',16)\n";
     assert(am_exec(open) != 0 && strstr(am_get_error(), "backend unavailable"));
     am_use_notorch_doe();
+#ifdef NT_DOE_DECODER_API
+    assert(fixture("hybrid.gguf", 0) == 0);
+    write_tokenizer("hybrid-tokens.gguf", "qwen35", 8);
+#endif
+    write_tokenizer("tokens.gguf", "qwen2", 8);
+    write_tokenizer("other-family.gguf", "qwen35", 8);
+    write_tokenizer("too-many.gguf", "qwen2", 41);
+    const char *separate = "doe_open('host.gguf','',16,'tokens.gguf')\n"
+        "ids = doe_encode('ab')\nassert(len(ids)==1 and ids[0]==2,'external BPE merge')\n"
+        "full = doe_prompt(ids)\nassert(len(full)==40,'padded output head')\n"
+        "doe_choose(0)\ndoe_choose(7)\ndoe_finish('vote')\ndoe_close()\n";
     const char *bad[] = {
         "doe_open('host.gguf','',16)", "doe_save('bad.gguf')", "doe_choose(-1)",
         "doe_prompt([1.5])", "doe_prompt([40])", "doe_prompt([0-1])",
@@ -33,6 +86,13 @@ int main(void) {
     };
     for (int mode = 0; mode < 3; mode++) {
         char source[1024];
+#ifdef NT_DOE_DECODER_API
+        check_hybrid_reset(mode);
+#endif
+        assert(run(mode, separate) == 0);
+        assert(run(mode, "doe_open('host.gguf','',16,'missing.gguf')") != 0);
+        assert(run(mode, "doe_open('host.gguf','',16,'other-family.gguf')") != 0);
+        assert(run(mode, "doe_open('host.gguf','',16,'too-many.gguf')") != 0);
         snprintf(source, sizeof(source),
             "%slogits = doe_prompt([3,4,5])\nassert(len(logits)==40,'vocab')\n"
             "cached = doe_logits()\nassert(cached[0]==logits[0],'logits snapshot')\n"

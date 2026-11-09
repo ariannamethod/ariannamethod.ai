@@ -437,7 +437,9 @@ global tape. [PARLIAMENT_VALUES.md](../docs/PARLIAMENT_VALUES.md) defines bounds
 packed layouts and the canonical numerical contracts.
 
 Live DOE operations open one mutable session per execution context with
-`doe_open(host, spore, capacity)`. `doe_prompt(ids)`, `doe_logits()` and
+`doe_open(host, spore, capacity)`. An optional fourth text argument selects a
+source-relative tokenizer GGUF. The native adapter supports a padded output
+head and uses the registered decoder’s cache and expert hooks. `doe_prompt(ids)`, `doe_logits()` and
 `doe_encode(text)` return owned vectors. `doe_choose(id)` returns the observed
 token ID. `doe_finish(mode)` commits one turn after at least one choice.
 In `async` mode the worker owns the state until the next prompt, wait, save,
